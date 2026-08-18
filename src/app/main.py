@@ -24,7 +24,41 @@ async def _check() -> int:
     log.info("check.allowlist", allowed=len(ALLOWED), denied=len(DENIED), auth=len(AUTH))
 
     # LLM marshruti — qaysi vazifa qaysi providerga tushishini deploy paytida ko'rsatadi
-    from app.llm import LLMError, Task, resolve
+    from app.llm import LLMError, Task, effective_provider, resolve
+    from app.llm.claude import detect_claude_auth
+    from app.llm.claude_code import detect_claude_code
+
+    claude_auth = detect_claude_auth(s)
+    claude_cli = detect_claude_code(s)
+    primary = effective_provider(s.llm_provider)
+    log.info(
+        "check.llm_provider",
+        configured=s.llm_provider,
+        effective=primary,
+        claude_auth=claude_auth.source if claude_auth else None,
+        claude_cli=claude_cli.binary if claude_cli else None,
+        claude_cli_logged_in=claude_cli.logged_in if claude_cli else None,
+    )
+    if primary == "claude_code" and not (claude_cli and claude_cli.logged_in):
+        log.error(
+            "check.llm",
+            ok=False,
+            error=(
+                "LLM_PROVIDER=claude_code, lekin `claude` CLI topilmadi yoki login yo'q — "
+                f"{claude_cli.error if claude_cli else 'PATH da claude yo`q'}"
+            ),
+        )
+        ok = False
+    if primary == "claude" and claude_auth is None:
+        log.error(
+            "check.llm",
+            ok=False,
+            error=(
+                "LLM_PROVIDER=claude, lekin kredensial yo'q — ANTHROPIC_API_KEY, "
+                "CLAUDE_CODE_OAUTH_TOKEN (`claude setup-token`) yoki `ant auth login` kerak"
+            ),
+        )
+        ok = False
 
     for task in Task:
         try:
@@ -34,7 +68,7 @@ async def _check() -> int:
             log.error("check.llm", task=str(task), ok=False, error=str(exc))
             ok = False
 
-    if s.llm_provider == "deepseek" and not s.deepseek_api_key:
+    if primary == "deepseek" and not s.deepseek_api_key:
         log.error(
             "check.llm", ok=False, error="LLM_PROVIDER=deepseek, lekin DEEPSEEK_API_KEY bo'sh"
         )

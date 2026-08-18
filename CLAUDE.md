@@ -1,7 +1,7 @@
 # CLAUDE.md — tg-ai-analyzer
 
 Telegram chat tahlilchi AI agent. Python 3.12, Telethon (MTProto) + aiogram
-(Bot API) + Gemini + Postgres/pgvector.
+(Bot API) + Claude/Gemini/DeepSeek + Postgres/pgvector.
 
 ## Buyruqlar
 
@@ -64,7 +64,7 @@ bu testlarni o'chirish/yumshatish taqiqlanadi.
 - **`agent_actions` append-only** — Postgres trigger UPDATE/DELETE ni to'sadi.
   Faqat `status`, `confirmed_at`, `result_msg_id`, `error` o'zgaradi.
 
-## LLM qatlami — Gemini + DeepSeek
+## LLM qatlami — Claude + Gemini + DeepSeek
 
 Ilova kodi **hech qachon** provider SDK'siga to'g'ridan-to'g'ri murojaat
 qilmaydi. Faqat `app.llm.LLM` fasadi orqali:
@@ -77,18 +77,40 @@ result = await LLM().chat(Task.SEARCH, [Msg.user("...")], json_mode=True)
 Model tanlash **vazifa darajasida** (`Task`), model nomi darajasida emas.
 Yangi kodda model nomini qattiq yozmang — `Task` ni bering, router hal qiladi.
 
-| `Task` | Gemini | DeepSeek |
-|---|---|---|
-| `ROUTE` | `gemini-2.5-flash-lite` | `deepseek-chat` |
-| `SEARCH` | `gemini-2.5-flash` | `deepseek-chat` |
-| `TOOLS` | `gemini-2.5-flash` | `deepseek-chat` |
-| `DEEP` | `gemini-2.5-pro` | `deepseek-reasoner` |
-| `EMBED` | `gemini-embedding-001` | ❌ yo'q |
-| `IMAGE` | `gemini-2.5-flash-image` | ❌ yo'q |
+| `Task` | Claude | Gemini | DeepSeek |
+|---|---|---|---|
+| `ROUTE` | `claude-haiku-4-5` | `gemini-2.5-flash-lite` | `deepseek-chat` |
+| `SEARCH` | `claude-opus-5` | `gemini-2.5-flash` | `deepseek-chat` |
+| `TOOLS` | `claude-opus-5` | `gemini-2.5-flash` | `deepseek-chat` |
+| `DEEP` | `claude-opus-5` | `gemini-2.5-pro` | `deepseek-reasoner` |
+| `EMBED` | ❌ yo'q | `gemini-embedding-001` | ❌ yo'q |
+| `IMAGE` | ❌ yo'q | `gemini-2.5-flash-image` | ❌ yo'q |
+
+**Provider tanlash (`LLM_PROVIDER`):** default `auto`
+(`router.auto_provider`, jarayonda bir marta): (1) API kredensiali bo'lsa
+`claude` — ustuvorlik `ANTHROPIC_API_KEY` → `CLAUDE_CODE_OAUTH_TOKEN`
+(`claude setup-token`) / `ANTHROPIC_AUTH_TOKEN` → profil `~/.config/anthropic`;
+(2) `claude` CLI o'rnatilgan va login qilingan bo'lsa `claude_code`
+(`claude -p` subprocess, Keychain sessiyasi, `CLAUDE_CODE_AUTO=false` bilan
+o'chiriladi); (3) aks holda `gemini`. Secret log'ga tushmaydi, faqat manba nomi.
+
+`claude_code` xavfsizlik bayroqlari (`claude_code.build_argv`) o'zgarmas:
+`--tools ""` (built-in tool'lar o'chiq), `--setting-sources ""`,
+`--no-session-persistence`, neytral cwd. Bu bayroqlarni olib tashlash = server
+fayl tizimini LLM'ga ochish. `capabilities()` da TOOLS yo'q — rost.
 
 **Imkoniyat tuzoqlari:**
-- DeepSeek'da **embedding ham, rasm generatsiya ham yo'q** → router avtomat
-  Gemini'ga tushiradi. `GEMINI_API_KEY` har doim kerak.
+- Claude'da ham, DeepSeek'da ham **embedding va rasm generatsiya yo'q** →
+  router avtomat Gemini'ga tushiradi. `GEMINI_API_KEY` har doim kerak.
+- Claude Opus 5 / Sonnet 5 / Opus 4.7+ da `temperature` **rad etiladi** —
+  adapter uni yubormaydi (`_NO_SAMPLING_PREFIXES`). Haiku 4.5 da qoladi.
+- Claude'da alohida "json mode" yo'q — `json_mode=True` system ko'rsatma +
+  fence tozalash orqali. `stop_reason=refusal` xato emas: bo'sh matn +
+  `finish_reason="refusal"`.
+- `claude_code` da **function calling yo'q** (CLI tool'larni o'z siklida
+  bajaradi, `tool_use` qaytarmaydi) → `Task.TOOLS` fallback'ga tushadi.
+  Ko'p-turnli suhbat transkript matni sifatida beriladi; `temperature`/
+  `max_tokens` e'tiborsiz. Docker'da CLI yo'q — token yo'li.
 - `deepseek-reasoner` da **function calling yo'q** → `Task.TOOLS` unga
   berilsa, fallback ishlaydi.
 - DeepSeek kontekst **64K** (Gemini 1M) → "butun tarixni promptga tashlash"

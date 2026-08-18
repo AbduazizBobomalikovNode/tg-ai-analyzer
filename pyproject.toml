@@ -22,6 +22,7 @@ dependencies = [
     "arq>=0.26",
     # llm
     "google-genai>=0.3",
+    "anthropic>=0.122",
     # crypto / config / misc
     "cryptography>=44.0",
     "pydantic>=2.10",

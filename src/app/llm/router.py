@@ -1,9 +1,10 @@
 """Vazifa → provider/model marshrutizatsiyasi.
 
-Gemini va DeepSeek teng imkoniyatli emas. Router har bir vazifa uchun
+Claude, Gemini va DeepSeek teng imkoniyatli emas. Router har bir vazifa uchun
 kerakli imkoniyatlarni biladi va:
 
-  1. konfiguratsiyadagi providerni tanlaydi,
+  1. konfiguratsiyadagi providerni tanlaydi (`LLM_PROVIDER=auto` bo'lsa —
+     Claude kredensiali bor-yo'qligiga qarab `claude` yoki `gemini`),
   2. u imkoniyatni qo'llab-quvvatlamasa — fallback'ga o'tadi va ogohlantiradi,
   3. fallback ham qila olmasa — aniq xato tashlaydi (jimgina ishlamay qolish yo'q).
 
@@ -54,10 +55,55 @@ TASK_REQUIREMENTS: dict[Task, frozenset[Capability]] = {
     Task.IMAGE: frozenset({Capability.IMAGE_GEN}),
 }
 
-PROVIDERS = ("gemini", "deepseek")
+PROVIDERS = ("claude", "claude_code", "gemini", "deepseek")
+
+# `LLM_PROVIDER=auto` uchun maxsus qiymat
+AUTO = "auto"
 
 
 _instances: dict[str, BaseProvider] = {}
+# `auto` qarori — jarayon davomida bir marta hisoblanadi (kredensial probe arzon,
+# lekin har chaqiruvda takrorlash shart emas). None = hali hisoblanmagan.
+_auto_choice: str | None = None
+
+
+def auto_provider() -> str:
+    """`auto` rejimda haqiqiy provider. Tartib:
+
+      1. `claude`      — API kredensiali bor (ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN / profil)
+      2. `claude_code` — `claude` CLI o'rnatilgan va login qilingan (CLAUDE_CODE_AUTO=true)
+      3. `gemini`      — hech biri yo'q
+
+    Claude'da embedding/rasm yo'q — ular baribir fallback (`gemini`) orqali ketadi.
+    """
+    global _auto_choice
+    if _auto_choice is None:
+        from app.llm.claude import detect_claude_auth
+        from app.llm.claude_code import detect_claude_code
+
+        s = get_settings()
+        auth = detect_claude_auth(s)
+        cli = detect_claude_code(s) if (auth is None and s.claude_code_auto) else None
+        if auth:
+            _auto_choice = "claude"
+        elif cli and cli.logged_in:
+            _auto_choice = "claude_code"
+        else:
+            _auto_choice = "gemini"
+        log.info(
+            "llm.auto_provider",
+            chosen=_auto_choice,
+            claude_auth=auth.source if auth else None,
+            claude_cli=(cli.binary if cli else None),
+            claude_cli_logged_in=(cli.logged_in if cli else None),
+        )
+    return _auto_choice
+
+
+def effective_provider(name: str) -> str:
+    """Konfiguratsiya qiymatini haqiqiy provider nomiga aylantiradi (`auto` ni hal qiladi)."""
+    name = name.strip().lower()
+    return auto_provider() if name == AUTO else name
 
 
 def get_provider(name: str) -> BaseProvider:
@@ -65,10 +111,18 @@ def get_provider(name: str) -> BaseProvider:
     if name in _instances:
         return _instances[name]
 
-    if name == "gemini":
+    if name == "claude":
+        from app.llm.claude import ClaudeProvider
+
+        provider: BaseProvider = ClaudeProvider()
+    elif name == "claude_code":
+        from app.llm.claude_code import ClaudeCodeProvider
+
+        provider = ClaudeCodeProvider()
+    elif name == "gemini":
         from app.llm.gemini import GeminiProvider
 
-        provider: BaseProvider = GeminiProvider()
+        provider = GeminiProvider()
     elif name == "deepseek":
         from app.llm.deepseek import DeepSeekProvider
 
@@ -82,6 +136,16 @@ def get_provider(name: str) -> BaseProvider:
 
 def default_model(provider: str, task: Task) -> str:
     s = get_settings()
+    if provider in ("claude", "claude_code"):
+        return {
+            Task.ROUTE: s.claude_model_router,
+            Task.SEARCH: s.claude_model_fast,
+            Task.TOOLS: s.claude_model_fast,
+            Task.DEEP: s.claude_model_deep,
+            # Claude'da bular yo'q — capability tekshiruvi fallback'ga o'tkazadi
+            Task.EMBED: "",
+            Task.IMAGE: "",
+        }[task]
     if provider == "gemini":
         return {
             Task.ROUTE: s.gemini_model_router,
@@ -119,7 +183,7 @@ def _spec_for(task: Task) -> str:
 def _parse_spec(spec: str, task: Task) -> tuple[str, str]:
     """`provider:model` yoki faqat `provider`."""
     provider, _, model = spec.partition(":")
-    provider = provider.strip().lower()
+    provider = effective_provider(provider)
     model = model.strip()
     if provider not in PROVIDERS:
         raise LLMError("router", f"{task}: noma'lum provider {provider!r}")
@@ -135,7 +199,12 @@ def resolve(task: Task) -> tuple[BaseProvider, str]:
     if spec:
         provider_name, model = _parse_spec(spec, task)
     else:
-        provider_name = s.llm_provider.lower()
+        provider_name = effective_provider(s.llm_provider)
+        if provider_name not in PROVIDERS:
+            raise LLMError(
+                "router",
+                f"LLM_PROVIDER noma'lum: {s.llm_provider!r} (mavjud: auto, {', '.join(PROVIDERS)})",
+            )
         model = default_model(provider_name, task)
 
     if model:
@@ -144,7 +213,9 @@ def resolve(task: Task) -> tuple[BaseProvider, str]:
             return provider, model
 
     # ── fallback ─────────────────────────────────────────────────────────────
-    fb_name = s.llm_fallback_provider.lower()
+    fb_name = effective_provider(s.llm_fallback_provider)
+    if fb_name not in PROVIDERS:
+        raise LLMError("router", f"LLM_FALLBACK_PROVIDER noma'lum: {s.llm_fallback_provider!r}")
     fb_model = default_model(fb_name, task)
     fb = get_provider(fb_name)
 
@@ -211,8 +282,15 @@ class LLM:
         return await provider.generate_image(prompt, model=model)
 
 
+def reset() -> None:
+    """Provider keshini va `auto` qarorini tozalaydi (testlar, qayta konfiguratsiya)."""
+    global _auto_choice
+    _instances.clear()
+    _auto_choice = None
+
+
 async def close_all() -> None:
     """Graceful shutdown — faqat yaratilgan providerlarni yopadi."""
     for provider in list(_instances.values()):
         await provider.aclose()
-    _instances.clear()
+    reset()

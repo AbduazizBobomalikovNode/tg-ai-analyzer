@@ -17,9 +17,12 @@ from app.llm.router import (
     PROVIDERS,
     TASK_REQUIREMENTS,
     Task,
+    auto_provider,
     close_all,
     default_model,
+    effective_provider,
     get_provider,
+    reset,
     resolve,
 )
 
@@ -39,9 +42,12 @@ __all__ = [
     "ToolCall",
     "ToolSpec",
     "Usage",
+    "auto_provider",
     "close_all",
     "default_model",
+    "effective_provider",
     "get_provider",
+    "reset",
     "resolve",
     "sanitize_json_schema",
 ]

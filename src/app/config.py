@@ -42,8 +42,11 @@ class Settings(BaseSettings):
     redis_url: str
 
     # ─── LLM: umumiy ───
-    # Standart provider. Vazifa darajasida `llm_task_*` bilan bekor qilinadi.
-    llm_provider: str = "gemini"
+    # Standart provider: auto | claude | gemini | deepseek.
+    # `auto` — Claude kredensiali (Claude Code / Anthropic login) topilsa
+    # `claude`, aks holda `gemini`. Vazifa darajasida `llm_task_*` bilan
+    # bekor qilinadi.
+    llm_provider: str = "auto"
     # Tanlangan provider vazifani bajara olmasa (masalan DeepSeek'da embedding
     # yo'q) — shu providerga o'tiladi. Gemini'dan boshqasini qo'yish tavsiya
     # etilmaydi: faqat u to'liq imkoniyatli.
@@ -56,6 +59,30 @@ class Settings(BaseSettings):
     llm_task_deep: str = ""
     llm_task_embed: str = ""
     llm_task_image: str = ""
+
+    # ─── Claude / Anthropic ───
+    # Kredensial ustuvorligi (birinchi topilgani ishlatiladi):
+    #   1. ANTHROPIC_API_KEY            — oddiy API kalit
+    #   2. CLAUDE_CODE_OAUTH_TOKEN      — `claude setup-token` chiqargan token
+    #      (Claude Code obunasi), yoki ANTHROPIC_AUTH_TOKEN
+    #   3. diskdagi profil              — `ant auth login` / Claude Code login
+    #      (~/.config/anthropic yoki ANTHROPIC_CONFIG_DIR)
+    # Hech biri yo'q → `auto` rejimda Gemini ishlatiladi.
+    anthropic_api_key: str = ""
+    anthropic_auth_token: str = ""
+    claude_code_oauth_token: str = ""
+    anthropic_base_url: str = ""  # bo'sh = api.anthropic.com
+    claude_model_router: str = "claude-haiku-4-5"  # arzon intent klassifikatsiya
+    claude_model_fast: str = "claude-opus-5"
+    claude_model_deep: str = "claude-opus-5"
+
+    # ─── Claude Code CLI (`claude_code` provider) ───
+    # `claude -p` subprocess — Claude Code'ning o'z login sessiyasidan (Keychain /
+    # ~/.claude) foydalanadi, token nusxalash shart emas. `auto` tartibida API
+    # kredensiali topilmasa va CLI login qilingan bo'lsa tanlanadi.
+    claude_code_auto: bool = True  # False = auto rejimda CLI hisobga olinmaydi
+    claude_code_bin: str = ""  # bo'sh = PATH'dan `claude`
+    claude_code_timeout: int = Field(default=300, ge=10, le=3600)  # soniya, bitta so'rov
 
     # ─── Gemini ───
     gemini_api_key: str = ""

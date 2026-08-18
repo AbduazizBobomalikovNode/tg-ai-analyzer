@@ -45,6 +45,9 @@ services:
     restart: unless-stopped
     volumes:
       - ./data:/app/data
+      # Claude: `ant auth login` profilini konteynerga berish (CLAUDE_CODE_OAUTH_TOKEN
+      # o'rniga). Yoqsangiz .env ga ANTHROPIC_CONFIG_DIR=/anthropic-profile qo'shing.
+      # - ~/.config/anthropic:/anthropic-profile:ro
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -69,6 +72,7 @@ services:
     restart: unless-stopped
     volumes:
       - ./data:/app/data
+      # - ~/.config/anthropic:/anthropic-profile:ro   # bot bilan bir xil
     depends_on:
       migrate:
         condition: service_completed_successfully

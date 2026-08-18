@@ -4,11 +4,15 @@
 ![Telethon](https://img.shields.io/badge/Telethon-MTProto-2CA5E0?logo=telegram&logoColor=white)
 ![aiogram](https://img.shields.io/badge/aiogram-3.x-2CA5E0)
 ![Postgres](https://img.shields.io/badge/Postgres-pgvector-336791?logo=postgresql&logoColor=white)
-![LLM](https://img.shields.io/badge/LLM-Gemini%20%7C%20DeepSeek-8E44AD)
+![LLM](https://img.shields.io/badge/LLM-Claude%20%7C%20Gemini%20%7C%20DeepSeek-8E44AD)
 ![Status](https://img.shields.io/badge/status-WIP%20(stage%200)-orange)
 
 Telegram chatlarini AI orqali tahlil qiluvchi agent. MTProto (akkaunt nomidan
-o'qish/yozish) + Bot API (foydalanuvchi interfeysi) + **Gemini / DeepSeek** (LLM).
+o'qish/yozish) + Bot API (foydalanuvchi interfeysi) + **Claude / Gemini / DeepSeek** (LLM).
+
+LLM uchun alohida API kalit shart emas: **Claude Code obunangiz** bo'lsa
+(`claude setup-token`) shu token bilan ishlaydi; xohlasangiz Gemini yoki
+DeepSeek API kalitini ulaysiz.
 
 ## Texnologiyalar
 
@@ -16,7 +20,7 @@ o'qish/yozish) + Bot API (foydalanuvchi interfeysi) + **Gemini / DeepSeek** (LLM
 |---|---|
 | Til | Python 3.12, asyncio |
 | Telegram | [Telethon](https://github.com/LonamiWebs/Telethon) (MTProto, akkaunt) + [aiogram 3](https://github.com/aiogram/aiogram) (Bot API, UI) |
-| LLM | Gemini (`google-genai`) + DeepSeek (OpenAI-mos) — `Task` bo'yicha router |
+| LLM | Claude (`anthropic` SDK yoki `claude` CLI sessiyasi) + Gemini (`google-genai`) + DeepSeek (OpenAI-mos) — `Task` bo'yicha router |
 | Ma'lumot | PostgreSQL 16 + pgvector, SQLAlchemy 2 (async) + Alembic |
 | Queue | Redis + ARQ (sync, snapshot, embedding, rollup worker'lari) |
 | Web | FastAPI — Mini App auth backend |
@@ -50,7 +54,8 @@ Bu kafolatlar prompt'ga emas, kodga o'rnatilgan. `tests/test_allowlist.py` va
 - Telegram **bot token** — [@BotFather](https://t.me/BotFather)
 - Telegram **API ID / hash** — [my.telegram.org](https://my.telegram.org)
 - **Gemini API key** — majburiy (embedding va rasm faqat Gemini'da)
-- DeepSeek API key — ixtiyoriy
+- Chat/agent uchun bittasi: **Claude Code obunasi** (`claude setup-token`) yoki
+  `ANTHROPIC_API_KEY`, yoki Gemini/DeepSeek kaliti — Claude topilsa u default
 
 ## Ishga tushirish
 
@@ -83,7 +88,9 @@ va izohlar — [`.env.example`](.env.example). Asosiylari:
 | `MASTER_KEY_B64` | Session'larni shifrlash uchun master key. Yo'qolsa session'lar tiklanmaydi |
 | `WEBAPP_BASE_URL` | Mini App uchun HTTPS URL (login kodi faqat shu orqali) |
 | `DATABASE_URL`, `REDIS_URL` | Postgres (asyncpg) va Redis |
-| `LLM_PROVIDER`, `LLM_FALLBACK_PROVIDER` | `gemini` \| `deepseek` |
+| `LLM_PROVIDER`, `LLM_FALLBACK_PROVIDER` | `auto` (default) \| `claude` \| `claude_code` \| `gemini` \| `deepseek`. `auto` = API kredensiali → `claude`; `claude` CLI login → `claude_code`; aks holda `gemini` |
+| `CLAUDE_CODE_AUTO`, `CLAUDE_CODE_BIN` | `claude_code` provider: CLI'ni auto'da hisobga olish / binar yo'li |
+| `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` | Claude kredensiali (birinchisi ustun). Ikkalasi ham bo'lmasa `~/.config/anthropic` profili (`ant auth login`) qidiriladi |
 | `LLM_TASK_*` | Vazifa darajasida provider/model override (`route/search/tools/deep/embed/image`) |
 | `GEMINI_API_KEY`, `DEEPSEEK_API_KEY` | Provider kalitlari |
 | `DEFAULT_WRITE_MODE` | `read_only` \| `write_with_confirm` (default) \| `autonomous` |
@@ -94,13 +101,40 @@ va izohlar — [`.env.example`](.env.example). Asosiylari:
 Ilova kodi provider SDK'siga to'g'ridan-to'g'ri murojaat qilmaydi — faqat
 `app.llm.LLM` fasadi orqali, model tanlash `Task` darajasida:
 
-| `Task` | Gemini | DeepSeek |
-|---|---|---|
-| `ROUTE` | `gemini-2.5-flash-lite` | `deepseek-chat` |
-| `SEARCH` / `TOOLS` | `gemini-2.5-flash` | `deepseek-chat` |
-| `DEEP` | `gemini-2.5-pro` | `deepseek-reasoner` |
-| `EMBED` | `gemini-embedding-001` | — (Gemini'ga fallback) |
-| `IMAGE` | `gemini-2.5-flash-image` | — (Gemini'ga fallback) |
+| `Task` | Claude (`claude` / `claude_code`) | Gemini | DeepSeek |
+|---|---|---|---|
+| `ROUTE` | `claude-haiku-4-5` | `gemini-2.5-flash-lite` | `deepseek-chat` |
+| `SEARCH` | `claude-opus-5` | `gemini-2.5-flash` | `deepseek-chat` |
+| `TOOLS` | `claude-opus-5` (`claude_code`: — fallback) | `gemini-2.5-flash` | `deepseek-chat` |
+| `DEEP` | `claude-opus-5` | `gemini-2.5-pro` | `deepseek-reasoner` |
+| `EMBED` | — (Gemini'ga fallback) | `gemini-embedding-001` | — (Gemini'ga fallback) |
+| `IMAGE` | — (Gemini'ga fallback) | `gemini-2.5-flash-image` | — (Gemini'ga fallback) |
+
+### Claude Code sessiyasidan foydalanish (`claude_code`)
+
+Mashinada `claude` CLI o'rnatilgan va `/login` qilingan bo'lsa — **hech narsa
+sozlash shart emas**: `LLM_PROVIDER=auto` uni topadi va `claude -p` orqali
+Claude Code'ning o'z sessiyasidan foydalanadi (Keychain / `~/.claude`).
+
+- Built-in tool'lar o'chiq (`--tools ""`), settings/hooks/CLAUDE.md yuklanmaydi,
+  sessiya diskka yozilmaydi — bu faqat LLM chaqiruvi.
+- Cheklov: **function calling yo'q** → `Task.TOOLS` (agent sikli) avtomat
+  Gemini'ga tushadi. Chat, qidiruv sintezi, chuqur tahlil, JSON javoblar — Claude'da.
+- Docker'da CLI yo'q — konteynerda quyidagi token yo'li ishlatiladi.
+
+### Claude Code tokeni bilan ishlash (`claude`, Docker uchun)
+
+```bash
+claude setup-token          # brauzerda login → sk-ant-oat01-... chiqadi
+# .env:
+CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
+LLM_PROVIDER=auto           # (default) — Claude topilgani uchun u tanlanadi
+```
+
+`docker compose run --rm bot python -m app.main check` → `check.llm_provider`
+qatorida `effective=claude claude_auth=CLAUDE_CODE_OAUTH_TOKEN` ko'rinishi kerak.
+Token secret'i log'ga tushmaydi. Claude'da embedding/rasm yo'q — bular
+avtomat Gemini'ga ketadi, shuning uchun `GEMINI_API_KEY` baribir kerak.
 
 ## Lokal ishlab chiqish
 
@@ -124,9 +158,11 @@ src/app/
     client.py        guardrail o'rnatilgan Telethon klient
   llm/
     base.py          tiplar, Capability, retry
+    claude.py        anthropic SDK adapter (API key / Claude Code token / profil)
+    claude_code.py   `claude -p` adapter — Claude Code login sessiyasi, tool'siz
     gemini.py        google-genai adapter (chat, tools, embed, image)
     deepseek.py      OpenAI-mos adapter (chat, tools)
-    router.py        Task → provider/model + capability fallback
+    router.py        Task → provider/model + auto tanlov + capability fallback
   db/                SQLAlchemy modellar
   bot/               aiogram — handler, middleware
   web/               FastAPI — Mini App auth backend
@@ -141,7 +177,7 @@ To'liq reja, qarorlar va texnik tahlil: **[PLAN.md](PLAN.md)**
 
 | # | Bosqich | Holat |
 |---|---|---|
-| 0 | Skeleton, DB, guardrail, i18n, LLM qatlami (Gemini+DeepSeek) | ✅ |
+| 0 | Skeleton, DB, guardrail, i18n, LLM qatlami (Claude+Gemini+DeepSeek) | ✅ |
 | 1 | Auth: QR login + Mini App fallback, multi-account | ⬜ |
 | 2 | Ingestion: history sync, metric snapshot | ⬜ |
 | 3 | Hybrid search + inline chat picker | ⬜ |

@@ -123,7 +123,8 @@ class CapabilityError(LLMError):
 
 
 # HTTP status'lar: qayta urinish mantiqiy bo'lganlari
-RETRYABLE_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
+# 529 — Anthropic "overloaded_error"
+RETRYABLE_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504, 529})
 
 
 class BaseProvider(ABC):
