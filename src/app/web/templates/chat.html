@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}{{ t('web.chat.title') }} · {{ t('web.title') }}{% endblock %}
+{% block body_class %}page-chat{% endblock %}
+{% block content %}
+<div class="app" id="app">
+  <!-- chap panel -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-head">
+      <div class="brand small">
+        <span class="brand-logo" aria-hidden="true">✈️</span>
+        <span class="brand-name">{{ t('web.title') }}</span>
+      </div>
+      <button class="icon-btn" id="btn-close-sidebar" aria-label="close">✕</button>
+    </div>
+
+    <section class="block">
+      <label class="block-title" for="account-select">{{ t('web.chat.account') }}</label>
+      <div class="row">
+        <select id="account-select"></select>
+        <a class="btn ghost small" href="/login" title="{{ t('web.chat.add_account') }}">＋</a>
+      </div>
+      <div id="account-warn" class="warn" hidden></div>
+    </section>
+
+    <section class="block grow">
+      <div class="block-title">{{ t('web.chat.dialogs') }}</div>
+      <input id="dialog-search" type="search" placeholder="{{ t('web.chat.search_dialogs') }}" autocomplete="off">
+      <ul id="dialog-list" class="list dialogs">
+        <li class="dialog-item selected" data-peer="0">
+          <span class="dialog-avatar">∅</span>
+          <span class="dialog-body"><span class="dialog-title">{{ t('web.chat.context_none') }}</span></span>
+        </li>
+      </ul>
+    </section>
+
+    <section class="block">
+      <div class="block-title">{{ t('web.chat.conversations') }}</div>
+      <button class="btn ghost full" id="btn-new">{{ t('web.chat.new') }}</button>
+      <ul id="conv-list" class="list convs"></ul>
+    </section>
+
+    <div class="sidebar-foot">
+      <nav class="lang-switch">
+        {% for l in langs %}<a href="?lang={{ l }}" class="{% if l == lang %}active{% endif %}">{{ l|upper }}</a>{% endfor %}
+      </nav>
+      <button class="btn link" id="btn-logout">{{ t('web.chat.logout') }}</button>
+    </div>
+  </aside>
+
+  <!-- asosiy -->
+  <main class="main">
+    <header class="topbar">
+      <button class="icon-btn" id="btn-open-sidebar" aria-label="menu">☰</button>
+      <div class="topbar-title" id="conv-title">{{ t('web.chat.title') }}</div>
+      <div class="topbar-ctx" id="ctx-badge" hidden></div>
+      <button class="icon-btn danger" id="btn-delete" title="{{ t('web.chat.delete') }}" hidden>🗑</button>
+    </header>
+
+    <div class="messages" id="messages">
+      <div class="empty" id="empty-state">{{ t('web.chat.empty_state') }}</div>
+    </div>
+
+    <form class="composer" id="composer">
+      <div class="composer-opts">
+        <label class="opt" id="ctx-limit-wrap">
+          <span id="ctx-limit-label"></span>
+          <input type="range" id="ctx-limit" min="10" max="{{ context_max }}" step="10" value="{{ context_default }}">
+        </label>
+        <label class="opt"><input type="checkbox" id="deep"> {{ t('web.chat.deep') }}</label>
+      </div>
+      <div class="composer-row">
+        <textarea id="input" rows="1" placeholder="{{ t('web.chat.placeholder') }}"></textarea>
+        <button type="submit" class="btn primary" id="btn-send">{{ t('web.chat.send') }}</button>
+      </div>
+    </form>
+  </main>
+</div>
+{% endblock %}
+{% block scripts %}<script src="/static/chat.js"></script>{% endblock %}

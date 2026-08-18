@@ -74,6 +74,27 @@ Tekshiruv:
 docker compose run --rm bot python -m app.main check
 ```
 
+## Web UI — telefon orqali ulash va AI chat
+
+`make up` dan keyin **http://localhost:8080** (prod'da `WEBAPP_BASE_URL`, HTTPS):
+
+1. **`/login`** — telefon raqami → Telegram kod → (bo'lsa) 2FA parol. Kod faqat
+   shu HTTPS sahifada kiritiladi — Telegram chatga yozilgan kod bekor bo'ladi.
+   Session shifrlangan holda saqlanadi, brauzerga imzolangan cookie beriladi.
+2. **`/chat`** — AI chat. Chapda akkaunt va Telegram dialoglar; chatni tanlasangiz
+   oxirgi N ta xabar (slider) `<untrusted_data>` konvertida modelga kontekst
+   bo'lib boradi. Savol: "bu hafta nima muhokama qilindi?", "eng ko'p ko'rilgan
+   post?", "keyingi post uchun 3 g'oya". Suhbatlar saqlanadi (`conversations`).
+   Til: `?lang=uz|ru|en`.
+
+Bu rejimda agent **hech narsa yozmaydi/o'chirmaydi** — faqat o'qish
+(`messages.GetDialogs/GetHistory`), tool'lar 5–6-bosqichda.
+
+API: `POST /api/auth/phone|code|password`, `GET /api/me`,
+`GET /api/accounts/{id}/dialogs`, `POST /api/conversations/{id}/messages`.
+O'zgartiruvchi so'rovlar `X-Requested-With: fetch` header'ini talab qiladi (CSRF).
+`api` servisi **bitta uvicorn worker** — auth oqimlari jarayon xotirasida.
+
 ## Konfiguratsiya
 
 Barcha sozlamalar `.env` orqali (`app/config.py::get_settings()`). To'liq ro'yxat
@@ -94,6 +115,8 @@ va izohlar — [`.env.example`](.env.example). Asosiylari:
 | `LLM_TASK_*` | Vazifa darajasida provider/model override (`route/search/tools/deep/embed/image`) |
 | `GEMINI_API_KEY`, `DEEPSEEK_API_KEY` | Provider kalitlari |
 | `DEFAULT_WRITE_MODE` | `read_only` \| `write_with_confirm` (default) \| `autonomous` |
+| `WEB_SESSION_TTL_HOURS`, `WEB_AUTH_FLOW_TTL_MIN`, `WEB_AUTH_RATE_PER_IP` | Web cookie muddati, login oqimi TTL, IP bo'yicha limit |
+| `WEB_CONTEXT_DEFAULT_MESSAGES`, `WEB_CONTEXT_MAX_MESSAGES` | AI chat kontekstiga beriladigan oxirgi xabarlar soni |
 | `MAX_ACCOUNTS` | Ulanadigan akkauntlar limiti |
 
 ### LLM router
@@ -165,7 +188,13 @@ src/app/
     router.py        Task → provider/model + auto tanlov + capability fallback
   db/                SQLAlchemy modellar
   bot/               aiogram — handler, middleware
-  web/               FastAPI — Mini App auth backend
+  services/
+    auth_flow.py     telefon → kod → 2FA holat mashinasi (auth_window ichida)
+    session_store.py session'ni envelope bilan DB'ga yozish/o'qish
+    accounts.py      login natijasini User/Account'ga bog'lash
+    chat_service.py  AI chat: kontekst <untrusted_data> + LLM fasad + tarix
+  mtproto/pool.py    ulangan akkauntlar klient pool'i (faqat o'qish)
+  web/               FastAPI — /login, /chat sahifalari + /api (cookie auth, CSRF)
   worker/            ARQ — sync, snapshot, embedding, rollup
   i18n/              uz / ru / en
 migrations/          Alembic
@@ -178,7 +207,7 @@ To'liq reja, qarorlar va texnik tahlil: **[PLAN.md](PLAN.md)**
 | # | Bosqich | Holat |
 |---|---|---|
 | 0 | Skeleton, DB, guardrail, i18n, LLM qatlami (Claude+Gemini+DeepSeek) | ✅ |
-| 1 | Auth: QR login + Mini App fallback, multi-account | ⬜ |
+| 1 | Auth: telefon → kod → 2FA (web), multi-account, session encryption; QR login | 🟡 web tayyor, QR ⬜ |
 | 2 | Ingestion: history sync, metric snapshot | ⬜ |
 | 3 | Hybrid search + inline chat picker | ⬜ |
 | 4 | Statistika: rollup, vaqt oynalari | ⬜ |

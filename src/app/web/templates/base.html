@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="{{ lang }}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>{% block title %}{{ t('web.title') }}{% endblock %}</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="{% block body_class %}{% endblock %}">
+  {% block content %}{% endblock %}
+  <script>window.TGAI = {strings: {{ strings_json|safe }}, lang: "{{ lang }}"};</script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

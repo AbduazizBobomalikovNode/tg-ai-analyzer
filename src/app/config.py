@@ -37,6 +37,16 @@ class Settings(BaseSettings):
     master_key_b64: str
     webapp_base_url: str = "https://example.com"
 
+    # ─── Web UI ───
+    web_session_ttl_hours: int = Field(default=24 * 14, ge=1, le=24 * 90)
+    # Auth flow: telefon → kod → 2FA. Bitta oqim shuncha daqiqa yashaydi.
+    web_auth_flow_ttl_min: int = Field(default=10, ge=2, le=30)
+    # Bir IP'dan 10 daqiqada nechta login boshlash mumkin (brute-force/spam)
+    web_auth_rate_per_ip: int = Field(default=5, ge=1, le=100)
+    # AI chatga kontekst sifatida beriladigan oxirgi xabarlar limiti
+    web_context_max_messages: int = Field(default=200, ge=10, le=1000)
+    web_context_default_messages: int = Field(default=50, ge=5, le=1000)
+
     # ─── Infra ───
     database_url: str
     redis_url: str
@@ -120,6 +130,11 @@ class Settings(BaseSettings):
     @property
     def master_key(self) -> bytes:
         return base64.b64decode(self.master_key_b64)
+
+    @property
+    def web_secure_cookies(self) -> bool:
+        """HTTPS'da bo'lsak `Secure` cookie. Lokal http://localhost'da o'chiq."""
+        return self.webapp_base_url.lower().startswith("https://")
 
     @property
     def allowed_users(self) -> frozenset[int]:

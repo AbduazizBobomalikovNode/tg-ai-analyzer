@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}{{ t('web.login.title') }} · {{ t('web.title') }}{% endblock %}
+{% block body_class %}page-login{% endblock %}
+{% block content %}
+<main class="login-wrap">
+  <div class="login-card">
+    <div class="brand">
+      <div class="brand-logo" aria-hidden="true">✈️</div>
+      <div>
+        <div class="brand-name">{{ t('web.title') }}</div>
+        <div class="brand-sub">{{ t('web.login.title') }}</div>
+      </div>
+      <nav class="lang-switch" aria-label="{{ t('web.lang') }}">
+        {% for l in langs %}<a href="?lang={{ l }}" class="{% if l == lang %}active{% endif %}">{{ l|upper }}</a>{% endfor %}
+      </nav>
+    </div>
+
+    <p class="muted">{{ t('web.login.subtitle') }}</p>
+
+    <div id="alert" class="alert" hidden></div>
+
+    <!-- 1. telefon -->
+    <form id="step-phone" class="step" autocomplete="on">
+      <label for="phone">{{ t('web.login.phone') }}</label>
+      <input id="phone" name="phone" type="tel" inputmode="tel" autocomplete="tel"
+             placeholder="+998 90 123 45 67" required autofocus>
+      <small class="hint">{{ t('web.login.phone_hint') }}</small>
+      <button type="submit" class="btn primary" id="btn-phone">{{ t('web.login.send_code') }}</button>
+    </form>
+
+    <!-- 2. kod -->
+    <form id="step-code" class="step" hidden autocomplete="off">
+      <label for="code">{{ t('web.login.code') }}</label>
+      <input id="code" name="code" type="text" inputmode="numeric" pattern="[0-9]*"
+             autocomplete="one-time-code" maxlength="8" placeholder="• • • • •" required>
+      <small class="hint" id="code-hint"></small>
+      <button type="submit" class="btn primary" id="btn-code">{{ t('web.login.verify') }}</button>
+      <button type="button" class="btn link" data-back>{{ t('web.login.back') }}</button>
+    </form>
+
+    <!-- 3. 2FA -->
+    <form id="step-password" class="step" hidden autocomplete="off">
+      <label for="password">{{ t('web.login.password') }}</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+      <small class="hint">{{ t('web.login.password_hint') }}</small>
+      <button type="submit" class="btn primary" id="btn-password">{{ t('web.login.submit') }}</button>
+      <button type="button" class="btn link" data-back>{{ t('web.login.back') }}</button>
+    </form>
+
+    <div id="step-done" class="step done" hidden>✅ {{ t('web.login.success') }}</div>
+
+    <footer class="fineprint">
+      <p>🔐 {{ t('web.login.security_note') }}</p>
+      <p>⚠️ {{ t('web.login.tos_note') }}</p>
+      {% if logged_in %}<p><a href="/chat">→ {{ t('web.chat.title') }}</a></p>{% endif %}
+    </footer>
+  </div>
+</main>
+{% endblock %}
+{% block scripts %}<script src="/static/login.js"></script>{% endblock %}

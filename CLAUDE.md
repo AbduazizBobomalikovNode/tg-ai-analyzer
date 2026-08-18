@@ -36,6 +36,19 @@ zaiflashtirsa — **avval user'dan so'rang**.
 Bularni `tests/test_allowlist.py`, `tests/test_peer_guard.py` qo'riqlaydi —
 bu testlarni o'chirish/yumshatish taqiqlanadi.
 
+## Web UI (`app/web`)
+
+- Auth: `services/auth_flow.py` — telefon → kod → 2FA, har oqim o'z Telethon
+  klienti bilan **jarayon xotirasida** → `api` bitta uvicorn worker. Barcha auth
+  TL metodlari `auth_window()` ichida. Kod/parol faqat `/api/auth/*` (HTTPS).
+- Web sessiya: imzolangan cookie (`web/security.py`, kalit master key'dan HMAC),
+  o'zgartiruvchi API'lar `X-Requested-With: fetch` talab qiladi. Bu himoyalarni
+  olib tashlamang.
+- AI chat: `services/chat_service.py` — Telegram xabarlar **faqat**
+  `render_context()` konvertida (`<untrusted_data>`), tool yo'q (5-bosqichgacha).
+  `mtproto/pool.py` faqat o'qish; `get_sender()` emas, `m.sender` (allowlist).
+- Suhbatlar: `conversations` / `conversation_messages` (migratsiya 0002).
+
 ## Sirlar
 
 - Session string, master key, 2FA parol, OTP kod **hech qachon log'ga tushmaydi**
