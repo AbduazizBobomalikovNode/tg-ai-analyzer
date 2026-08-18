@@ -1,6 +1,6 @@
 """Web UI + API (FastAPI).
 
-Sahifalar:  /login (telefon → kod → 2FA), /chat (AI chat)
+Sahifalar:  /login (telefon → kod → 2FA), /chat (AI chat), /dashboard
 API:        /api/auth/*, /api/me, /api/accounts/*, /api/conversations/*
 Sog'liq:    /health
 
@@ -28,6 +28,7 @@ from app.services.auth_flow import AuthFlowStore
 from app.web.routers import auth as auth_router
 from app.web.routers import chat as chat_router
 from app.web.routers import pages as pages_router
+from app.web.routers import stats as stats_router
 from app.web.routers import tg as tg_router
 from app.web.security import RateLimiter
 
@@ -66,6 +67,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_router.router)
     app.include_router(tg_router.router)
     app.include_router(chat_router.router)
+    app.include_router(stats_router.router)
     app.include_router(pages_router.router)
 
     @app.get("/health")

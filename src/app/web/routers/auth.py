@@ -110,7 +110,19 @@ async def _finish(request: Request, response: Response, flow_id: str) -> dict[st
     finally:
         del result  # session string RAM'da qolmasin
     set_session_cookie(request, response, linked.user_id)
+    await _kick_sync(linked.account_id)
     return {"flow_id": flow_id, "status": "done", "account_id": linked.account_id}
+
+
+async def _kick_sync(account_id: int) -> None:
+    """Login'dan keyin birinchi ingestion (Redis yo'q bo'lsa login baribir o'tadi)."""
+    try:
+        from app.worker.queue import enqueue
+        from app.worker.tasks import job_id_account
+
+        await enqueue("sync_account", account_id, True, job_id=job_id_account(account_id))
+    except Exception as exc:  # navbat mavjud emas — cron keyin baribir oladi
+        log.warning("auth.sync_enqueue_failed", account_id=account_id, error=str(exc)[:200])
 
 
 @router.post("/auth/code", dependencies=[Depends(require_csrf)])

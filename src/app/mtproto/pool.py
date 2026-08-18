@@ -176,16 +176,22 @@ class ClientPool:
             entry.dialogs_at = time.monotonic()
             return out
 
-    async def recent_messages(
-        self, account_id: int, peer_id: int, *, limit: int = 50
-    ) -> tuple[str, list[MessageInfo]]:
-        """(chat sarlavhasi, oxirgi xabarlar — eskidan yangiga)."""
+    async def input_peer(self, account_id: int, peer_id: int) -> Any:
+        """Peer'ning InputPeer'i (dialog keshidan; kerak bo'lsa yangilaydi)."""
         entry = await self._entry(account_id)
         if peer_id not in entry.input_peers:
             await self.dialogs(account_id, force=True)
         peer = entry.input_peers.get(peer_id)
         if peer is None:
-            raise PoolError("no_dialog")
+            raise PoolError("no_dialog", str(peer_id))
+        return peer
+
+    async def recent_messages(
+        self, account_id: int, peer_id: int, *, limit: int = 50
+    ) -> tuple[str, list[MessageInfo]]:
+        """(chat sarlavhasi, oxirgi xabarlar — eskidan yangiga)."""
+        entry = await self._entry(account_id)
+        peer = await self.input_peer(account_id, peer_id)
 
         try:
             msgs = await entry.client.get_messages(peer, limit=limit)

@@ -10,6 +10,7 @@
 <body class="{% block body_class %}{% endblock %}">
   {% block content %}{% endblock %}
   <script>window.TGAI = {strings: {{ strings_json|safe }}, lang: "{{ lang }}"};</script>
+  <script src="/static/md.js"></script>
   {% block scripts %}{% endblock %}
 </body>
 </html>

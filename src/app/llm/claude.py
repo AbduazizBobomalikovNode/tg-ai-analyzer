@@ -70,6 +70,11 @@ _NO_SAMPLING_PREFIXES = (
 # max_tokens Claude API'da majburiy. Non-streaming uchun tavsiya etilgan default.
 _DEFAULT_MAX_TOKENS = 16000
 
+# System prompt shundan uzun bo'lsa — prompt caching (cache_control) yoqiladi.
+# Minimal keshlanadigan prefiks model bo'yicha 512-4096 token; ~3000 belgidan
+# boshlab urinamiz — kichik bo'lsa API jimgina keshlamaydi, zarar yo'q.
+CACHE_SYSTEM_MIN_CHARS = 3000
+
 _JSON_INSTRUCTION = (
     "Respond with a single valid JSON value only. "
     "No markdown code fences, no prose before or after the JSON."
@@ -259,7 +264,12 @@ def build_request(
         "messages": converted,
     }
     if system_text:
-        payload["system"] = system_text
+        if len(system_text) >= CACHE_SYSTEM_MIN_CHARS:
+            payload["system"] = [
+                {"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}
+            ]
+        else:
+            payload["system"] = system_text
     if tools:
         payload["tools"] = [_to_tool(t) for t in tools]
     if not model.startswith(_NO_SAMPLING_PREFIXES):

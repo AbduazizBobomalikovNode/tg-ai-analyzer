@@ -23,7 +23,11 @@
     </section>
 
     <section class="block grow">
-      <div class="block-title">{{ t('web.chat.dialogs') }}</div>
+      <div class="row between">
+        <div class="block-title">{{ t('web.chat.dialogs') }}</div>
+        <button class="btn ghost small" id="btn-sync-all" title="{{ t('web.chat.sync_all') }}">⟳ {{ t('web.chat.sync_all') }}</button>
+      </div>
+      <div id="sync-note" class="warn" hidden></div>
       <input id="dialog-search" type="search" placeholder="{{ t('web.chat.search_dialogs') }}" autocomplete="off">
       <ul id="dialog-list" class="list dialogs">
         <li class="dialog-item selected" data-peer="0">
@@ -43,6 +47,7 @@
       <nav class="lang-switch">
         {% for l in langs %}<a href="?lang={{ l }}" class="{% if l == lang %}active{% endif %}">{{ l|upper }}</a>{% endfor %}
       </nav>
+      <a class="btn link" href="/dashboard">📊 {{ t('web.chat.dashboard') }}</a>
       <button class="btn link" id="btn-logout">{{ t('web.chat.logout') }}</button>
     </div>
   </aside>
@@ -64,7 +69,15 @@
       <div class="composer-opts">
         <label class="opt" id="ctx-limit-wrap">
           <span id="ctx-limit-label"></span>
-          <input type="range" id="ctx-limit" min="10" max="{{ context_max }}" step="10" value="{{ context_default }}">
+          <input type="range" id="ctx-limit" min="10" max="{{ context_max }}" step="10" value="{{ context_default }}" data-live-max="200">
+        </label>
+        <label class="opt">{{ t('web.chat.strategy') }}
+          <select id="strategy">
+            <option value="auto">{{ t('web.chat.strategy_auto') }}</option>
+            <option value="search">{{ t('web.chat.strategy_search') }}</option>
+            <option value="window">{{ t('web.chat.strategy_window') }}</option>
+            <option value="recent">{{ t('web.chat.strategy_recent') }}</option>
+          </select>
         </label>
         <label class="opt"><input type="checkbox" id="deep"> {{ t('web.chat.deep') }}</label>
       </div>

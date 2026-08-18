@@ -72,3 +72,10 @@ async def chat_page(request: Request) -> Any:
         context_default=s.web_context_default_messages,
         context_max=s.web_context_max_messages,
     )
+
+
+@router.get("/dashboard", response_class=HTMLResponse)
+async def dashboard_page(request: Request) -> Any:
+    if identity_of(request) is None:
+        return RedirectResponse("/login", status_code=302)
+    return _render(request, "dashboard.html")

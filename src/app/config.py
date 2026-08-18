@@ -44,8 +44,14 @@ class Settings(BaseSettings):
     # Bir IP'dan 10 daqiqada nechta login boshlash mumkin (brute-force/spam)
     web_auth_rate_per_ip: int = Field(default=5, ge=1, le=100)
     # AI chatga kontekst sifatida beriladigan oxirgi xabarlar limiti
-    web_context_max_messages: int = Field(default=200, ge=10, le=1000)
+    # >200 faqat sinxronlangan (DB) chatlar uchun — jonli GetHistory 200 bilan cheklanadi
+    web_context_max_messages: int = Field(default=1000, ge=10, le=5000)
     web_context_default_messages: int = Field(default=50, ge=5, le=1000)
+    # Har javobdan keyin arzon model bilan avtomatik baho (relevance/usefulness/grounded)
+    web_auto_eval: bool = True
+    # Embedding indeksi (vektor qidiruv). Gemini embed — arzon, lekin o'chirsa bo'ladi
+    embed_enabled: bool = True
+    embed_batch_per_run: int = Field(default=500, ge=50, le=5000)
 
     # ─── Infra ───
     database_url: str

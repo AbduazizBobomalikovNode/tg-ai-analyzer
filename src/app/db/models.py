@@ -19,6 +19,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -134,6 +135,10 @@ class Chat(Base):
     synced_max_id: Mapped[int | None] = mapped_column(BigInteger)  # eng yangi olingan
     synced_total: Mapped[int] = mapped_column(Integer, default=0)
     last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # 2-bosqich: progress UI va xatolar uchun
+    total_estimate: Mapped[int | None] = mapped_column(Integer)  # Telegram `count`
+    sync_error: Mapped[str | None] = mapped_column(String(256))
+    last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     account: Mapped[Account] = relationship(back_populates="chats")
 
@@ -289,9 +294,23 @@ class ConversationMessage(Base):
     provider: Mapped[str] = mapped_column(String(32), default="")
     tokens_in: Mapped[int] = mapped_column(Integer, default=0)
     tokens_out: Mapped[int] = mapped_column(Integer, default=0)
-    # kontekst: qaysi chat, nechta xabar — kontent emas (u qayta olinadi)
+    # kontekst: qaysi chat, nechta xabar, strategiya — kontent emas (u qayta olinadi)
     context: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now())
+
+    # ── sifat / xarajat (dashboard) ──
+    task: Mapped[str] = mapped_column(String(16), default="")  # search | deep
+    latency_ms: Mapped[int | None] = mapped_column(Integer)
+    cost_usd: Mapped[float | None] = mapped_column(Float)  # taxminiy, pricing.py
+    # foydalanuvchi bahosi: 1 = 👍, -1 = 👎
+    rating: Mapped[int | None] = mapped_column(Integer)
+    rating_comment: Mapped[str | None] = mapped_column(String(512))
+    rated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # avtomatik baho (LLM-judge, arzon model): 1..5
+    auto_relevance: Mapped[int | None] = mapped_column(Integer)
+    auto_usefulness: Mapped[int | None] = mapped_column(Integer)
+    auto_grounded: Mapped[bool | None] = mapped_column(Boolean)
+    auto_note: Mapped[str | None] = mapped_column(String(256))
 
     conversation: Mapped[Conversation] = relationship(back_populates="messages")
 

@@ -49,6 +49,38 @@ bu testlarni o'chirish/yumshatish taqiqlanadi.
   `mtproto/pool.py` faqat o'qish; `get_sender()` emas, `m.sender` (allowlist).
 - Suhbatlar: `conversations` / `conversation_messages` (migratsiya 0002).
 
+## Ingestion (`services/ingestion.py`, `worker/tasks.py`)
+
+- Faqat o'qish (`GetDialogs`, `GetHistory`, `GetMessages`). `WAIT_BETWEEN_BATCHES`,
+  ramp-up (`limits_for`) va FloodWait → `SyncPaused` → `defer_by` requeue —
+  bularni "tezlashtirish" uchun olib tashlamang (4.2-band).
+- Snapshot cron (`snapshot_metrics`, har soat) — o'chirilsa vaqt qatori bo'shlig'i
+  abadiy. Tier'lar `snapshot_tiers()`.
+- `synced_min_id == 1` — tarix boshiga yetilgan sentinel; `sync_state`
+  running/idle/done/failed. Job id'lar deterministik (`sync:acc:<id>`) — bir
+  akkauntga parallel sync yo'q.
+- `api` va `worker` bir xil session'ni ishlatadi (ikkalasi ham `pool`) — bir
+  host/egress IP'da muammo yo'q; `AuthKeyDuplicatedError` ko'rsangiz api'dagi jonli
+  o'qishni DB'ga ko'chiring (`chat_service.fetch_context`).
+
+## Qidiruv / kontekst / sifat
+
+- `services/search.select_context` — yagona kontekst tanlash nuqtasi
+  (recent/search/window/auto, token byudjeti). Yangi "promptga N xabar tashlash"
+  yo'llarini qo'shmang — shu orqali o'ting. Katta oyna → `compact_window`
+  (map = `Task.ROUTE`, arzon). Digest'lar ham `<untrusted_data kind="digests">`.
+- Auto-baho (`services/evaluation`) faqat savol+javob ko'radi, kontekst emas —
+  token uchun. Judge natijasi tavsiya, "haqiqat" emas; dashboardda foydalanuvchi
+  bahosi bilan yonma-yon.
+- `llm/pricing.py` — taxmin; yangi model qo'shsangiz jadvalni yangilang.
+
+## Frontend
+
+- `web/static/md.js` — AI javoblari uchun **yagona** Markdown renderer. Xavfsizlik
+  "by construction": matn avval escape, teglar keyin; `innerHTML`ga faqat shu
+  chiqishi kiradi. Tashqi md/DOMPurify kutubxona qo'shmasdan shu yerni kengaytiring.
+- Mermaid `securityLevel: "strict"`, lazy (`vendor/mermaid.min.js`, MIT). CDN yo'q.
+
 ## Sirlar
 
 - Session string, master key, 2FA parol, OTP kod **hech qachon log'ga tushmaydi**

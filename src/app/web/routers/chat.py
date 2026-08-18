@@ -11,13 +11,14 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
 from app.db.base import session_scope
 from app.db.models import Account, ConversationMessage
 from app.services import chat_service as cs
+from app.services import evaluation as ev
 from app.web.security import WebIdentity, require_csrf, require_identity
 
 router = APIRouter(prefix="/api/conversations", tags=["chat"])
@@ -31,7 +32,13 @@ class ConversationIn(BaseModel):
 class ContextIn(BaseModel):
     account_id: int
     peer_id: int
-    limit: int = Field(default=0, ge=0, le=1000)
+    limit: int = Field(default=0, ge=0, le=5000)
+    strategy: str = Field(default="auto", pattern="^(auto|recent|search|window)$")
+
+
+class RatingIn(BaseModel):
+    rating: int = Field(ge=-1, le=1)  # 1 👍 · -1 👎 · 0 bekor
+    comment: str = Field(default="", max_length=512)
 
 
 class MessageIn(BaseModel):
@@ -60,6 +67,20 @@ def _msg_out(m: ConversationMessage) -> dict[str, Any]:
         "tokens_out": m.tokens_out,
         "context": m.context,
         "created_at": m.created_at.isoformat() if m.created_at else None,
+        "task": m.task,
+        "latency_ms": m.latency_ms,
+        "cost_usd": m.cost_usd,
+        "rating": m.rating,
+        "auto": (
+            {
+                "relevance": m.auto_relevance,
+                "usefulness": m.auto_usefulness,
+                "grounded": m.auto_grounded,
+                "note": m.auto_note,
+            }
+            if m.auto_relevance is not None
+            else None
+        ),
     }
 
 
@@ -130,6 +151,7 @@ async def send_message(
     conversation_id: int,
     body: MessageIn,
     ident: Annotated[WebIdentity, Depends(require_identity)],
+    background: BackgroundTasks,
 ) -> dict[str, Any]:
     s = get_settings()
     async with session_scope() as db:
@@ -147,6 +169,7 @@ async def send_message(
                 account_id=body.context.account_id,
                 peer_id=body.context.peer_id,
                 limit=body.context.limit or s.web_context_default_messages,
+                strategy=body.context.strategy,
             )
 
         try:
@@ -161,6 +184,14 @@ async def send_message(
         except cs.ChatError as exc:
             raise _chat_http(exc) from exc
 
+    # javob yuborilgach — arzon model bilan fon baholash (foydalanuvchi kutmaydi)
+    background.add_task(
+        ev.auto_evaluate,
+        reply.assistant_message_id,
+        body.text,
+        reply.text,
+        had_context=reply.context_used is not None,
+    )
     return {
         "conversation_id": reply.conversation_id,
         "user_message_id": reply.user_message_id,
@@ -171,4 +202,30 @@ async def send_message(
         "tokens_in": reply.tokens_in,
         "tokens_out": reply.tokens_out,
         "context": reply.context_used,
+        "latency_ms": reply.latency_ms,
+        "cost_usd": reply.cost_usd,
     }
+
+
+@router.post("/{conversation_id}/messages/{message_id}/rate", dependencies=[Depends(require_csrf)])
+async def rate(
+    conversation_id: int,
+    message_id: int,
+    body: RatingIn,
+    ident: Annotated[WebIdentity, Depends(require_identity)],
+) -> dict[str, Any]:
+    async with session_scope() as db:
+        try:
+            await cs.get_conversation(db, ident.user_id, conversation_id)
+            row = await ev.rate_message(
+                db,
+                user_id=ident.user_id,
+                message_id=message_id,
+                rating=body.rating,
+                comment=body.comment,
+            )
+        except cs.ChatError as exc:
+            raise _chat_http(exc) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail={"code": "chat.err.not_found"}) from exc
+        return {"id": row.id, "rating": row.rating}

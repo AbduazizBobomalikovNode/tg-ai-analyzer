@@ -95,6 +95,61 @@ API: `POST /api/auth/phone|code|password`, `GET /api/me`,
 O'zgartiruvchi so'rovlar `X-Requested-With: fetch` header'ini talab qiladi (CSRF).
 `api` servisi **bitta uvicorn worker** — auth oqimlari jarayon xotirasida.
 
+## Ingestion (2-bosqich)
+
+Login'dan keyin `sync_account` avtomat navbatga tushadi (ARQ worker):
+
+1. `refresh_chats` — dialoglar → `chats` (tur, admin, a'zolar soni).
+2. `sync_chat` — har chat tarixi **yangidan eskiga**, 100 talik batch, har batch
+   DB'ga darhol (`INSERT … ON CONFLICT`), progress `chats.synced_total /
+   total_estimate`. Keyingi ishlar `synced_max_id` dan yangilarini,
+   `synced_min_id` dan orqaga davom ettiradi. Media saqlanmaydi.
+3. **Snapshot cron** (har soat, `xx:05`) — kanal postlari views/forwards/
+   reactions → `message_metric_snapshots`: <24 soat har soat, 1-7 kun har 6
+   soat, 7-90 kun kuniga bir marta. **O'chirmang** — "bu hafta +N ko'rish"
+   faqat shu jadvaldan.
+4. `incremental_sync_all` — har 10 daqiqa yangi xabarlar.
+
+Ban riski: batch'lar orasida pauza, FloodWait → ish to'xtaydi va `retry_after`
+bilan qayta navbat (retry-storm yo'q); **ramp-up** — akkaunt 24 soatdan yosh
+bo'lsa ≤ 1000 xabar × 20 chat. UI: dialog ro'yxatida progress, "⟳" tugmasi,
+kontekst slider 200+ bo'lsa DB'dan.
+
+## Qidiruv va token tejash (3-bosqich)
+
+`services/search.py` — kontekst endi "oxirgi N xabar" emas, **strategiya**:
+
+| Strategiya | Nima qiladi | Qachon (`auto`) |
+|---|---|---|
+| `search` | FTS (`simple` + prefix) + `pg_trgm` + pgvector (Gemini embedding) → RRF; topilgan xabar ± qo'shnisi + oxirgi 15 | savolda kalit so'z bor |
+| `window` | savoldagi vaqt oynasi (bugun/hafta/oy/yil); byudjetdan katta bo'lsa **map-reduce**: arzon `Task.ROUTE` model bo'laklarni digest qiladi, asosiy model digest'lar ustida javob beradi | "bu hafta…", "за месяц…" |
+| `recent` | oxirgi N (byudjetgacha) | boshqa hollarda / xulosa so'rovi |
+
+Token tejash: xabar matni siqiladi (URL → domen, whitespace, 700 belgi),
+kontekst byudjeti 6k (deep: 14k) token, tarixdagi eski turn'lar 1500 belgigacha,
+oxirgi 12 turn; Claude'da uzun system prompt `cache_control` bilan keshlanadi.
+Embedding cron (`embed_messages`, 15 daq) `EMBED_ENABLED` bilan boshqariladi.
+
+### Javob formati
+
+AI javoblari **Markdown** — `web/static/md.js` (o'zimizniki, xavfsiz: avval escape,
+keyin teglar; havola faqat http(s)/mailto): sarlavha, ro'yxat (ichma-ich), kod,
+blockquote, **GFM jadval** (kichik ekranda gorizontal scroll), **mermaid**
+diagrammalar (```mermaid — pie, xychart-beta, flowchart; `vendor/mermaid.min.js`
+faqat kerak bo'lganda yuklanadi, CDN yo'q). Interfeys 320px'dan boshlab moslashadi
+(sidebar drawer, jadval/diagramma scroll, dashboard grid).
+
+## Dashboard va sifat baholash
+
+`/dashboard` — so'rovlar, tokenlar (in/out), taxminiy xarajat (`llm/pricing.py`),
+javob vaqti (median/o'rtacha), qoniqish (👍/👎), auto-baho, model/strategiya/chat
+kesimlari, ingestion holati, "ko'rib chiqish kerak" ro'yxati. Kunlik SVG chart'lar
+(kutubxonasiz), jadval ko'rinishi, light/dark.
+
+Baholash: har javob ostida 👍/👎 (`POST …/messages/{id}/rate`); javob yuborilgach
+fon rejimida arzon model (`Task.ROUTE`) **relevance / usefulness (1-5) / grounded**
+baholaydi (`WEB_AUTO_EVAL`), kontekst qayta yuborilmaydi — faqat savol+javob.
+
 ## Konfiguratsiya
 
 Barcha sozlamalar `.env` orqali (`app/config.py::get_settings()`). To'liq ro'yxat
@@ -181,6 +236,7 @@ src/app/
     client.py        guardrail o'rnatilgan Telethon klient
   llm/
     base.py          tiplar, Capability, retry
+    pricing.py       taxminiy narx jadvali (dashboard xarajati)
     claude.py        anthropic SDK adapter (API key / Claude Code token / profil)
     claude_code.py   `claude -p` adapter — Claude Code login sessiyasi, tool'siz
     gemini.py        google-genai adapter (chat, tools, embed, image)
@@ -192,8 +248,13 @@ src/app/
     auth_flow.py     telefon → kod → 2FA holat mashinasi (auth_window ichida)
     session_store.py session'ni envelope bilan DB'ga yozish/o'qish
     accounts.py      login natijasini User/Account'ga bog'lash
-    chat_service.py  AI chat: kontekst <untrusted_data> + LLM fasad + tarix
+    chat_service.py  AI chat: strategiyali kontekst <untrusted_data> + LLM fasad + tarix
+    search.py        FTS/trgm/vektor qidiruv, RRF, token byudjeti, map-reduce
+    evaluation.py    👍/👎 + LLM-judge auto-baho (arzon model, fon)
+    stats.py         dashboard agregatlari
+    ingestion.py     chat registry, tarix sync, snapshot (faqat o'qish)
   mtproto/pool.py    ulangan akkauntlar klient pool'i (faqat o'qish)
+  worker/tasks.py    ARQ ishlari: sync_account/sync_chat/snapshot_metrics/incremental
   web/               FastAPI — /login, /chat sahifalari + /api (cookie auth, CSRF)
   worker/            ARQ — sync, snapshot, embedding, rollup
   i18n/              uz / ru / en
@@ -208,8 +269,8 @@ To'liq reja, qarorlar va texnik tahlil: **[PLAN.md](PLAN.md)**
 |---|---|---|
 | 0 | Skeleton, DB, guardrail, i18n, LLM qatlami (Claude+Gemini+DeepSeek) | ✅ |
 | 1 | Auth: telefon → kod → 2FA (web), multi-account, session encryption; QR login | 🟡 web tayyor, QR ⬜ |
-| 2 | Ingestion: history sync, metric snapshot | ⬜ |
-| 3 | Hybrid search + inline chat picker | ⬜ |
+| 2 | Ingestion: chat registry, history sync (ramp-up, FloodWait), snapshot cron, incremental | ✅ (real-time listener ⬜) |
+| 3 | Hybrid search (FTS+trgm+pgvector, RRF), strategiyali kontekst, map-reduce, embedding cron | ✅ (inline picker ⬜) |
 | 4 | Statistika: rollup, vaqt oynalari | ⬜ |
 | 5 | Agent v1 (read-only) | ⬜ |
 | 6 | Write actions + tasdiqlash UI | ⬜ |
