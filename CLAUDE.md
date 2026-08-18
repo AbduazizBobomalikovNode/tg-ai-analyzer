@@ -81,6 +81,19 @@ bu testlarni o'chirish/yumshatish taqiqlanadi.
   chiqishi kiradi. Tashqi md/DOMPurify kutubxona qo'shmasdan shu yerni kengaytiring.
 - Mermaid `securityLevel: "strict"`, lazy (`vendor/mermaid.min.js`, MIT). CDN yo'q.
 
+## Agent / tool'lar (5-bosqich)
+
+- `services/tools.READ_TOOLS` — **faqat o'qish**. Yozish tool'i bu registry'ga
+  qo'shilmaydi; 6-bosqichda alohida registry + `assert_writable()` + tasdiq.
+  Delete tool'i hech qachon (invariant 1). Har natija `tools.envelope()` bilan.
+- `services/prompts.py` — prompt'larni shu yerda o'zgartiring; system'ga sana/ID
+  qo'shmang (kesh buziladi) — `runtime_note` user turn'iga.
+- Byudjetlar (`AGENT_MAX_ITERATIONS`, `AGENT_TOOL_RESULT_TOKENS`, tool ichidagi
+  `MAX_RESULT_CHARS`) — "javob to'liqroq bo'lsin" deb olib tashlamang; avval
+  digest/stats tool'i orqali ixchamlang.
+- Digest keshi (`chat_digests`) `msg_count` bo'yicha invalidatsiya — xabarlar
+  qayta sync bo'lsa avtomat qayta hisoblanadi.
+
 ## Sirlar
 
 - Session string, master key, 2FA parol, OTP kod **hech qachon log'ga tushmaydi**

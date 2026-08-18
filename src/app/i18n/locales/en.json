@@ -149,5 +149,10 @@
   "web.chat.rate_up": "Helpful",
   "web.chat.rate_down": "Not helpful",
   "web.chat.dashboard": "Dashboard",
-  "web.chat.rated_thanks": "Thanks!"
+  "web.chat.rated_thanks": "Thanks!",
+  "web.chat.mode": "Mode",
+  "web.chat.mode_auto": "Auto",
+  "web.chat.mode_agent": "🔧 Agent (tools)",
+  "web.chat.mode_direct": "Direct (context)",
+  "web.dash.strategy_agent": "agent (tools)"
 }

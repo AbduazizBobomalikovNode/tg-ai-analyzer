@@ -71,6 +71,13 @@
           <span id="ctx-limit-label"></span>
           <input type="range" id="ctx-limit" min="10" max="{{ context_max }}" step="10" value="{{ context_default }}" data-live-max="200">
         </label>
+        <label class="opt">{{ t('web.chat.mode') }}
+          <select id="mode">
+            <option value="auto">{{ t('web.chat.mode_auto') }}</option>
+            <option value="agent">{{ t('web.chat.mode_agent') }}</option>
+            <option value="direct">{{ t('web.chat.mode_direct') }}</option>
+          </select>
+        </label>
         <label class="opt">{{ t('web.chat.strategy') }}
           <select id="strategy">
             <option value="auto">{{ t('web.chat.strategy_auto') }}</option>

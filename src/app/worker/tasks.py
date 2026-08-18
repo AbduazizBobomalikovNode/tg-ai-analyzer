@@ -25,6 +25,7 @@ log = get_logger("worker.tasks")
 
 EMBED_BATCH = 100
 EMBED_MAX_CHARS = 4000
+EMBED_MIN_CHARS = 20
 
 
 def job_id_account(account_id: int) -> str:
@@ -129,7 +130,7 @@ async def embed_messages(ctx: dict[str, Any], limit: int | None = None) -> dict[
     Faqat sinxronlangan chatlar, matni bo'sh bo'lmaganlar. Har xabar `EMBED_MAX_CHARS`
     gacha kesiladi. Provider — router (`Task.EMBED` → Gemini).
     """
-    from sqlalchemy import select
+    from sqlalchemy import func, select
 
     from app.config import get_settings
     from app.db.base import session_scope
@@ -149,7 +150,7 @@ async def embed_messages(ctx: dict[str, Any], limit: int | None = None) -> dict[
                 .where(
                     MessageEmbedding.message_id.is_(None),
                     Chat.synced_total > 0,
-                    Message.text != "",
+                    func.length(Message.text) >= EMBED_MIN_CHARS,  # "ok", "👍" — bekor xarajat
                 )
                 .order_by(Message.id.desc())
                 .limit(limit)
@@ -178,3 +179,33 @@ async def embed_messages(ctx: dict[str, Any], limit: int | None = None) -> dict[
         done += len(chunk)
     log.info("worker.embed.done", embedded=done, pending=len(rows) - done)
     return {"embedded": done}
+
+
+async def build_daily_digests(ctx: dict[str, Any]) -> dict[str, Any]:
+    """Har kecha: kechagi kun uchun digest yo'q chatlarni oldindan hisoblaydi (kesh issiq)."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.db.base import session_scope
+    from app.db.models import Chat
+    from app.services.digests import chats_needing_digest, digest_for_day
+
+    yesterday = datetime.now(UTC) - timedelta(days=1)
+    built = 0
+    tokens = 0
+    async with session_scope() as db:
+        chat_ids = await chats_needing_digest(db, yesterday)
+    for chat_id in chat_ids:
+        async with session_scope() as db:
+            chat = await db.get(Chat, chat_id)
+            if chat is None:
+                continue
+            try:
+                d = await digest_for_day(db, chat, yesterday)
+            except Exception as exc:  # bitta chat xatosi qolganini to'xtatmasin
+                log.warning("worker.digest_failed", chat_id=chat_id, error=str(exc)[:200])
+                continue
+            if d is not None and not d.cached:
+                built += 1
+                tokens += d.tokens_in + d.tokens_out
+    log.info("worker.digests.done", built=built, tokens=tokens)
+    return {"built": built, "tokens": tokens}

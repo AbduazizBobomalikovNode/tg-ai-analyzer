@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
@@ -19,7 +19,7 @@ from app.db.base import session_scope
 from app.db.models import Account, ConversationMessage
 from app.services import chat_service as cs
 from app.services import evaluation as ev
-from app.web.security import WebIdentity, require_csrf, require_identity
+from app.web.security import WebIdentity, locale_of, require_csrf, require_identity
 
 router = APIRouter(prefix="/api/conversations", tags=["chat"])
 
@@ -45,6 +45,10 @@ class MessageIn(BaseModel):
     text: str = Field(min_length=1, max_length=20_000)
     context: ContextIn | None = None
     deep: bool = False
+    # auto — agent (tool'lar) yoki direct'ni o'zi tanlaydi; agent — majburan tool'lar;
+    # direct — faqat oldindan berilgan kontekst
+    mode: str = Field(default="auto", pattern="^(auto|agent|direct)$")
+    account_id: int | None = None  # agent rejimi uchun (chat tanlanmagan bo'lsa ham)
 
 
 def _chat_http(exc: cs.ChatError) -> HTTPException:
@@ -152,6 +156,7 @@ async def send_message(
     body: MessageIn,
     ident: Annotated[WebIdentity, Depends(require_identity)],
     background: BackgroundTasks,
+    request: Request,
 ) -> dict[str, Any]:
     s = get_settings()
     async with session_scope() as db:
@@ -172,6 +177,11 @@ async def send_message(
                 strategy=body.context.strategy,
             )
 
+        acc_id = body.account_id
+        if acc_id is not None:
+            acc = await db.get(Account, acc_id)
+            if acc is None or acc.user_id != ident.user_id:
+                raise HTTPException(status_code=404, detail={"code": "account.not_found"})
         try:
             reply = await cs.send_message(
                 db,
@@ -180,6 +190,9 @@ async def send_message(
                 text=body.text,
                 context=context,
                 deep=body.deep,
+                mode=body.mode,
+                account_id=acc_id,
+                locale=locale_of(request),
             )
         except cs.ChatError as exc:
             raise _chat_http(exc) from exc

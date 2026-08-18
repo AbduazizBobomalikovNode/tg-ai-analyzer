@@ -11,7 +11,7 @@
     sidebar: $("sidebar"), accountSelect: $("account-select"), accountWarn: $("account-warn"),
     dialogSearch: $("dialog-search"), dialogList: $("dialog-list"), convList: $("conv-list"),
     messages: $("messages"), empty: $("empty-state"), composer: $("composer"), input: $("input"),
-    send: $("btn-send"), deep: $("deep"), strategy: $("strategy"), ctxLimit: $("ctx-limit"), ctxLimitLabel: $("ctx-limit-label"),
+    send: $("btn-send"), deep: $("deep"), strategy: $("strategy"), mode: $("mode"), ctxLimit: $("ctx-limit"), ctxLimitLabel: $("ctx-limit-label"),
     ctxLimitWrap: $("ctx-limit-wrap"), convTitle: $("conv-title"), ctxBadge: $("ctx-badge"),
     del: $("btn-delete"),
   };
@@ -93,8 +93,15 @@
     ).join("");
   }
 
+  function toolsBadge(c) {
+    if (!c || !c.tools || !c.tools.length) return "";
+    const counts = {};
+    for (const t of c.tools) counts[t] = (counts[t] || 0) + 1;
+    const title = (c.tool_calls || []).map((x) => `${x.tool}(${JSON.stringify(x.args || {})}) ${x.ok ? "✓" : "✗"} ${x.ms || 0}ms`).join("\n");
+    return `<span class="ctx" title="${esc(title)}">🔧 ${esc(Object.entries(counts).map(([k, v]) => v > 1 ? `${k}×${v}` : k).join(", "))} · ${c.iterations || 1} it.</span>`;
+  }
   function stratLabel(c) {
-    if (!c || !c.strategy) return "";
+    if (!c || !c.strategy || c.strategy === "agent") return "";
     const key = `web.dash.strategy_${c.strategy}`;
     const lbl = t(key) === key ? c.strategy : t(key);
     return ` · ${lbl}${c.est_tokens ? ` ~${fmtN(c.est_tokens)} tok` : ""}${c.truncated ? " ✂" : ""}`;
@@ -112,7 +119,8 @@
     div.className = `msg ${m.role}`;
     if (m.id) div.dataset.mid = m.id;
     let inner = "";
-    if (m.context && m.context.title) inner += `<span class="ctx">📎 ${esc(t("web.chat.context_used", { title: m.context.title, n: m.context.messages }))}${m.context.source ? ` · ${esc(t(`web.chat.source_${m.context.source}`))}` : ""}${esc(stratLabel(m.context))}</span>`;
+    if (m.context && m.context.mode === "agent") inner += toolsBadge(m.context);
+    else if (m.context && m.context.title) inner += `<span class="ctx">📎 ${esc(t("web.chat.context_used", { title: m.context.title, n: m.context.messages }))}${m.context.source ? ` · ${esc(t(`web.chat.source_${m.context.source}`))}` : ""}${esc(stratLabel(m.context))}</span>`;
     inner += m.role === "assistant" ? md(m.content) : `<p>${esc(m.content).replace(/\n/g, "<br>")}</p>`;
     if (m.role === "assistant" && m.model) {
       const cost = m.cost_usd != null ? ` · $${m.cost_usd < 0.01 ? m.cost_usd.toFixed(4) : m.cost_usd.toFixed(3)}` : "";
@@ -225,7 +233,7 @@
         const c = await api("POST", "/api/conversations", { account_id: state.accountId });
         state.convId = c.id;
       }
-      const body = { text, deep: el.deep.checked };
+      const body = { text, deep: el.deep.checked, mode: el.mode.value, account_id: state.accountId || null };
       if (state.peerId && state.accountId) body.context = { account_id: state.accountId, peer_id: state.peerId, limit: +el.ctxLimit.value, strategy: el.strategy.value };
       const r = await api("POST", `/api/conversations/${state.convId}/messages`, body);
       const node = msgNode({ id: r.assistant_message_id, role: "assistant", content: r.text, model: r.model, provider: r.provider, tokens_in: r.tokens_in, tokens_out: r.tokens_out, context: r.context, latency_ms: r.latency_ms, cost_usd: r.cost_usd });

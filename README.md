@@ -139,6 +139,34 @@ diagrammalar (```mermaid — pie, xychart-beta, flowchart; `vendor/mermaid.min.j
 faqat kerak bo'lganda yuklanadi, CDN yo'q). Interfeys 320px'dan boshlab moslashadi
 (sidebar drawer, jadval/diagramma scroll, dashboard grid).
 
+## Agent rejimi (read-only tool'lar) va prompt'lar
+
+`services/prompts.py` — barcha system prompt'lar bitta joyda (yadro + chat/agent
+varianti, digest, judge, router). System bayt darajasida barqaror (kesh uchun);
+sana/til/pinned chat kabi o'zgaruvchilar user turn'ida (`runtime_note`).
+
+`services/tools.py` — **faqat o'qish** tool'lari (DB ustidan, MTProto'ga tegmaydi):
+
+| Tool | Nima uchun |
+|---|---|
+| `list_chats` | qaysi chat aniq bo'lmasa (bir marta) |
+| `search_messages` | "top / qayerda / kim aytdi / X haqida" — hybrid qidiruv, #id + t.me havola |
+| `get_recent_messages` | "nima yangilik" |
+| `get_message_context` | bitta xabar atrofi (±N) — tekshirish |
+| `get_window_digest` | hafta/oy xulosasi — **kunlik digest keshi** (`chat_digests`, xom xabar emas) |
+| `get_chat_stats` | son/ko'rish/reaksiya/forward, o'sish (snapshot), top postlar, kun-soat, oldingi davr bilan taqqos — qo'lda sanamaydi |
+
+`services/agent.py` — sikl: ≤ `AGENT_MAX_ITERATIONS` LLM chaqiruv, iteratsiyada ≤ 4
+tool, tool natijalari umumiy `AGENT_TOOL_RESULT_TOKENS` byudjeti, oxirida majburiy
+tool'siz javob; har chaqiruv `agent_actions` (append-only) ga. Yozish/o'chirish
+tool'i registry'da yo'q. Rejim: `auto` (sinxron chat bor + savol ma'lumot haqida →
+agent; aniq strategiya/salomlashish → direct), `agent`, `direct` — UI'da tanlanadi.
+
+Xarajat qoidalari: arzon model (`ROUTER`) — digest/judge/intent; `FAST` (default
+Sonnet 5) — chat/agent; `DEEP` (Opus 5) faqat tugma bilan; embedding faqat ≥ 20 belgi;
+auto-baho sampling (`WEB_AUTO_EVAL_SAMPLE`); kunlik digest kechasi oldindan hisoblanadi
+(`build_daily_digests`), savolda qayta hisoblanmaydi.
+
 ## Dashboard va sifat baholash
 
 `/dashboard` — so'rovlar, tokenlar (in/out), taxminiy xarajat (`llm/pricing.py`),
@@ -251,6 +279,11 @@ src/app/
     chat_service.py  AI chat: strategiyali kontekst <untrusted_data> + LLM fasad + tarix
     search.py        FTS/trgm/vektor qidiruv, RRF, token byudjeti, map-reduce
     evaluation.py    👍/👎 + LLM-judge auto-baho (arzon model, fon)
+    prompts.py       barcha system prompt'lar (chat/agent/digest/judge/router)
+    tools.py         read-only agent tool'lari (registry + JSON schema)
+    agent.py         tool sikli: byudjet, audit, majburiy yakun
+    digests.py       kunlik digest keshi (chat_digests)
+    analytics.py     chat statistikasi (LLM'siz)
     stats.py         dashboard agregatlari
     ingestion.py     chat registry, tarix sync, snapshot (faqat o'qish)
   mtproto/pool.py    ulangan akkauntlar klient pool'i (faqat o'qish)
@@ -271,8 +304,8 @@ To'liq reja, qarorlar va texnik tahlil: **[PLAN.md](PLAN.md)**
 | 1 | Auth: telefon → kod → 2FA (web), multi-account, session encryption; QR login | 🟡 web tayyor, QR ⬜ |
 | 2 | Ingestion: chat registry, history sync (ramp-up, FloodWait), snapshot cron, incremental | ✅ (real-time listener ⬜) |
 | 3 | Hybrid search (FTS+trgm+pgvector, RRF), strategiyali kontekst, map-reduce, embedding cron | ✅ (inline picker ⬜) |
-| 4 | Statistika: rollup, vaqt oynalari | ⬜ |
-| 5 | Agent v1 (read-only) | ⬜ |
+| 4 | Statistika: `analytics.chat_stats` (davr, o'sish, top, kun/soat) — tool orqali | 🟡 rollup ⬜ |
+| 5 | Agent v1 (read-only tool'lar, audit, byudjet, prompt'lar markazda) | ✅ |
 | 6 | Write actions + tasdiqlash UI | ⬜ |
 | 7 | Kontent: post, rasm, scheduling, auto-reply | ⬜ |
 | 8 | Polish: monitoring, limitlar | ⬜ |

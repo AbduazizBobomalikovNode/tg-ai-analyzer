@@ -315,6 +315,27 @@ class ConversationMessage(Base):
     conversation: Mapped[Conversation] = relationship(back_populates="messages")
 
 
+class ChatDigest(Base):
+    """Kunlik digest keshi — katta vaqt oynasi savollari uchun map-reduce takrorlanmasin.
+
+    Bir marta arzon model bilan hisoblanadi (`services/digests.py`), keyin har savolda
+    tayyor matn ishlatiladi. Xabarlar o'zgarsa (yangi sync) — `msg_count` farq qilsa qayta.
+    """
+
+    __tablename__ = "chat_digests"
+    __table_args__ = (UniqueConstraint("chat_id", "day", name="uq_digest_chat_day"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    chat_id: Mapped[int] = mapped_column(ForeignKey("chats.id", ondelete="CASCADE"), index=True)
+    day: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)  # UTC 00:00
+    digest: Mapped[str] = mapped_column(Text, default="")
+    msg_count: Mapped[int] = mapped_column(Integer, default=0)
+    model: Mapped[str] = mapped_column(String(64), default="")
+    tokens_in: Mapped[int] = mapped_column(Integer, default=0)
+    tokens_out: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now())
+
+
 class ScheduledJob(Base):
     __tablename__ = "scheduled_jobs"
 

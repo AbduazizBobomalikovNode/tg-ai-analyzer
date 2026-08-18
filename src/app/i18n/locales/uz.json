@@ -149,5 +149,10 @@
   "web.chat.rate_up": "Foydali",
   "web.chat.rate_down": "Foydasiz",
   "web.chat.dashboard": "Dashboard",
-  "web.chat.rated_thanks": "Rahmat!"
+  "web.chat.rated_thanks": "Rahmat!",
+  "web.chat.mode": "Rejim",
+  "web.chat.mode_auto": "Avto",
+  "web.chat.mode_agent": "🔧 Agent (tool'lar)",
+  "web.chat.mode_direct": "To'g'ridan-to'g'ri (kontekst)",
+  "web.dash.strategy_agent": "agent (tool'lar)"
 }

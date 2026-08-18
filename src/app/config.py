@@ -49,6 +49,11 @@ class Settings(BaseSettings):
     web_context_default_messages: int = Field(default=50, ge=5, le=1000)
     # Har javobdan keyin arzon model bilan avtomatik baho (relevance/usefulness/grounded)
     web_auto_eval: bool = True
+    # Baholanadigan javoblar ulushi (0.0-1.0) — xarajatni kamaytirish uchun sampling
+    web_auto_eval_sample: float = Field(default=1.0, ge=0.0, le=1.0)
+    # Agent (tool) sikli chegaralari — xarajat qopqog'i
+    agent_max_iterations: int = Field(default=5, ge=1, le=12)
+    agent_tool_result_tokens: int = Field(default=12_000, ge=1_000, le=60_000)
     # Embedding indeksi (vektor qidiruv). Gemini embed — arzon, lekin o'chirsa bo'ladi
     embed_enabled: bool = True
     embed_batch_per_run: int = Field(default=500, ge=50, le=5000)
@@ -88,9 +93,9 @@ class Settings(BaseSettings):
     anthropic_auth_token: str = ""
     claude_code_oauth_token: str = ""
     anthropic_base_url: str = ""  # bo'sh = api.anthropic.com
-    claude_model_router: str = "claude-haiku-4-5"  # arzon intent klassifikatsiya
-    claude_model_fast: str = "claude-opus-5"
-    claude_model_deep: str = "claude-opus-5"
+    claude_model_router: str = "claude-haiku-4-5"  # arzon: intent, digest, judge
+    claude_model_fast: str = "claude-sonnet-5"  # search/tools — sifat/narx muvozanati
+    claude_model_deep: str = "claude-opus-5"  # "chuqur tahlil" tugmasi
 
     # ─── Claude Code CLI (`claude_code` provider) ───
     # `claude -p` subprocess — Claude Code'ning o'z login sessiyasidan (Keychain /

@@ -149,5 +149,10 @@
   "web.chat.rate_up": "Полезно",
   "web.chat.rate_down": "Бесполезно",
   "web.chat.dashboard": "Дашборд",
-  "web.chat.rated_thanks": "Спасибо!"
+  "web.chat.rated_thanks": "Спасибо!",
+  "web.chat.mode": "Режим",
+  "web.chat.mode_auto": "Авто",
+  "web.chat.mode_agent": "🔧 Агент (инструменты)",
+  "web.chat.mode_direct": "Напрямую (контекст)",
+  "web.dash.strategy_agent": "агент (инструменты)"
 }
