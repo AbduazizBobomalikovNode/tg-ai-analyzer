@@ -1,0 +1,16 @@
+{
+  "lang.name": "O'zbekcha",
+  "start.greeting": "Salom, <b>{name}</b>!\n\nMen Telegram chatlaringizni tahlil qiluvchi AI agentman.\n\nNima qila olaman:\n• minglab xabar orasidan kerakligini topaman\n• kanal statistikasini chiqaraman (ko'rish, reaksiya, o'sish)\n• chat xulosasi va keyingi post uchun g'oya beraman\n• post yozaman, tahrirlayman, pin qilaman\n\n<b>Hech qachon xabar o'chirmayman</b> — bu texnik jihatdan imkonsiz qilingan.\n\nBoshlash uchun akkauntingizni ulang.",
+  "start.no_accounts": "Hali birorta akkaunt ulanmagan.",
+  "btn.connect_account": "➕ Akkaunt ulash",
+  "btn.my_accounts": "👤 Akkauntlarim",
+  "btn.language": "🌐 Til",
+  "btn.help": "❓ Yordam",
+  "btn.cancel": "✖️ Bekor qilish",
+  "lang.choose": "Tilni tanlang:",
+  "lang.changed": "Til o'zgartirildi: <b>{lang}</b>",
+  "error.not_allowed": "Kechirasiz, bu bot yopiq. Sizda ruxsat yo'q.",
+  "error.generic": "Xatolik yuz berdi. Qayta urinib ko'ring.",
+  "error.max_accounts": "Maksimal akkaunt soniga yetdingiz ({max} ta).",
+  "help.text": "<b>Buyruqlar</b>\n/start — bosh menyu\n/accounts — ulangan akkauntlar\n/lang — tilni o'zgartirish\n\n<b>Xavfsizlik</b>\n• Session kalitlaringiz shifrlangan holda saqlanadi\n• Agent xabar o'chira olmaydi\n• Agent shu botga yoza olmaydi\n• Har bir yozish amali sizdan tasdiq so'raydi"
+}

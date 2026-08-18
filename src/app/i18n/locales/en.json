@@ -1,0 +1,16 @@
+{
+  "lang.name": "English",
+  "start.greeting": "Hi, <b>{name}</b>!\n\nI'm an AI agent that analyzes your Telegram chats.\n\nWhat I can do:\n• find the right message among thousands\n• build channel statistics (views, reactions, growth)\n• summarize a chat and suggest post ideas\n• write, edit and pin posts\n\n<b>I can never delete messages</b> — this is structurally impossible.\n\nConnect an account to get started.",
+  "start.no_accounts": "No accounts connected yet.",
+  "btn.connect_account": "➕ Connect account",
+  "btn.my_accounts": "👤 My accounts",
+  "btn.language": "🌐 Language",
+  "btn.help": "❓ Help",
+  "btn.cancel": "✖️ Cancel",
+  "lang.choose": "Choose a language:",
+  "lang.changed": "Language changed: <b>{lang}</b>",
+  "error.not_allowed": "Sorry, this bot is private. You don't have access.",
+  "error.generic": "Something went wrong. Please try again.",
+  "error.max_accounts": "Account limit reached ({max}).",
+  "help.text": "<b>Commands</b>\n/start — main menu\n/accounts — connected accounts\n/lang — change language\n\n<b>Security</b>\n• Session keys are stored encrypted\n• The agent cannot delete messages\n• The agent cannot write to this bot\n• Every write action asks for your confirmation"
+}
