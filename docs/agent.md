@@ -54,3 +54,16 @@ egalik → TTL (`WRITE_PROPOSAL_TTL_HOURS`) → `execute_action`: `assert_writab
 👍/👎 (`rating`), fon auto-judge (`Task.ROUTE`, savol+javob): `auto_relevance`,
 `auto_usefulness`, `auto_grounded`, `auto_note`. Dashboard "ko'rib chiqish
 kerak": 👎 yoki auto ≤2 yoki asossiz.
+
+## Kontent tool'lari (7-bosqich)
+
+| Tool | Nima |
+|---|---|
+| `generate_image(prompt, style?)` | Gemini image → `/api/images/<id>`; modelga markdown `![..](url)`; keyin `send_message(image_id)` |
+| `list_scheduled_messages(chat?)` | Telegram-side rejalashtirilganlar (READ) |
+| `send_message(..., image_id?, schedule_at?)` | rasm bilan (caption ≤1024) va/yoki rejalashtirilgan — baribir taklif |
+
+Auto-reply (`services/autoreply.py`): qoida → worker (5 daq) → `draft_reply`
+(`AUTOREPLY_PROMPT`, `SKIP` mumkin) → `write_tools.propose_or_execute(send_message,
+reply_to)`. Soatiga `max_per_hour`, jim soatlar, faqat begona xabarlar, boshlang'ich
+nuqta — qoida yaratilgan paytdagi eng yangi xabar.

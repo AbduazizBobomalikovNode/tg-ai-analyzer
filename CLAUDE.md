@@ -106,6 +106,16 @@ bu testlarni o'chirish/yumshatish taqiqlanadi.
   Yangi maydon kerak bo'lsa — yangi jadval, trigger'ni yumshatmang.
 - Delete tool'i — hech qachon; `WRITE_TOOL_NAMES` frozenset, testlar qo'riqlaydi.
 
+## Kontent (7-bosqich)
+
+- Rasm fayllari `DATA_DIR/images` — faqat `services/images.py` yozadi/o'qiydi,
+  berish `/api/images/{id}` egalik bilan; `path_for_send` akkaunt egasini tekshiradi.
+- Auto-reply hech qachon o'zi yubormaydi — `write_tools.propose_or_execute`
+  orqali (chat `autonomous` bo'lsa o'sha yerda bajariladi). Yangi "tezkor yo'l"
+  qo'shmang.
+- Scheduling — Telegram server-side (`schedule=`); o'z cron'imiz bilan post
+  yuborish yo'q (`scheduled_jobs` hozircha bo'sh).
+
 ## Sirlar
 
 - Session string, master key, 2FA parol, OTP kod **hech qachon log'ga tushmaydi**

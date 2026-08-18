@@ -60,3 +60,10 @@ Xato formati: `{"detail": {"code": "<i18n kalit>", ...}}` — kalitlar
 latency, qoniqish, auto-baho), `daily[]`, `models[]`, `strategies[]`,
 `top_chats[]`, `review[]`, `actions{}`. `GET /api/stats/ingestion` — akkaunt/chat/
 xabar/embedding/snapshot holati.
+
+## Kontent (7-bosqich)
+| Metod | Yo'l | Izoh |
+|---|---|---|
+| GET | `/api/images/{id}` | egasiga rasm fayli (private cache) |
+| GET/PUT | `/api/accounts/{id}/chats/{chat_id}/autoreply` | qoida `{enabled, trigger, keywords, instructions, max_per_hour, quiet_from, quiet_to}` |
+| GET | `/api/accounts/{id}/chats/{chat_id}/scheduled` | Telegram-side rejalashtirilgan postlar |

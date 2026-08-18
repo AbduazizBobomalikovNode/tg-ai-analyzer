@@ -119,11 +119,31 @@ async def build_proposal(ctx: ToolContext, tool: str, args: dict[str, Any]) -> P
     preview: dict[str, Any] = {"chat": chat.title, "chat_id": chat.id}
 
     if tool == "send_message":
-        norm["text"] = _text_arg(args)
+        image_id = str(args.get("image_id") or "").strip() or None
+        if image_id:
+            from app.services import images as IMG
+
+            try:
+                await IMG.path_for_send(ctx.session, image_id=image_id, account_id=ctx.account_id)
+            except IMG.ImageError as exc:
+                raise ProposalError("bad_image", exc.code) from exc
+            text = str(args.get("text") or "").strip()  # rasm bilan matn ixtiyoriy (caption)
+            if len(text) > 1024:
+                raise ProposalError("text_too_long", "caption > 1024")
+            norm["text"] = text
+        else:
+            norm["text"] = _text_arg(args)
+        norm["image_id"] = image_id
         norm["reply_to"] = _int_arg(args, "reply_to", required=False)
         norm["schedule_at"] = _schedule_arg(args)
         preview.update(
-            {"text": norm["text"], "reply_to": norm["reply_to"], "schedule_at": norm["schedule_at"]}
+            {
+                "text": norm["text"],
+                "reply_to": norm["reply_to"],
+                "schedule_at": norm["schedule_at"],
+                "image_id": image_id,
+                "image_url": f"/api/images/{image_id}" if image_id else None,
+            }
         )
     elif tool == "edit_message":
         norm["message_id"] = _int_arg(args, "message_id")
@@ -242,12 +262,17 @@ WRITE_TOOL_SPECS: list[ToolSpec] = [
                 "chat": _CHAT_ARG,
                 "text": {
                     "type": "string",
-                    "description": "Final message text (plain text or simple Markdown)",
+                    "description": "Final message text (plain text or simple Markdown); "
+                    "with image_id it is the photo caption (≤ 1024 chars)",
                 },
                 "reply_to": {"type": "integer", "description": "Message id to reply to (optional)"},
                 "schedule_at": {
                     "type": "string",
-                    "description": "ISO-8601 datetime to schedule (optional)",
+                    "description": "ISO-8601 datetime for a Telegram-side scheduled post",
+                },
+                "image_id": {
+                    "type": "string",
+                    "description": "id returned by generate_image to attach as a photo (optional)",
                 },
             },
             "required": ["text"],

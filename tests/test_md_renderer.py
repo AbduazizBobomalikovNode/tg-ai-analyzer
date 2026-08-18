@@ -74,3 +74,16 @@ def test_markdown_features_and_xss() -> None:
     assert (
         "<blockquote>" in out["quote"] and "<h5>H</h5>" in out["quote"] and "<hr>" in out["quote"]
     )
+
+
+def test_images_only_from_our_api() -> None:
+    out = render(
+        {
+            "ok": "![cover](/api/images/0b1c2d3e-4f50-6a7b-8c9d-0e1f2a3b4c5d)",
+            "bad": "![x](https://evil.example/pic.png) ![y](/api/images/../../etc/passwd)",
+        }
+    )
+    assert (
+        '<img class="gen-img" src="/api/images/0b1c2d3e-4f50-6a7b-8c9d-0e1f2a3b4c5d"' in out["ok"]
+    )
+    assert "<img" not in out["bad"]

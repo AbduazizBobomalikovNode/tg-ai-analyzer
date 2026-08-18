@@ -26,6 +26,8 @@
     const codes = [];
     let s = src.replace(/`([^`\n]+)`/g, (_, c) => { codes.push(`<code>${esc(c)}</code>`); return `\uE000${codes.length - 1}\uE001`; });
     s = esc(s);
+    // rasmlar — faqat o'zimizniki (/api/images/<id>), boshqa manba matn bo'lib qoladi
+    s = s.replace(/!\[([^\]]*)\]\((\/api\/images\/[A-Za-z0-9-]{8,40})\)/g, (m, alt, url) => `<img class="gen-img" src="${url}" alt="${alt}" loading="lazy">`);
     // havolalar [text](url "title")
     s = s.replace(/\[([^\]]+)\]\(((?:[^()\s]|\([^()\s]*\))+)(?:\s+&quot;[^&]*&quot;)?\)/g, (m, text, url) => {
       const u = safeUrl(url.replace(/&amp;/g, "&"));

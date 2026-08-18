@@ -66,11 +66,21 @@
         </select>
       </label>
       <a class="topbar-ctx" id="pending-badge" href="#" hidden></a>
+      <button class="icon-btn" id="btn-autoreply" title="{{ t('web.ar.title') }}" hidden>🤖</button>
+      <button class="icon-btn" id="btn-scheduled" title="{{ t('web.sched.title') }}" hidden>⏰</button>
       <button class="icon-btn danger" id="btn-delete" title="{{ t('web.chat.delete') }}" hidden>🗑</button>
     </header>
 
     <div class="messages" id="messages">
       <div class="empty" id="empty-state">{{ t('web.chat.empty_state') }}</div>
+    </div>
+
+    <!-- panellar: kutayotgan amallar / auto-reply / rejalashtirilganlar -->
+    <div class="panel-backdrop" id="panel-backdrop" hidden>
+      <div class="panel" role="dialog" aria-modal="true">
+        <div class="panel-head"><b id="panel-title"></b><button class="icon-btn" id="panel-close" aria-label="{{ t('web.pending.close') }}">✕</button></div>
+        <div class="panel-body" id="panel-body"></div>
+      </div>
     </div>
 
     <form class="composer" id="composer">

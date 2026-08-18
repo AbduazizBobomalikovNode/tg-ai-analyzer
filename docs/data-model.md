@@ -1,7 +1,8 @@
 # Ma'lumot modeli
 
 Alembic migratsiyalar: `0001` asosiy sxema, `0002` conversations, `0003` chat sync
-progress, `0004` sifat/xarajat ustunlari, `0005` chat_digests.
+progress, `0004` sifat/xarajat ustunlari, `0005` chat_digests, `0006` generated_images +
+auto_reply_rules.
 
 ```
 users(id, tg_user_id, username, locale)
@@ -28,7 +29,10 @@ conversation_messages(id, conversation_id, role, content, model, provider,
 agent_runs(id, user_id, account_id, chat_id, prompt, model, tokens_in, tokens_out)
 agent_actions(id, run_id, tool, args jsonb, status, block_reason,
               target_peer_id, result_msg_id, error, confirmed_at)   ← append-only trigger
-scheduled_jobs(...)                (7-bosqich)
+generated_images(id uuid, user_id, account_id, prompt, model, mime, size_bytes)
+auto_reply_rules(id, account_id, chat_id UNIQUE, enabled, trigger, keywords,
+                 instructions, max_per_hour, quiet_from, quiet_to, last_processed_msg_id)
+scheduled_jobs(...)                (hozircha ishlatilmaydi — Telegram-side scheduling)
 ```
 
 ## Nozik nuqtalar

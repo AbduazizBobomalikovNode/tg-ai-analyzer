@@ -14,6 +14,8 @@
     send: $("btn-send"), deep: $("deep"), strategy: $("strategy"), mode: $("mode"), ctxLimit: $("ctx-limit"), ctxLimitLabel: $("ctx-limit-label"),
     ctxLimitWrap: $("ctx-limit-wrap"), convTitle: $("conv-title"), ctxBadge: $("ctx-badge"),
     del: $("btn-delete"), wmWrap: $("wm-wrap"), writeMode: $("write-mode"), pending: $("pending-badge"),
+    arBtn: $("btn-autoreply"), schedBtn: $("btn-scheduled"),
+    panelBackdrop: $("panel-backdrop"), panelTitle: $("panel-title"), panelBody: $("panel-body"), panelClose: $("panel-close"),
   };
 
   const state = {
@@ -119,6 +121,7 @@
     const label = t(`web.act.tool_${a.tool}`) === `web.act.tool_${a.tool}` ? a.tool : t(`web.act.tool_${a.tool}`);
     const p = a.preview || {};
     let body = "";
+    if (p.image_url) body += `<img class="gen-img" src="${esc(p.image_url)}" alt="">`;
     if (p.text) body += `<div class="action-text">${esc(p.text)}</div>`;
     const meta = [];
     if (p.chat) meta.push(`→ ${esc(p.chat)}`);
@@ -126,6 +129,7 @@
     if (p.reply_to) meta.push(`reply #${p.reply_to}`);
     if (p.schedule_at) meta.push(`⏰ ${esc(String(p.schedule_at).slice(0, 16).replace("T", " "))}`);
     if (p.drop_author) meta.push("copy");
+    if (p.image_id) meta.push(`🖼 ${esc(t("web.act.image"))}`);
     if (a.result_msg_id) meta.push(t("web.act.result", { id: a.result_msg_id }));
     if (a.error) meta.push(`⚠️ ${esc(a.error)}`);
     if (a.block_reason) meta.push(`⛔ ${esc(a.block_reason)}`);
@@ -191,11 +195,84 @@
 
   function updateWriteModeUI() {
     const c = state.peerId ? state.chatsByPeer[state.peerId] : null;
-    if (!c) { el.wmWrap.hidden = true; return; }
+    if (!c) { el.wmWrap.hidden = true; el.arBtn.hidden = true; el.schedBtn.hidden = true; return; }
     el.wmWrap.hidden = false;
     el.writeMode.value = c.write_mode || "read_only";
     el.writeMode.disabled = false;
+    el.arBtn.hidden = false;
+    el.schedBtn.hidden = false;
   }
+
+  // ── panel ────────────────────────────────────────────────────────────────
+  function openPanel(title, html) { el.panelTitle.textContent = title; el.panelBody.innerHTML = html; el.panelBackdrop.hidden = false; }
+  function closePanel() { el.panelBackdrop.hidden = true; el.panelBody.innerHTML = ""; }
+  el.panelClose.addEventListener("click", closePanel);
+  el.panelBackdrop.addEventListener("click", (e) => { if (e.target === el.panelBackdrop) closePanel(); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !el.panelBackdrop.hidden) closePanel(); });
+
+  async function openPendingPanel() {
+    const d = await api("GET", "/api/actions?status=proposed&limit=50");
+    openPanel(t("web.pending.title"), d.items.length ? d.items.map(actionCard).join("") : `<p class="muted">${esc(t("web.pending.empty"))}</p>`);
+  }
+  el.pending.addEventListener("click", (e) => { e.preventDefault(); openPendingPanel(); });
+  el.panelBody.addEventListener("click", async (e) => {
+    const ab = e.target.closest("[data-act]"); if (!ab) return;
+    const aid = +ab.dataset.aid, act = ab.dataset.act;
+    const card = ab.closest(".action-card");
+    card.querySelectorAll("button").forEach((x) => { x.disabled = true; });
+    try { const a = await api("POST", `/api/actions/${aid}/${act}`, {}); card.outerHTML = actionCard(a); }
+    catch (err) { card.querySelectorAll("button").forEach((x) => { x.disabled = false; }); alert(err.message); }
+    loadPending();
+  });
+
+  async function openAutoReplyPanel() {
+    const c = state.peerId ? state.chatsByPeer[state.peerId] : null; if (!c) return;
+    let rule = null;
+    try { rule = (await api("GET", `/api/accounts/${state.accountId}/chats/${c.id}/autoreply`)).rule; } catch (_) { /* yo'q */ }
+    const r = rule || { enabled: false, trigger: "questions", keywords: "", instructions: "", max_per_hour: 5, quiet_from: null, quiet_to: null };
+    const opt = (v, label) => `<option value="${v}" ${r.trigger === v ? "selected" : ""}>${esc(label)}</option>`;
+    const needsWrite = (c.write_mode || "read_only") === "read_only";
+    openPanel(`${t("web.ar.title")} · ${esc(c.title)}`, `
+      ${needsWrite ? `<div class="warn">${esc(t("web.ar.needs_write"))}</div>` : ""}
+      <form id="ar-form" class="form-grid">
+        <label><span>${esc(t("web.ar.enabled"))}</span><input type="checkbox" name="enabled" ${r.enabled ? "checked" : ""}></label>
+        <label><span>${esc(t("web.ar.trigger"))}</span><select name="trigger">${opt("questions", t("web.ar.trig_questions"))}${opt("mentions", t("web.ar.trig_mentions"))}${opt("keywords", t("web.ar.trig_keywords"))}${opt("all", t("web.ar.trig_all"))}</select></label>
+        <label class="full"><span>${esc(t("web.ar.keywords"))}</span><input type="text" name="keywords" value="${esc(r.keywords || "")}"></label>
+        <label class="full"><span>${esc(t("web.ar.instructions"))}</span><textarea name="instructions" placeholder="${esc(t("web.ar.instructions_ph"))}">${esc(r.instructions || "")}</textarea></label>
+        <label><span>${esc(t("web.ar.max_per_hour"))}</span><input type="number" name="max_per_hour" min="1" max="60" value="${r.max_per_hour || 5}"></label>
+        <label><span>${esc(t("web.ar.quiet"))}</span><span class="row"><input type="number" name="quiet_from" min="0" max="23" placeholder="22" value="${r.quiet_from ?? ""}"><input type="number" name="quiet_to" min="0" max="23" placeholder="7" value="${r.quiet_to ?? ""}"></span></label>
+        <p class="form-note full">${esc(t("web.ar.note"))}</p>
+        <div class="full"><button type="submit" class="btn primary" style="width:auto">${esc(t("web.ar.save"))}</button></div>
+      </form>`);
+    $("ar-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const f = new FormData(e.target);
+      const body = {
+        enabled: f.get("enabled") === "on", trigger: f.get("trigger"), keywords: f.get("keywords") || "",
+        instructions: f.get("instructions") || "", max_per_hour: +f.get("max_per_hour") || 5,
+        quiet_from: f.get("quiet_from") === "" ? null : +f.get("quiet_from"),
+        quiet_to: f.get("quiet_to") === "" ? null : +f.get("quiet_to"),
+      };
+      try {
+        await api("PUT", `/api/accounts/${state.accountId}/chats/${c.id}/autoreply`, body);
+        const note = $("sync-note"); note.textContent = t("web.ar.saved"); note.hidden = false; setTimeout(() => { note.hidden = true; }, 2500);
+        closePanel();
+      } catch (err) { alert(err.message); }
+    });
+  }
+  el.arBtn.addEventListener("click", openAutoReplyPanel);
+
+  async function openScheduledPanel() {
+    const c = state.peerId ? state.chatsByPeer[state.peerId] : null; if (!c) return;
+    openPanel(`${t("web.sched.title")} · ${esc(c.title)}`, `<p class="muted">…</p>`);
+    try {
+      const d = await api("GET", `/api/accounts/${state.accountId}/chats/${c.id}/scheduled`);
+      el.panelBody.innerHTML = d.items.length
+        ? d.items.map((m) => `<div class="sched-item"><div class="muted">⏰ ${esc((m.date || "").slice(0, 16).replace("T", " "))} · #${m.msg_id}${m.has_media ? " · 🖼" : ""}</div>${esc(m.text || "")}</div>`).join("")
+        : `<p class="muted">${esc(t("web.sched.empty"))}</p>`;
+    } catch (err) { el.panelBody.innerHTML = `<p class="warn">${esc(err.message)}</p>`; }
+  }
+  el.schedBtn.addEventListener("click", openScheduledPanel);
   async function loadPending() {
     try {
       const d = await api("GET", "/api/actions?status=proposed&limit=50");

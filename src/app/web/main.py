@@ -28,6 +28,7 @@ from app.services.auth_flow import AuthFlowStore
 from app.web.routers import actions as actions_router
 from app.web.routers import auth as auth_router
 from app.web.routers import chat as chat_router
+from app.web.routers import content as content_router
 from app.web.routers import pages as pages_router
 from app.web.routers import stats as stats_router
 from app.web.routers import tg as tg_router
@@ -70,6 +71,7 @@ def create_app() -> FastAPI:
     app.include_router(chat_router.router)
     app.include_router(stats_router.router)
     app.include_router(actions_router.router)
+    app.include_router(content_router.router)
     app.include_router(pages_router.router)
 
     @app.get("/health")

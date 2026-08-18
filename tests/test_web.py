@@ -305,3 +305,13 @@ def test_chat_page_has_write_mode_and_action_ui(client: TestClient) -> None:
     assert r.status_code == 200
     assert 'id="write-mode"' in r.text and 'id="pending-badge"' in r.text
     assert "Avtonom" in r.text
+
+
+def test_content_endpoints_guarded(client: TestClient) -> None:
+    assert client.get("/api/images/abc").status_code == 401
+    client.cookies.set(sec.SESSION_COOKIE, sec.issue_session(7))
+    assert client.get("/api/images/..%2F..%2Fetc").status_code in (404, 422)
+    r = client.put("/api/accounts/1/chats/2/autoreply", json={"trigger": "nope"})
+    assert r.status_code in (403, 422)  # CSRF (403) yoki validatsiya
+    r = client.put("/api/accounts/1/chats/2/autoreply", json={"trigger": "nope"}, headers=H)
+    assert r.status_code == 422

@@ -82,6 +82,7 @@ async def run_agent(
         account_id=account_id,
         pinned_chat_id=pinned_chat.id if pinned_chat else None,
         llm=client,
+        user_id=user_id,
     )
     note = runtime_note(
         now_iso=datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC"),

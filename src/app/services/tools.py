@@ -43,6 +43,7 @@ class ToolContext:
     pinned_chat_id: int | None = None  # UI'da tanlangan chat (DB id)
     llm: LLM | None = None
     now: datetime = field(default_factory=lambda: datetime.now(UTC))
+    user_id: int | None = None  # rasm generatsiya limiti/egalik uchun
 
 
 @dataclass(slots=True)
@@ -264,6 +265,66 @@ async def get_chat_stats(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     )
 
 
+async def generate_image(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    """Rasm generatsiya (Gemini). Natija — /api/images/<id>; yuborish: send_message(image_id)."""
+    from app.services import images as IMG
+
+    if ctx.user_id is None:
+        return ToolResult("error: image generation needs a signed-in user", ok=False)
+    prompt = str(args.get("prompt") or "").strip()
+    try:
+        info = await IMG.generate(
+            ctx.session,
+            user_id=ctx.user_id,
+            account_id=ctx.account_id,
+            prompt=prompt,
+            style=str(args.get("style") or ""),
+            llm=ctx.llm,
+        )
+    except IMG.ImageError as exc:
+        return ToolResult(f"error: {exc.code} — {exc.detail}", ok=False)
+    return ToolResult(
+        f"image generated: id={info.id} url={info.url} ({info.size_bytes // 1024} KB). "
+        f"Show it to the user with markdown ![{prompt[:60]}]({info.url}). "
+        "To post it, propose send_message with image_id and the caption as text.",
+        meta={"image_id": info.id, "url": info.url},
+    )
+
+
+async def list_scheduled_messages(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    """Telegram serverida rejalashtirilgan postlar (messages.GetScheduledHistory — READ)."""
+    from app.mtproto.pool import PoolError, pool
+
+    chat = await _resolve_chat(ctx, args)
+    if chat is None:
+        return _no_chat()
+    try:
+        client = await pool.get(ctx.account_id)
+        peer = await pool.input_peer(ctx.account_id, chat.tg_peer_id)
+        msgs = await client.get_messages(peer, limit=50, scheduled=True)
+    except PoolError as exc:
+        return ToolResult(f"error: {exc.code}", ok=False)
+    except Exception as exc:  # RPC xatosi — matn
+        return ToolResult(f"error: {type(exc).__name__}: {str(exc)[:200]}", ok=False)
+    items = []
+    for m in msgs or []:
+        when = getattr(m, "date", None)
+        text = S.compact_text(getattr(m, "message", "") or "", max_chars=300)
+        media = getattr(m, "media", None)
+        items.append(
+            f"[{when.strftime('%Y-%m-%d %H:%M') if when else '?'}] #{m.id}"
+            f"{' [media]' if media is not None else ''}: {text}"
+        )
+    if not items:
+        return ToolResult(
+            f'no scheduled messages in "{chat.title}"', meta={"chat": chat.title, "n": 0}
+        )
+    return ToolResult(
+        _clip(f'chat="{chat.title}" scheduled ({len(items)}):\n' + "\n".join(items)),
+        meta={"chat": chat.title, "n": len(items)},
+    )
+
+
 def _parse_days(raw: Any) -> timedelta | None:
     try:
         d = int(raw)
@@ -404,6 +465,42 @@ READ_TOOLS: dict[str, Tool] = {
         get_chat_stats,
     ),
 }
+
+
+READ_TOOLS["generate_image"] = Tool(
+    ToolSpec(
+        "generate_image",
+        "Generate an illustration/cover image with AI for a post. Returns an image id and a "
+        "URL you can show as markdown. Use only when the user asks for an image/picture/cover; "
+        "write a concrete visual prompt (subject, composition, mood, no text in image unless "
+        "asked). To publish, follow with send_message(image_id=..., text=caption).",
+        {
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": "Visual description in English, 1-3 sentences",
+                },
+                "style": {
+                    "type": "string",
+                    "description": "Optional style: flat illustration, photo, 3d, minimal…",
+                },
+            },
+            "required": ["prompt"],
+            "additionalProperties": False,
+        },
+    ),
+    generate_image,
+)
+READ_TOOLS["list_scheduled_messages"] = Tool(
+    ToolSpec(
+        "list_scheduled_messages",
+        "List posts scheduled on Telegram's side for a chat (date, id, text). Use for "
+        "'what is scheduled / queued'.",
+        {"type": "object", "properties": {"chat": _CHAT_ARG}, "additionalProperties": False},
+    ),
+    list_scheduled_messages,
+)
 
 
 def tool_specs() -> list[ToolSpec]:

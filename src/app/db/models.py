@@ -336,6 +336,52 @@ class ChatDigest(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now())
 
 
+class GeneratedImage(Base):
+    """AI generatsiya qilgan rasm (7-bosqich). Fayl `DATA_DIR/images/<id>.png`, DB'da meta."""
+
+    __tablename__ = "generated_images"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)  # uuid4
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    account_id: Mapped[int | None] = mapped_column(ForeignKey("accounts.id", ondelete="SET NULL"))
+    prompt: Mapped[str] = mapped_column(Text, default="")
+    model: Mapped[str] = mapped_column(String(64), default="")
+    mime: Mapped[str] = mapped_column(String(32), default="image/png")
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now())
+
+
+class AutoReplyRule(Base):
+    """Per-chat auto-reply qoidasi (7-bosqich).
+
+    Worker har 5 daqiqada yangi kiruvchi xabarlarni tekshiradi, mos kelsa LLM bilan
+    javob yozadi va **`send_message` taklifi** yaratadi (`agent_actions.proposed`).
+    Chat `autonomous` bo'lsa darhol yuboriladi. Delete/edit hech qachon.
+    """
+
+    __tablename__ = "auto_reply_rules"
+    __table_args__ = (UniqueConstraint("chat_id", name="uq_autoreply_chat"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    account_id: Mapped[int] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE"), index=True
+    )
+    chat_id: Mapped[int] = mapped_column(ForeignKey("chats.id", ondelete="CASCADE"))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    # trigger: all | mentions | keywords | questions
+    trigger: Mapped[str] = mapped_column(String(16), default="questions")
+    keywords: Mapped[str] = mapped_column(Text, default="")  # vergul bilan
+    instructions: Mapped[str] = mapped_column(Text, default="")  # javob uslubi/mazmuni
+    max_per_hour: Mapped[int] = mapped_column(Integer, default=5)
+    quiet_from: Mapped[int | None] = mapped_column(Integer)  # soat (UTC), masalan 22
+    quiet_to: Mapped[int | None] = mapped_column(Integer)  # soat (UTC), masalan 7
+    last_processed_msg_id: Mapped[int] = mapped_column(BigInteger, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=_now(), onupdate=_now()
+    )
+
+
 class ScheduledJob(Base):
     __tablename__ = "scheduled_jobs"
 

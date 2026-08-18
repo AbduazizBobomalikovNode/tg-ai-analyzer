@@ -59,6 +59,8 @@ services:
     env_file: .env
     command: uvicorn app.web.main:app --host 0.0.0.0 --port 8080
     restart: unless-stopped
+    volumes:
+      - ./data:/app/data   # generatsiya qilingan rasmlar (7-bosqich)
     ports:
       - "127.0.0.1:8080:8080"
     depends_on:

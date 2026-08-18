@@ -71,6 +71,8 @@ def _preview(a: AgentAction) -> dict[str, Any]:
         "message_id": args.get("message_id"),
         "reply_to": args.get("reply_to"),
         "schedule_at": args.get("schedule_at"),
+        "image_id": args.get("image_id"),
+        "image_url": f"/api/images/{args['image_id']}" if args.get("image_id") else None,
         "from_chat_id": args.get("from_chat_id"),
         "drop_author": args.get("drop_author"),
         "silent": args.get("silent"),
@@ -243,9 +245,23 @@ async def _run_mtproto(account_id: int, tool: str, args: dict[str, Any]) -> int 
     peer = await pool.input_peer(account_id, int(args["peer_id"]))
     if tool == "send_message":
         schedule = datetime.fromisoformat(args["schedule_at"]) if args.get("schedule_at") else None
-        msg = await client.send_message(
-            peer, args["text"], reply_to=args.get("reply_to"), schedule=schedule, link_preview=True
-        )
+        if args.get("image_id"):
+            path = await _image_path(account_id, str(args["image_id"]))
+            msg = await client.send_file(
+                peer,
+                str(path),
+                caption=args.get("text") or "",
+                reply_to=args.get("reply_to"),
+                schedule=schedule,
+            )
+        else:
+            msg = await client.send_message(
+                peer,
+                args["text"],
+                reply_to=args.get("reply_to"),
+                schedule=schedule,
+                link_preview=True,
+            )
         return int(getattr(msg, "id", 0) or 0) or None
     if tool == "edit_message":
         msg = await client.edit_message(peer, int(args["message_id"]), args["text"])
@@ -263,6 +279,17 @@ async def _run_mtproto(account_id: int, tool: str, args: dict[str, Any]) -> int 
         first = res[0] if isinstance(res, list) and res else res
         return int(getattr(first, "id", 0) or 0) or None
     raise ActionError("unknown_tool", tool)
+
+
+async def _image_path(account_id: int, image_id: str) -> Any:
+    from app.db.base import session_scope
+    from app.services import images as IMG
+
+    async with session_scope() as db:
+        try:
+            return await IMG.path_for_send(db, image_id=image_id, account_id=account_id)
+        except IMG.ImageError as exc:
+            raise ActionError("bad_image", exc.code) from exc
 
 
 # ─── chat write mode ─────────────────────────────────────────────────────────

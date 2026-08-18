@@ -185,6 +185,22 @@ Himoya qatlamlari: egalik (`agent_runs.user_id`), `WRITE_PROPOSAL_TTL_HOURS`,
 `agent_actions` append-only trigger. API: `GET /api/actions?status=proposed`,
 `POST /api/actions/{id}/confirm|reject`, `PATCH …/chats/{id}/write_mode`.
 
+## Kontent (7-bosqich): rasm, scheduling, auto-reply
+
+* **Rasm** — agent `generate_image(prompt, style)` (Gemini image, `Task.IMAGE`) →
+  `data/images/<uuid>.png` + `generated_images`, chatda ko'rinadi
+  (`/api/images/{id}`, faqat egasiga); `send_message(image_id, text=caption)`
+  taklifi tasdiqlanganda `send_file` (SendMedia — allowlist). Kunlik limit
+  `IMAGE_MAX_PER_DAY`.
+* **Scheduling** — `send_message(schedule_at=ISO)` → Telegram server-side
+  rejalashtirilgan post (tasdiq bilan); topbar ⏰ — rejalashtirilganlar ro'yxati
+  (`GetScheduledHistory`, READ); `list_scheduled_messages` tool.
+* **Auto-reply** — topbar 🤖: per-chat qoida (trigger: savol / mention / kalit
+  so'z / hamma; ko'rsatma; soatiga limit; jim soatlar). Worker har 5 daqiqada
+  yangi kiruvchi xabarlarga LLM javob yozadi (`SKIP` mumkin) va **`send_message`
+  taklifi** (`reply_to`) yaratadi — ✅ tasdiq; chat `autonomous` bo'lsa darhol.
+  Yozish yo'li 6-bosqichdagi bilan bir xil (guard, rate limit, audit).
+
 ## Dashboard va sifat baholash
 
 `/dashboard` — so'rovlar, tokenlar (in/out), taxminiy xarajat (`llm/pricing.py`),
@@ -301,6 +317,8 @@ src/app/
     tools.py         read-only agent tool'lari (registry + JSON schema)
     write_tools.py   yozish tool'lari: taklif (proposed) — yuborilmaydi
     actions.py       tasdiqlash/rad/bajarish, rate limit, TTL, per-chat rejim
+    images.py        AI rasm generatsiya + fayl/meta + egalik
+    autoreply.py     auto-reply qoidalari va worker mantiqi (taklif yaratadi)
     agent.py         tool sikli: byudjet, audit, majburiy yakun
     digests.py       kunlik digest keshi (chat_digests)
     analytics.py     chat statistikasi (LLM'siz)
@@ -333,7 +351,7 @@ To'liq reja, qarorlar va texnik tahlil: **[PLAN.md](PLAN.md)**
 | 4 | Statistika: `analytics.chat_stats` (davr, o'sish, top, kun/soat) — tool orqali | 🟡 rollup ⬜ |
 | 5 | Agent v1 (read-only tool'lar, audit, byudjet, prompt'lar markazda) | ✅ |
 | 6 | Write actions: taklif → tasdiq → bajarish, per-chat rejim, guard/rate/TTL, audit | ✅ |
-| 7 | Kontent: post, rasm, scheduling, auto-reply | ⬜ |
+| 7 | Kontent: rasm generatsiya, scheduling (Telegram-side), auto-reply qoidalari | ✅ (internet rasm qidiruv ⬜) |
 | 8 | Polish: monitoring, limitlar | ⬜ |
 
 ## Ogohlantirish

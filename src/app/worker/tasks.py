@@ -6,6 +6,8 @@
   snapshot_metrics()               cron: kanal postlari views/reactions snapshot (har soat)
   incremental_sync_all()           cron: barcha faol akkauntlarda yangi xabarlar (10 daqiqa)
   embed_messages()                 cron: embedding'siz xabarlar → pgvector (15 daqiqa)
+  build_daily_digests()            cron: kechagi kun digest'lari (02:30)
+  process_autoreplies()            cron: auto-reply qoidalari → javob takliflari (5 daqiqa)
 
 FloodWait siyosati: `SyncPaused` → ish shu yerda tugaydi va o'zini `retry_after`
 soniyadan keyin qayta navbatga qo'yadi. Retry-storm yo'q, `max_jobs=4` oshirilmaydi.
@@ -209,3 +211,29 @@ async def build_daily_digests(ctx: dict[str, Any]) -> dict[str, Any]:
                 tokens += d.tokens_in + d.tokens_out
     log.info("worker.digests.done", built=built, tokens=tokens)
     return {"built": built, "tokens": tokens}
+
+
+async def process_autoreplies(ctx: dict[str, Any]) -> dict[str, Any]:
+    """Har 5 daqiqa: yoqilgan qoidalar → yangi xabarlarga javob takliflari (7-bosqich)."""
+    from app.config import get_settings
+    from app.db.base import session_scope
+    from app.db.models import AutoReplyRule
+    from app.services import autoreply as AR
+
+    if not get_settings().autoreply_enabled:
+        return {"skipped": "disabled"}
+    async with session_scope() as db:
+        ids = await AR.enabled_rule_ids(db)
+    proposed = 0
+    for rid in ids:
+        async with session_scope() as db:
+            rule = await db.get(AutoReplyRule, rid)
+            if rule is None:
+                continue
+            try:
+                rep = await AR.process_rule(db, rule)
+                proposed += int(rep.get("proposed") or 0)
+            except Exception as exc:  # bitta qoida xatosi qolganini to'xtatmasin
+                log.warning("worker.autoreply_failed", rule_id=rid, error=str(exc)[:200])
+    log.info("worker.autoreply.done", rules=len(ids), proposed=proposed)
+    return {"rules": len(ids), "proposed": proposed}

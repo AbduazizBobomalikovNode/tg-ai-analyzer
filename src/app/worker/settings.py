@@ -72,6 +72,7 @@ class WorkerSettings:
         tasks.incremental_sync_all,
         tasks.embed_messages,
         tasks.build_daily_digests,
+        tasks.process_autoreplies,
     ]
     cron_jobs: ClassVar[list[Any]] = [
         cron(heartbeat, minute={0, 30}, run_at_startup=False),
@@ -80,6 +81,12 @@ class WorkerSettings:
         cron(tasks.incremental_sync_all, minute={0, 10, 20, 30, 40, 50}, run_at_startup=True),
         cron(tasks.embed_messages, minute={7, 22, 37, 52}, run_at_startup=False, timeout=1200),
         cron(tasks.build_daily_digests, hour={2}, minute={30}, run_at_startup=False, timeout=3000),
+        cron(
+            tasks.process_autoreplies,
+            minute=set(range(2, 60, 5)),
+            run_at_startup=False,
+            timeout=600,
+        ),
     ]
     on_startup = startup
     on_shutdown = shutdown

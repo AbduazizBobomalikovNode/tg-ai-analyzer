@@ -54,6 +54,12 @@ class Settings(BaseSettings):
     # Agent (tool) sikli chegaralari — xarajat qopqog'i
     agent_max_iterations: int = Field(default=5, ge=1, le=12)
     agent_tool_result_tokens: int = Field(default=12_000, ge=1_000, le=60_000)
+    # 7-bosqich: fayllar (generatsiya rasmlar) va auto-reply
+    data_dir: str = "data"
+    image_gen_enabled: bool = True
+    image_max_per_day: int = Field(default=30, ge=0, le=1000)  # foydalanuvchi bo'yicha
+    autoreply_enabled: bool = True
+    autoreply_context_messages: int = Field(default=15, ge=3, le=50)
     # Yozish amallari (6-bosqich): taklif muddati va akkaunt bo'yicha soatlik limit
     write_proposal_ttl_hours: int = Field(default=24, ge=1, le=168)
     write_rate_per_hour: int = Field(default=20, ge=1, le=500)
