@@ -94,6 +94,18 @@ bu testlarni o'chirish/yumshatish taqiqlanadi.
 - Digest keshi (`chat_digests`) `msg_count` bo'yicha invalidatsiya — xabarlar
   qayta sync bo'lsa avtomat qayta hisoblanadi.
 
+## Yozish amallari (6-bosqich)
+
+- Yozish yo'li bitta: `write_tools.propose_or_execute` → `agent_actions(proposed)`
+  → `actions.confirm_action` → `execute_action` → MTProto. To'g'ridan-to'g'ri
+  `client.send_message` chaqiruvi boshqa joyda bo'lmasin.
+- `execute_action` ichidagi `assert_writable`, rate limit, TTL, `read_only`
+  tekshiruvi — olib tashlanmaydi. `autonomous` — akkauntga bitta chat
+  (`set_chat_write_mode` tekshiradi), default emas.
+- `agent_actions` append-only: faqat status/confirmed_at/result_msg_id/error.
+  Yangi maydon kerak bo'lsa — yangi jadval, trigger'ni yumshatmang.
+- Delete tool'i — hech qachon; `WRITE_TOOL_NAMES` frozenset, testlar qo'riqlaydi.
+
 ## Sirlar
 
 - Session string, master key, 2FA parol, OTP kod **hech qachon log'ga tushmaydi**

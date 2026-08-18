@@ -112,6 +112,7 @@
       [t("web.dash.ing_embedded"), `${fmt(ing.embedded)} (${ing.messages ? Math.round(100 * ing.embedded / ing.messages) : 0}%)`],
       [t("web.dash.ing_snapshots"), fmt(ing.snapshots_7d)],
       [t("web.dash.ing_running"), ing.running],
+      [t("web.dash.actions"), Object.keys(ov.actions || {}).length ? Object.entries(ov.actions).map(([k, v]) => `${k}: ${v}`).join(" · ") : "—"],
     ].map(([k, v]) => `<div class="kv-row"><span>${esc(k)}</span><b>${esc(v)}</b></div>`).join("");
 
     table($("tbl-models"), [

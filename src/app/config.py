@@ -54,6 +54,9 @@ class Settings(BaseSettings):
     # Agent (tool) sikli chegaralari — xarajat qopqog'i
     agent_max_iterations: int = Field(default=5, ge=1, le=12)
     agent_tool_result_tokens: int = Field(default=12_000, ge=1_000, le=60_000)
+    # Yozish amallari (6-bosqich): taklif muddati va akkaunt bo'yicha soatlik limit
+    write_proposal_ttl_hours: int = Field(default=24, ge=1, le=168)
+    write_rate_per_hour: int = Field(default=20, ge=1, le=500)
     # Embedding indeksi (vektor qidiruv). Gemini embed — arzon, lekin o'chirsa bo'ladi
     embed_enabled: bool = True
     embed_batch_per_run: int = Field(default=500, ge=50, le=5000)

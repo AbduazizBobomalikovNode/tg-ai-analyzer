@@ -24,6 +24,7 @@ from app.db.models import ActionStatus, AgentAction, AgentRun, Chat
 from app.llm import LLM, LLMError, Msg, Task
 from app.logging import get_logger
 from app.services import tools as T
+from app.services import write_tools as W
 from app.services.prompts import AGENT_SYSTEM_PROMPT, runtime_note
 from app.services.search import est_tokens
 
@@ -46,6 +47,7 @@ class AgentOutcome:
     latency_ms: int = 0
     run_id: int | None = None
     result_tokens: int = 0  # tool natijalari (taxminiy)
+    action_ids: list[int] = field(default_factory=list)  # taklif/bajarilgan yozish amallari
 
 
 async def run_agent(
@@ -92,6 +94,10 @@ async def run_agent(
         Msg.user(f"{question}\n\n({note})"),
     ]
     specs = T.tool_specs()
+    write_enabled = await W.writable_chats_exist(session, account_id)
+    if write_enabled:
+        specs = specs + W.WRITE_TOOL_SPECS
+    action_ids: list[int] = []
 
     tokens_in = tokens_out = 0
     used_result_tokens = 0
@@ -126,7 +132,17 @@ async def run_agent(
         messages.append(Msg.assistant(res.text, res.tool_calls))
         for call in res.tool_calls[:MAX_CALLS_PER_TURN]:
             t0 = time.monotonic()
-            result = await T.run_tool(call.name, ctx, call.arguments)
+            if call.name in W.WRITE_TOOL_NAMES:
+                if not write_enabled:
+                    result = T.ToolResult("error: writing is disabled for this account", ok=False)
+                else:
+                    result = await W.propose_or_execute(
+                        session, ctx, run_id=run.id, tool=call.name, args=call.arguments
+                    )
+                if result.meta.get("action_id"):
+                    action_ids.append(int(result.meta["action_id"]))
+            else:
+                result = await T.run_tool(call.name, ctx, call.arguments)
             text = result.text
             # umumiy byudjet — oshsa keskin qisqartiramiz
             cost = est_tokens(text)
@@ -148,19 +164,22 @@ async def run_agent(
                 **{
                     k: v
                     for k, v in result.meta.items()
-                    if k in ("chat", "hits", "n", "days", "posts")
+                    if k in ("chat", "hits", "n", "days", "posts", "proposed", "executed")
                 },
             }
+            if result.meta.get("action_id"):
+                entry["action_id"] = result.meta["action_id"]
             calls_log.append(entry)
-            session.add(
-                AgentAction(
-                    run_id=run.id,
-                    tool=call.name,
-                    args=call.arguments,
-                    status=ActionStatus.EXECUTED if result.ok else ActionStatus.FAILED,
-                    error=None if result.ok else result.text[:500],
+            if call.name not in W.WRITE_TOOL_NAMES:  # yozish tool'i o'z yozuvini o'zi qo'shgan
+                session.add(
+                    AgentAction(
+                        run_id=run.id,
+                        tool=call.name,
+                        args=call.arguments,
+                        status=ActionStatus.EXECUTED if result.ok else ActionStatus.FAILED,
+                        error=None if result.ok else result.text[:500],
+                    )
                 )
-            )
         # javob berilmagan chaqiruvlar (limitdan tashqari) — modelga aytamiz
         for call in res.tool_calls[MAX_CALLS_PER_TURN:]:
             messages.append(
@@ -208,6 +227,7 @@ async def run_agent(
         latency_ms=int((time.monotonic() - started) * 1000),
         run_id=run.id,
         result_tokens=used_result_tokens,
+        action_ids=action_ids,
     )
     log.info(
         "agent.done",

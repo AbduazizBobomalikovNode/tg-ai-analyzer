@@ -68,8 +68,9 @@ async def test_run_tool_unknown_and_exception_are_text() -> None:
 
 
 class _Session:
-    def __init__(self) -> None:
+    def __init__(self, writable: bool = False) -> None:
         self.added: list[Any] = []
+        self.writable = writable
 
     def add(self, obj: Any) -> None:
         self.added.append(obj)
@@ -77,6 +78,9 @@ class _Session:
             obj.id = len(self.added)
 
     async def flush(self) -> None: ...
+
+    async def execute(self, *a: Any, **k: Any) -> Any:  # writable_chats_exist uchun
+        return SimpleNamespace(first=lambda: (1,) if self.writable else None)
 
 
 class _LLM:

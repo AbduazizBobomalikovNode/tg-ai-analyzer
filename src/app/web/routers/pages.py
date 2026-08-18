@@ -24,7 +24,9 @@ def _strings(locale: str) -> dict[str, str]:
     return {
         k: v
         for k, v in merged.items()
-        if k.startswith(("web.", "auth.err.", "pool.err.", "chat.err.", "error."))
+        if k.startswith(
+            ("web.", "auth.err.", "pool.err.", "chat.err.", "action.err.", "sync.err.", "error.")
+        )
     }
 
 

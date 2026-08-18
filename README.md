@@ -167,6 +167,24 @@ Sonnet 5) — chat/agent; `DEEP` (Opus 5) faqat tugma bilan; embedding faqat ≥
 auto-baho sampling (`WEB_AUTO_EVAL_SAMPLE`); kunlik digest kechasi oldindan hisoblanadi
 (`build_daily_digests`), savolda qayta hisoblanmaydi.
 
+## Yozish amallari va tasdiqlash (6-bosqich)
+
+`services/write_tools.py` — `send_message`, `edit_message`, `forward_message`,
+`pin_message` (delete yo'q va bo'lmaydi). Agent ularni chaqirsa **hech narsa
+yuborilmaydi**: `agent_actions` ga `proposed` yozuv tushadi, chatda karta chiqadi:
+matn, manzil chat, muddat → **✅ Tasdiqlash va yuborish** / **❌ Rad etish**.
+Faqat tasdiqda `services/actions.execute_action` MTProto'ga boradi.
+
+Har chat uchun rejim (topbar'da ✍️): `read_only` (default yangi chatlar uchun
+`DEFAULT_WRITE_MODE`), `write_with_confirm`, `autonomous` — oxirgisi faqat aniq
+tanlanganda, **akkauntga bitta chat**, baribir audit'ga tushadi.
+
+Himoya qatlamlari: egalik (`agent_runs.user_id`), `WRITE_PROPOSAL_TTL_HOURS`,
+`WRITE_RATE_PER_HOUR`, `assert_writable()` taklifda ham, bajarishda ham
+(boshqaruv boti / 777000 / @replies → `blocked`), `GuardedTelegramClient` allowlist,
+`agent_actions` append-only trigger. API: `GET /api/actions?status=proposed`,
+`POST /api/actions/{id}/confirm|reject`, `PATCH …/chats/{id}/write_mode`.
+
 ## Dashboard va sifat baholash
 
 `/dashboard` — so'rovlar, tokenlar (in/out), taxminiy xarajat (`llm/pricing.py`),
@@ -281,6 +299,8 @@ src/app/
     evaluation.py    👍/👎 + LLM-judge auto-baho (arzon model, fon)
     prompts.py       barcha system prompt'lar (chat/agent/digest/judge/router)
     tools.py         read-only agent tool'lari (registry + JSON schema)
+    write_tools.py   yozish tool'lari: taklif (proposed) — yuborilmaydi
+    actions.py       tasdiqlash/rad/bajarish, rate limit, TTL, per-chat rejim
     agent.py         tool sikli: byudjet, audit, majburiy yakun
     digests.py       kunlik digest keshi (chat_digests)
     analytics.py     chat statistikasi (LLM'siz)
@@ -306,7 +326,7 @@ To'liq reja, qarorlar va texnik tahlil: **[PLAN.md](PLAN.md)**
 | 3 | Hybrid search (FTS+trgm+pgvector, RRF), strategiyali kontekst, map-reduce, embedding cron | ✅ (inline picker ⬜) |
 | 4 | Statistika: `analytics.chat_stats` (davr, o'sish, top, kun/soat) — tool orqali | 🟡 rollup ⬜ |
 | 5 | Agent v1 (read-only tool'lar, audit, byudjet, prompt'lar markazda) | ✅ |
-| 6 | Write actions + tasdiqlash UI | ⬜ |
+| 6 | Write actions: taklif → tasdiq → bajarish, per-chat rejim, guard/rate/TTL, audit | ✅ |
 | 7 | Kontent: post, rasm, scheduling, auto-reply | ⬜ |
 | 8 | Polish: monitoring, limitlar | ⬜ |
 

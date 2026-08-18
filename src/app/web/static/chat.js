@@ -13,7 +13,7 @@
     messages: $("messages"), empty: $("empty-state"), composer: $("composer"), input: $("input"),
     send: $("btn-send"), deep: $("deep"), strategy: $("strategy"), mode: $("mode"), ctxLimit: $("ctx-limit"), ctxLimitLabel: $("ctx-limit-label"),
     ctxLimitWrap: $("ctx-limit-wrap"), convTitle: $("conv-title"), ctxBadge: $("ctx-badge"),
-    del: $("btn-delete"),
+    del: $("btn-delete"), wmWrap: $("wm-wrap"), writeMode: $("write-mode"), pending: $("pending-badge"),
   };
 
   const state = {
@@ -114,6 +114,27 @@
     if (m.role !== "assistant" || !m.id) return "";
     return `<span class="rate" data-mid="${m.id}"><button data-r="1" class="${m.rating === 1 ? "on" : ""}" title="${esc(t("web.chat.rate_up"))}">👍</button><button data-r="-1" class="${m.rating === -1 ? "on" : ""}" title="${esc(t("web.chat.rate_down"))}">👎</button></span>`;
   }
+  function actionCard(a) {
+    const st = a.status;
+    const label = t(`web.act.tool_${a.tool}`) === `web.act.tool_${a.tool}` ? a.tool : t(`web.act.tool_${a.tool}`);
+    const p = a.preview || {};
+    let body = "";
+    if (p.text) body += `<div class="action-text">${esc(p.text)}</div>`;
+    const meta = [];
+    if (p.chat) meta.push(`→ ${esc(p.chat)}`);
+    if (p.message_id) meta.push(`#${p.message_id}`);
+    if (p.reply_to) meta.push(`reply #${p.reply_to}`);
+    if (p.schedule_at) meta.push(`⏰ ${esc(String(p.schedule_at).slice(0, 16).replace("T", " "))}`);
+    if (p.drop_author) meta.push("copy");
+    if (a.result_msg_id) meta.push(t("web.act.result", { id: a.result_msg_id }));
+    if (a.error) meta.push(`⚠️ ${esc(a.error)}`);
+    if (a.block_reason) meta.push(`⛔ ${esc(a.block_reason)}`);
+    if (st === "proposed" && a.expires_at) meta.push(t("web.act.expires", { t: String(a.expires_at).slice(0, 16).replace("T", " ") }));
+    const btns = st === "proposed"
+      ? `<div class="action-btns"><button class="btn ok" data-act="confirm" data-aid="${a.id}">${esc(t("web.act.confirm"))}</button><button class="btn" data-act="reject" data-aid="${a.id}">${esc(t("web.act.reject"))}</button></div>`
+      : "";
+    return `<div class="action-card ${esc(st)}" data-aid="${a.id}"><div class="action-head"><b>✍️ ${esc(label)}</b><span class="action-status">${esc(t(`web.act.status_${st}`))}</span></div>${body}<div class="action-meta">${meta.join(" · ")}</div>${btns}</div>`;
+  }
   function msgNode(m) {
     const div = document.createElement("div");
     div.className = `msg ${m.role}`;
@@ -122,6 +143,7 @@
     if (m.context && m.context.mode === "agent") inner += toolsBadge(m.context);
     else if (m.context && m.context.title) inner += `<span class="ctx">📎 ${esc(t("web.chat.context_used", { title: m.context.title, n: m.context.messages }))}${m.context.source ? ` · ${esc(t(`web.chat.source_${m.context.source}`))}` : ""}${esc(stratLabel(m.context))}</span>`;
     inner += m.role === "assistant" ? md(m.content) : `<p>${esc(m.content).replace(/\n/g, "<br>")}</p>`;
+    if (m.role === "assistant" && m.actions && m.actions.length) inner += m.actions.map(actionCard).join("");
     if (m.role === "assistant" && m.model) {
       const cost = m.cost_usd != null ? ` · $${m.cost_usd < 0.01 ? m.cost_usd.toFixed(4) : m.cost_usd.toFixed(3)}` : "";
       const lat = m.latency_ms ? ` · ${(m.latency_ms / 1000).toFixed(1)}s` : "";
@@ -131,6 +153,23 @@
     return div;
   }
   el.messages.addEventListener("click", async (e) => {
+    const ab = e.target.closest("[data-act]");
+    if (ab) {
+      const aid = +ab.dataset.aid, act = ab.dataset.act;
+      const card = ab.closest(".action-card");
+      card.querySelectorAll("button").forEach((x) => { x.disabled = true; });
+      if (act === "confirm") ab.textContent = t("web.act.confirming");
+      try {
+        const a = await api("POST", `/api/actions/${aid}/${act}`, {});
+        card.outerHTML = actionCard(a);
+      } catch (err) {
+        card.querySelectorAll("button").forEach((x) => { x.disabled = false; });
+        ab.textContent = act === "confirm" ? t("web.act.confirm") : t("web.act.reject");
+        alert(err.message);
+      }
+      loadPending();
+      return;
+    }
     const b = e.target.closest(".rate button"); if (!b) return;
     const wrap = b.closest(".rate"); const mid = +wrap.dataset.mid; const r = +b.dataset.r;
     const already = b.classList.contains("on");
@@ -150,7 +189,34 @@
   }
   function scrollBottom() { el.messages.scrollTop = el.messages.scrollHeight; }
 
+  function updateWriteModeUI() {
+    const c = state.peerId ? state.chatsByPeer[state.peerId] : null;
+    if (!c) { el.wmWrap.hidden = true; return; }
+    el.wmWrap.hidden = false;
+    el.writeMode.value = c.write_mode || "read_only";
+    el.writeMode.disabled = false;
+  }
+  async function loadPending() {
+    try {
+      const d = await api("GET", "/api/actions?status=proposed&limit=50");
+      const n = d.items.length;
+      el.pending.hidden = n === 0;
+      el.pending.textContent = t("web.act.pending", { n });
+      el.pending.dataset.items = JSON.stringify(d.items.map((a) => a.id));
+    } catch (_) { /* ignore */ }
+  }
+  el.writeMode.addEventListener("change", async () => {
+    const c = state.peerId ? state.chatsByPeer[state.peerId] : null; if (!c) return;
+    const mode = el.writeMode.value;
+    if (mode === "autonomous" && !confirm(t("web.chat.wm_autonomous_warn"))) { el.writeMode.value = c.write_mode; return; }
+    try {
+      const r = await api("PATCH", `/api/accounts/${state.accountId}/chats/${c.id}/write_mode`, { mode });
+      c.write_mode = r.write_mode;
+      const note = $("sync-note"); note.textContent = t("web.chat.wm_saved"); note.hidden = false; setTimeout(() => { note.hidden = true; }, 2500);
+    } catch (err) { alert(err.message); el.writeMode.value = c.write_mode; }
+  });
   function updateCtxUI() {
+    updateWriteModeUI();
     const n = +el.ctxLimit.value;
     const liveMax = +(el.ctxLimit.dataset.liveMax || 200);
     const src = n > liveMax ? ` · ${t("web.chat.source_db")}` : "";
@@ -236,7 +302,8 @@
       const body = { text, deep: el.deep.checked, mode: el.mode.value, account_id: state.accountId || null };
       if (state.peerId && state.accountId) body.context = { account_id: state.accountId, peer_id: state.peerId, limit: +el.ctxLimit.value, strategy: el.strategy.value };
       const r = await api("POST", `/api/conversations/${state.convId}/messages`, body);
-      const node = msgNode({ id: r.assistant_message_id, role: "assistant", content: r.text, model: r.model, provider: r.provider, tokens_in: r.tokens_in, tokens_out: r.tokens_out, context: r.context, latency_ms: r.latency_ms, cost_usd: r.cost_usd });
+      const node = msgNode({ id: r.assistant_message_id, role: "assistant", content: r.text, model: r.model, provider: r.provider, tokens_in: r.tokens_in, tokens_out: r.tokens_out, context: r.context, latency_ms: r.latency_ms, cost_usd: r.cost_usd, actions: r.actions || [] });
+      if (r.actions && r.actions.length) loadPending();
       typing.replaceWith(node);
       window.TGAI.hydrate(node).then(scrollBottom);
       await loadConvs();
@@ -287,7 +354,7 @@
   (async () => {
     updateCtxUI();
     try { await loadMe(); } catch (_) { return; }
-    await Promise.all([loadDialogs(false), loadConvs()]);
+    await Promise.all([loadDialogs(false), loadConvs(), loadPending()]);
     const m = location.hash.match(/^#c(\d+)$/);
     openConv(m ? +m[1] : null);
   })();

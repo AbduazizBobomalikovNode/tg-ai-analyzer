@@ -385,6 +385,7 @@ async def _send_via_agent(
         "iterations": outcome.iterations,
         "est_tokens": outcome.result_tokens,
         "run_id": outcome.run_id,
+        "action_ids": outcome.action_ids,
         "messages": sum(int(c.get("hits") or c.get("n") or 0) for c in outcome.tool_calls) or None,
     }
     user_row.context = context_used

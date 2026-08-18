@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from app.config import get_settings
 from app.db.base import session_scope
 from app.db.models import Account, ConversationMessage
+from app.services import actions as ACT
 from app.services import chat_service as cs
 from app.services import evaluation as ev
 from app.web.security import WebIdentity, locale_of, require_csrf, require_identity
@@ -132,9 +133,22 @@ async def get_messages(
         except cs.ChatError as exc:
             raise _chat_http(exc) from exc
         rows = await cs.list_messages(db, conv.id)
+        run_ids = [
+            int(m.context["run_id"])
+            for m in rows
+            if m.role == "assistant" and m.context and m.context.get("run_id")
+        ]
+        actions = await ACT.actions_for_runs(db, run_ids)
+        items = []
+        for m in rows:
+            d = _msg_out(m)
+            rid = m.context.get("run_id") if m.context else None
+            if rid and actions.get(int(rid)):
+                d["actions"] = actions[int(rid)]
+            items.append(d)
         return {
             "conversation": {"id": conv.id, "title": conv.title, "account_id": conv.account_id},
-            "items": [_msg_out(m) for m in rows],
+            "items": items,
         }
 
 
@@ -197,6 +211,12 @@ async def send_message(
         except cs.ChatError as exc:
             raise _chat_http(exc) from exc
 
+    actions: list[dict[str, Any]] = []
+    if reply.context_used and reply.context_used.get("run_id"):
+        async with session_scope() as db:
+            got = await ACT.actions_for_runs(db, [int(reply.context_used["run_id"])])
+            actions = got.get(int(reply.context_used["run_id"]), [])
+
     # javob yuborilgach — arzon model bilan fon baholash (foydalanuvchi kutmaydi)
     background.add_task(
         ev.auto_evaluate,
@@ -217,6 +237,7 @@ async def send_message(
         "context": reply.context_used,
         "latency_ms": reply.latency_ms,
         "cost_usd": reply.cost_usd,
+        "actions": actions,
     }
 
 

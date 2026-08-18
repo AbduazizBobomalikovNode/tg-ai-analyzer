@@ -33,6 +33,7 @@ from telethon.tl.types import Chat as TlChat
 from telethon.tl.types import Message as TlMessage
 from telethon.tl.types import User as TlUser
 
+from app.config import get_settings
 from app.db.base import session_scope
 from app.db.models import (
     Account,
@@ -133,6 +134,8 @@ async def refresh_chats(account_id: int, *, limit: int = 200) -> int:
                 "is_admin": _is_admin(ent),
                 "participants_count": getattr(ent, "participants_count", None),
                 "last_message_at": getattr(d.message, "date", None) if d.message else None,
+                # yangi chat uchun DEFAULT_WRITE_MODE; mavjudlarga tegilmaydi (upsert set_ da yo'q)
+                "write_mode": str(get_settings().default_write_mode),
             }
         )
     if not rows:

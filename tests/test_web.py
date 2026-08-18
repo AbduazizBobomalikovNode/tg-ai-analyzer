@@ -218,3 +218,90 @@ def test_rate_limit_on_phone(client: TestClient) -> None:
     client.post("/api/auth/phone", json={"phone": "+998901234567"}, headers=H)
     r = client.post("/api/auth/phone", json={"phone": "+998901234567"}, headers=H)
     assert r.status_code == 429 and r.json()["detail"]["code"] == "auth.err.rate_limited"
+
+
+# ─── yozish amallari API ─────────────────────────────────────────────────────
+
+
+def test_actions_api_confirm_reject_and_list(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.services import actions as ACT
+    from app.web.routers import actions as actions_router
+
+    class _Scope:
+        async def __aenter__(self) -> Any:
+            return object()
+
+        async def __aexit__(self, *a: Any) -> None: ...
+
+    calls: list[tuple[str, int]] = []
+    view = ACT.ActionView(
+        id=5,
+        run_id=1,
+        tool="send_message",
+        status="executed",
+        args={},
+        preview={"chat": "K", "text": "hi"},
+        target_peer_id=1,
+        result_msg_id=42,
+        error=None,
+        block_reason=None,
+        created_at=None,
+        confirmed_at=None,
+        expires_at=None,
+    )
+
+    async def confirm(db: Any, user_id: int, action_id: int) -> Any:
+        calls.append(("confirm", action_id))
+        if action_id == 404:
+            raise ACT.ActionError("not_found")
+        if action_id == 429:
+            raise ACT.ActionError("rate_limited")
+        return view
+
+    async def reject(db: Any, user_id: int, action_id: int) -> Any:
+        calls.append(("reject", action_id))
+        return (
+            ACT.ActionView(**{**view.__dict__, "status": "rejected"})
+            if hasattr(view, "__dict__")
+            else view
+        )
+
+    async def listing(db: Any, user_id: int, **kw: Any) -> Any:
+        return [view]
+
+    monkeypatch.setattr(actions_router, "session_scope", lambda: _Scope())
+    monkeypatch.setattr(ACT, "confirm_action", confirm)
+    monkeypatch.setattr(ACT, "reject_action", reject)
+    monkeypatch.setattr(ACT, "list_actions", listing)
+
+    # login talab qilinadi
+    assert client.post("/api/actions/5/confirm", headers=H).status_code == 401
+    client.cookies.set(sec.SESSION_COOKIE, sec.issue_session(7))
+    # CSRF
+    assert client.post("/api/actions/5/confirm").status_code == 403
+
+    r = client.post("/api/actions/5/confirm", headers=H)
+    assert (
+        r.status_code == 200
+        and r.json()["status"] == "executed"
+        and r.json()["result_msg_id"] == 42
+    )
+    assert client.post("/api/actions/404/confirm", headers=H).status_code == 404
+    r = client.post("/api/actions/429/confirm", headers=H)
+    assert r.status_code == 429 and r.json()["detail"]["code"] == "action.err.rate_limited"
+    r = client.post("/api/actions/5/reject", headers=H)
+    assert r.status_code == 200
+    r = client.get("/api/actions?status=proposed")
+    assert r.status_code == 200 and r.json()["items"][0]["id"] == 5
+    assert client.get("/api/actions?status=weird").status_code == 422
+    assert ("confirm", 5) in calls and ("reject", 5) in calls
+
+
+def test_chat_page_has_write_mode_and_action_ui(client: TestClient) -> None:
+    client.cookies.set(sec.SESSION_COOKIE, sec.issue_session(7))
+    r = client.get("/chat?lang=uz")
+    assert r.status_code == 200
+    assert 'id="write-mode"' in r.text and 'id="pending-badge"' in r.text
+    assert "Avtonom" in r.text

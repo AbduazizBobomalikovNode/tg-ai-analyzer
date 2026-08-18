@@ -58,6 +58,14 @@
       <button class="icon-btn" id="btn-open-sidebar" aria-label="menu">☰</button>
       <div class="topbar-title" id="conv-title">{{ t('web.chat.title') }}</div>
       <div class="topbar-ctx" id="ctx-badge" hidden></div>
+      <label class="opt topbar-wm" id="wm-wrap" hidden title="{{ t('web.chat.write_mode') }}">✍️
+        <select id="write-mode">
+          <option value="read_only">{{ t('web.chat.wm_read_only') }}</option>
+          <option value="write_with_confirm">{{ t('web.chat.wm_write_with_confirm') }}</option>
+          <option value="autonomous">{{ t('web.chat.wm_autonomous') }}</option>
+        </select>
+      </label>
+      <a class="topbar-ctx" id="pending-badge" href="#" hidden></a>
       <button class="icon-btn danger" id="btn-delete" title="{{ t('web.chat.delete') }}" hidden>🗑</button>
     </header>
 

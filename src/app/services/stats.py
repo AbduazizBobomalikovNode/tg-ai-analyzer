@@ -15,6 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import (
     Account,
+    AgentAction,
+    AgentRun,
     Chat,
     Conversation,
     ConversationMessage,
@@ -188,8 +190,26 @@ async def overview(session: AsyncSession, user_id: int, *, days: int = 30) -> di
         )
     ).all()
 
+    # yozish amallari (6-bosqich) — status bo'yicha
+    act_rows = (
+        await session.execute(
+            select(AgentAction.status, func.count(AgentAction.id))
+            .join(AgentRun, AgentRun.id == AgentAction.run_id)
+            .where(
+                AgentRun.user_id == user_id,
+                AgentAction.created_at >= since,
+                AgentAction.tool.in_(
+                    ("send_message", "edit_message", "forward_message", "pin_message")
+                ),
+            )
+            .group_by(AgentAction.status)
+        )
+    ).all()
+    actions = {str(r[0]): int(r[1]) for r in act_rows}
+
     return {
         "days": days,
+        "actions": actions,
         "totals": {
             "requests": int(n or 0),
             "tokens_in": int(tin or 0),

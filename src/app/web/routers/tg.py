@@ -106,6 +106,8 @@ def _chat_out(c: Chat) -> dict[str, Any]:
         "type": c.type,
         "username": c.username,
         "is_admin": c.is_admin,
+        "is_writable": c.is_writable,
+        "write_mode": c.write_mode,
         "participants_count": c.participants_count,
         "sync_state": c.sync_state,
         "synced_total": c.synced_total,
