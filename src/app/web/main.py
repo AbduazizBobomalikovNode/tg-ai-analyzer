@@ -18,12 +18,13 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from app.config import get_settings
 from app.logging import get_logger, setup_logging
+from app.observability import http_middleware, init_sentry, metrics_payload
 from app.services.auth_flow import AuthFlowStore
 from app.web.routers import actions as actions_router
 from app.web.routers import auth as auth_router
@@ -43,7 +44,8 @@ log = get_logger(__name__)
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.auth_flows = AuthFlowStore()
     app.state.auth_limiter = RateLimiter(s.web_auth_rate_per_ip, 600)
-    log.info("web.start", env=s.env, secure_cookies=s.web_secure_cookies)
+    init_sentry("api")
+    log.info("web.start", env=s.env, secure_cookies=s.web_secure_cookies, version=s.app_version)
     try:
         yield
     finally:
@@ -65,6 +67,7 @@ def create_app() -> FastAPI:
 
     static_dir = Path(__file__).resolve().parent / "static"
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+    app.middleware("http")(http_middleware())
 
     app.include_router(auth_router.router)
     app.include_router(tg_router.router)
@@ -76,7 +79,18 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     async def health() -> dict[str, str]:
-        return {"status": "ok", "env": s.env}
+        return {"status": "ok", "env": s.env, "version": s.app_version}
+
+    @app.get("/metrics", include_in_schema=False)
+    async def metrics(request: Request) -> Response:
+        # Prometheus scrape. METRICS_TOKEN bo'lsa — talab qilinadi (ochiq internetda qoldirmang).
+        if s.metrics_token:
+            auth = request.headers.get("authorization", "")
+            token = request.query_params.get("token") or auth.removeprefix("Bearer ").strip()
+            if token != s.metrics_token:
+                raise HTTPException(status_code=401)
+        body, ctype = metrics_payload()
+        return Response(content=body, media_type=ctype)
 
     @app.exception_handler(Exception)
     async def _unhandled(request: Request, exc: Exception) -> JSONResponse:

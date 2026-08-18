@@ -26,6 +26,11 @@ Testlar mashinadagi Claude kredensiallarini chetlab o'tadi (`ANTHROPIC_CONFIG_DI
 * Frontend — vanilla JS/CSS, tashqi CDN yo'q; markdown `md.js` (xavfsiz),
   mermaid vendored.
 
+## CI
+`.github/workflows/ci.yml` — har push/PR: ruff check+format, mypy (0 xato),
+pytest (node bilan md testlari), invariant testlari alohida + `delete_message`
+grep, Docker build. Lokal ekvivalent — `make ci`.
+
 ## Test qatlamlari
 | Fayl | Nima |
 |---|---|
@@ -34,6 +39,7 @@ Testlar mashinadagi Claude kredensiallarini chetlab o'tadi (`ANTHROPIC_CONFIG_DI
 | test_auth_flow, test_web | login FSM, cookie/CSRF, API |
 | test_ingestion, test_search_quality, test_md_renderer | sync mapping, qidiruv/byudjet, markdown |
 | test_agent, test_write_actions | tool registry, sikl, taklif/tasdiq/bajarish |
+| test_content, test_observability | rasm/auto-reply, metrikalar/limitlar/tizim |
 
 ## Bosqichlar (keyingi)
 7 — kontent: rasm generatsiya (Gemini image), rejalashtirilgan post UI, auto-reply;

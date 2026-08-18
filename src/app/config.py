@@ -129,6 +129,17 @@ class Settings(BaseSettings):
     deepseek_model_chat: str = "deepseek-chat"  # function calling BOR
     deepseek_model_reasoner: str = "deepseek-reasoner"  # function calling YO'Q
 
+    # ─── Kuzatuv va limitlar (8-bosqich) ───
+    app_version: str = "0.8.0"
+    sentry_dsn: str = ""  # bo'sh = o'chiq; `pip install -e ".[monitoring]"`
+    sentry_traces_rate: float = Field(default=0.05, ge=0.0, le=1.0)
+    metrics_token: str = ""  # bo'sh = /metrics ochiq (faqat ichki tarmoqda qoldiring!)
+    # Foydalanuvchi bo'yicha kunlik LLM byudjeti (0 = cheksiz)
+    llm_daily_token_budget: int = Field(default=2_000_000, ge=0)
+    llm_daily_cost_budget_usd: float = Field(default=5.0, ge=0.0)
+    # Chat so'rovlari: foydalanuvchi bo'yicha daqiqasiga
+    chat_rate_per_minute: int = Field(default=20, ge=1, le=600)
+
     # ─── Rejim ───
     env: str = "dev"
     log_level: str = "INFO"

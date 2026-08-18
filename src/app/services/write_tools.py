@@ -29,6 +29,7 @@ from app.db.models import ActionStatus, AgentAction, Chat
 from app.llm import ToolSpec
 from app.logging import get_logger
 from app.mtproto.guard import PeerBlocked, assert_writable
+from app.observability import WRITE_ACTIONS
 from app.services.tools import _CHAT_ARG, ToolContext, ToolResult, _resolve_chat
 
 log = get_logger(__name__)
@@ -200,6 +201,7 @@ async def propose_or_execute(
             )
         )
         await session.flush()
+        WRITE_ACTIONS.labels(tool, "blocked").inc()
         log.warning("write.blocked", tool=tool, peer=exc.peer_id, reason=exc.reason)
         return ToolResult(f"blocked: {exc.reason}. This target can never be written to.", ok=False)
     except ProposalError as exc:
@@ -238,6 +240,7 @@ async def propose_or_execute(
             meta={"action_id": action.id, "executed": True},
         )
 
+    WRITE_ACTIONS.labels(tool, "proposed").inc()
     log.info("write.proposed", action_id=action.id, tool=tool, chat_id=p.chat_id)
     return ToolResult(
         f'proposed action #{action.id} ({tool} → "{p.preview["chat"]}") is waiting for the '

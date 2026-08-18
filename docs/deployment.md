@@ -33,7 +33,16 @@ rate, kontekst limitlari, auto-eval, sample), `AGENT_MAX_ITERATIONS`,
 `EMBED_ENABLED`, `DEFAULT_WRITE_MODE`, `MAX_ACCOUNTS`, `ALLOWED_USER_IDS`.
 To'liq ro'yxat va izohlar — `.env.example`.
 
-## Kuzatuv
+## Kuzatuv (8-bosqich)
+* `GET /metrics` — Prometheus (`METRICS_TOKEN` bilan yoping). Nomlar `tgai_*`
+  (`app/observability.py`). Grafana uchun asosiy panellar: LLM tokenlar/xarajat
+  (provider/model), latency p50/p95, tool chaqiruvlar, yozish amallari statusi,
+  FloodWait soni, HTTP 5xx.
+* Worker heartbeat — Redis `tgai:hb:<cron>`; `GET /api/stats/system` va dashboard
+  "Tizim" kartasi. Cron 2× oraliqdan uzoq jim bo'lsa — worker yiqilgan.
+* Sentry — `SENTRY_DSN` (`[monitoring]` extra); komponent tegi `api`/`worker`.
+
+## Kuzatuv (loglar)
 * Log'lar structlog, hodisa nomlari `modul.hodisa`: `ingest.sync_done`,
   `worker.snapshot.done`, `agent.done`, `chat.answer`, `write.proposed/executed/
   blocked`, `llm.fallback`, `mtproto.blocked`.

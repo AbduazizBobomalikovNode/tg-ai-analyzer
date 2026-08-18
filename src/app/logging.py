@@ -60,7 +60,7 @@ def setup_logging(level: str = "INFO", *, json_output: bool = False) -> None:
             structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso", utc=True),
-            _redact,
+            _redact,  # type: ignore[list-item]
             structlog.processors.StackInfoRenderer(),
             structlog.processors.format_exc_info,
             renderer,

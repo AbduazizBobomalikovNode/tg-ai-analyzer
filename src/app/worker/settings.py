@@ -25,6 +25,9 @@ log = get_logger("worker")
 async def startup(ctx: dict[str, Any]) -> None:
     s = get_settings()
     setup_logging(s.log_level, json_output=s.is_prod)
+    from app.observability import init_sentry
+
+    init_sentry("worker")
     await _reset_stuck_syncs()
     log.info("worker.start", max_jobs=WorkerSettings.max_jobs)
 
@@ -43,8 +46,9 @@ async def _reset_stuck_syncs() -> None:
                 .where(Chat.sync_state == SyncState.RUNNING)
                 .values(sync_state=SyncState.IDLE, sync_error="worker restarted")
             )
-            if res.rowcount:
-                log.warning("worker.reset_stuck_syncs", count=res.rowcount)
+            n = getattr(res, "rowcount", 0)
+            if n:
+                log.warning("worker.reset_stuck_syncs", count=n)
     except Exception as exc:  # DB hali tayyor bo'lmasa — worker baribir ko'tarilsin
         log.warning("worker.reset_stuck_syncs_failed", error=str(exc)[:200])
 

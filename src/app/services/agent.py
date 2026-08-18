@@ -23,6 +23,7 @@ from app.config import get_settings
 from app.db.models import ActionStatus, AgentAction, AgentRun, Chat
 from app.llm import LLM, LLMError, Msg, Task
 from app.logging import get_logger
+from app.observability import TOOL_CALLS
 from app.services import tools as T
 from app.services import write_tools as W
 from app.services.prompts import AGENT_SYSTEM_PROMPT, runtime_note
@@ -171,6 +172,7 @@ async def run_agent(
             if result.meta.get("action_id"):
                 entry["action_id"] = result.meta["action_id"]
             calls_log.append(entry)
+            TOOL_CALLS.labels(call.name, str(result.ok).lower()).inc()
             if call.name not in W.WRITE_TOOL_NAMES:  # yozish tool'i o'z yozuvini o'zi qo'shgan
                 session.add(
                     AgentAction(

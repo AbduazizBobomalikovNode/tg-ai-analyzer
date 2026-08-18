@@ -19,6 +19,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.logging import get_logger
+from app.observability import heartbeat
 from app.services import ingestion as ing
 from app.worker.queue import enqueue
 
@@ -71,6 +72,7 @@ async def sync_account(ctx: dict[str, Any], account_id: int, full: bool = False)
         fetched=fetched,
         ramp_up=limits.ramp_up,
     )
+    await heartbeat("sync_account", extra={"account_id": account_id, "fetched": fetched})
     return {"chats": len(chat_ids), "fetched": fetched, "ramp_up": limits.ramp_up}
 
 
@@ -114,6 +116,7 @@ async def snapshot_metrics(ctx: dict[str, Any]) -> dict[str, Any]:
         except Exception as exc:  # bitta kanal xatosi qolganlarini to'xtatmasin
             log.warning("worker.snapshot.failed", chat_id=chat_id, error=str(exc)[:200])
     log.info("worker.snapshot.done", posts=total, paused=paused)
+    await heartbeat("snapshot_metrics", extra={"posts": total, "paused": paused})
     return {"posts": total, "paused": paused}
 
 
@@ -123,6 +126,7 @@ async def incremental_sync_all(ctx: dict[str, Any]) -> dict[str, Any]:
     for account_id in await ing.active_account_ids():
         if await enqueue("sync_account", account_id, False, job_id=job_id_account(account_id)):
             n += 1
+    await heartbeat("incremental_sync_all", extra={"enqueued": n})
     return {"enqueued": n}
 
 
@@ -180,6 +184,7 @@ async def embed_messages(ctx: dict[str, Any], limit: int | None = None) -> dict[
             )
         done += len(chunk)
     log.info("worker.embed.done", embedded=done, pending=len(rows) - done)
+    await heartbeat("embed_messages", extra={"embedded": done})
     return {"embedded": done}
 
 
@@ -210,6 +215,7 @@ async def build_daily_digests(ctx: dict[str, Any]) -> dict[str, Any]:
                 built += 1
                 tokens += d.tokens_in + d.tokens_out
     log.info("worker.digests.done", built=built, tokens=tokens)
+    await heartbeat("build_daily_digests", extra={"built": built, "tokens": tokens})
     return {"built": built, "tokens": tokens}
 
 
@@ -236,4 +242,5 @@ async def process_autoreplies(ctx: dict[str, Any]) -> dict[str, Any]:
             except Exception as exc:  # bitta qoida xatosi qolganini to'xtatmasin
                 log.warning("worker.autoreply_failed", rule_id=rid, error=str(exc)[:200])
     log.info("worker.autoreply.done", rules=len(ids), proposed=proposed)
+    await heartbeat("process_autoreplies", extra={"rules": len(ids), "proposed": proposed})
     return {"rules": len(ids), "proposed": proposed}

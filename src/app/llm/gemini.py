@@ -108,12 +108,14 @@ class GeminiProvider(BaseProvider):
         async def _call() -> Any:
             try:
                 return await self._client.aio.models.generate_content(
-                    model=model, contents=contents, config=config
+                    model=model,
+                    contents=contents,  # type: ignore[arg-type]
+                    config=config,
                 )
             except Exception as exc:
                 raise LLMError(self.name, str(exc), status=_status_of(exc)) from exc
 
-        resp = await self._with_retry("chat", _call)
+        resp: Any = await self._with_retry("chat", _call)
         return _parse_chat(resp, model=model)
 
     # ── embedding ────────────────────────────────────────────────────────────
@@ -125,13 +127,13 @@ class GeminiProvider(BaseProvider):
             try:
                 return await self._client.aio.models.embed_content(
                     model=model,
-                    contents=texts,
+                    contents=texts,  # type: ignore[arg-type]
                     config=types.EmbedContentConfig(output_dimensionality=dim),
                 )
             except Exception as exc:
                 raise LLMError(self.name, str(exc), status=_status_of(exc)) from exc
 
-        resp = await self._with_retry("embed", _call)
+        resp: Any = await self._with_retry("embed", _call)
         vectors = [list(e.values or []) for e in (resp.embeddings or [])]
         if not vectors:
             raise LLMError(self.name, "embedding bo'sh qaytdi")
@@ -159,7 +161,7 @@ class GeminiProvider(BaseProvider):
             except Exception as exc:
                 raise LLMError(self.name, str(exc), status=_status_of(exc)) from exc
 
-        resp = await self._with_retry("image", _call)
+        resp: Any = await self._with_retry("image", _call)
         for part in _parts_of(resp):
             inline = getattr(part, "inline_data", None)
             if inline is not None and getattr(inline, "data", None):
@@ -247,7 +249,7 @@ def _parse_chat(resp: Any, *, model: str) -> ChatResult:
     text_chunks = [
         p.text
         for p in _parts_of(resp)
-        if getattr(p, "text", None) and not p.thought  # type: ignore[union-attr]
+        if getattr(p, "text", None) and not getattr(p, "thought", False)
     ]
 
     u = getattr(resp, "usage_metadata", None)

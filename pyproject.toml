@@ -25,6 +25,8 @@ dependencies = [
     # llm
     "google-genai>=0.3",
     "anthropic>=0.122",
+    # kuzatuv
+    "prometheus-client>=0.21",
     # crypto / config / misc
     "cryptography>=44.0",
     "pydantic>=2.10",
@@ -36,6 +38,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+monitoring = ["sentry-sdk[fastapi]>=2.19"]
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",

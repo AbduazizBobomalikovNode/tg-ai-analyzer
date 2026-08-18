@@ -1,4 +1,4 @@
-.PHONY: up down logs migrate revision fmt lint test shell
+.PHONY: up down logs migrate revision fmt lint test ci shell
 
 up:
 	docker compose up -d --build
@@ -23,6 +23,8 @@ lint:
 
 test:
 	pytest -q
+
+ci: lint test   # GitHub Actions bilan bir xil
 
 shell:
 	docker compose exec postgres psql -U $${POSTGRES_USER} -d $${POSTGRES_DB}

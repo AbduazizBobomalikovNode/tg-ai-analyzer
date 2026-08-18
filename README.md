@@ -201,6 +201,23 @@ Himoya qatlamlari: egalik (`agent_runs.user_id`), `WRITE_PROPOSAL_TTL_HOURS`,
   taklifi** (`reply_to`) yaratadi — ✅ tasdiq; chat `autonomous` bo'lsa darhol.
   Yozish yo'li 6-bosqichdagi bilan bir xil (guard, rate limit, audit).
 
+## Kuzatuv, limitlar, CI (8-bosqich)
+
+* **Metrikalar** — `GET /metrics` (Prometheus): `tgai_http_*`, `tgai_llm_requests/
+  tokens/cost/latency`, `tgai_tool_calls_total`, `tgai_write_actions_total`,
+  `tgai_sync_messages_total`, `tgai_floodwait_total`, `tgai_snapshot_posts_total`.
+  `METRICS_TOKEN` bilan himoyalang. Worker cron'lari Redis'ga heartbeat yozadi —
+  dashboard "Tizim" kartasi (DB/Redis ping, so'nggi cron'lar, bugungi byudjet),
+  `GET /api/stats/system`.
+* **Sentry** — `SENTRY_DSN` + `pip install -e ".[monitoring]"`; sirlar
+  `before_send` da maskalanadi.
+* **Limitlar** — foydalanuvchi bo'yicha kunlik `LLM_DAILY_TOKEN_BUDGET` /
+  `LLM_DAILY_COST_BUDGET_USD` (429 `chat.err.budget`), `CHAT_RATE_PER_MINUTE`;
+  avvalgilar: `WRITE_RATE_PER_HOUR`, `IMAGE_MAX_PER_DAY`, agent byudjetlari,
+  auth IP limiti.
+* **CI** — `.github/workflows/ci.yml`: ruff, mypy (toza), pytest, invariant
+  testlari + delete-tool grep, Docker build. Lokal: `make ci`.
+
 ## Dashboard va sifat baholash
 
 `/dashboard` — so'rovlar, tokenlar (in/out), taxminiy xarajat (`llm/pricing.py`),
@@ -352,7 +369,7 @@ To'liq reja, qarorlar va texnik tahlil: **[PLAN.md](PLAN.md)**
 | 5 | Agent v1 (read-only tool'lar, audit, byudjet, prompt'lar markazda) | ✅ |
 | 6 | Write actions: taklif → tasdiq → bajarish, per-chat rejim, guard/rate/TTL, audit | ✅ |
 | 7 | Kontent: rasm generatsiya, scheduling (Telegram-side), auto-reply qoidalari | ✅ (internet rasm qidiruv ⬜) |
-| 8 | Polish: monitoring, limitlar | ⬜ |
+| 8 | Polish: Prometheus + Sentry, heartbeat/tizim holati, kunlik byudjet, CI | ✅ (yuk testi ⬜) |
 
 ## Ogohlantirish
 

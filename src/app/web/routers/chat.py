@@ -53,9 +53,14 @@ class MessageIn(BaseModel):
 
 
 def _chat_http(exc: cs.ChatError) -> HTTPException:
-    status = {"not_found": 404, "empty": 400, "too_long": 400, "context": 502, "llm": 502}.get(
-        exc.code, 400
-    )
+    status = {
+        "not_found": 404,
+        "empty": 400,
+        "too_long": 400,
+        "context": 502,
+        "llm": 502,
+        "budget": 429,
+    }.get(exc.code, 400)
     return HTTPException(
         status_code=status, detail={"code": f"chat.err.{exc.code}", "detail": exc.detail}
     )
@@ -173,9 +178,14 @@ async def send_message(
     request: Request,
 ) -> dict[str, Any]:
     s = get_settings()
+    from app.services import limits
+
+    if not limits.check_chat_rate(ident.user_id):
+        raise HTTPException(status_code=429, detail={"code": "chat.err.rate_limited"})
     async with session_scope() as db:
         try:
             conv = await cs.get_conversation(db, ident.user_id, conversation_id)
+            await limits.assert_within_budget(db, ident.user_id)
         except cs.ChatError as exc:
             raise _chat_http(exc) from exc
 

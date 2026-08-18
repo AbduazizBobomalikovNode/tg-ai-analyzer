@@ -223,5 +223,15 @@
   "autoreply.err.not_found": "Чат не найден.",
   "autoreply.err.read_only": "Чат только для чтения — сначала включите запись.",
   "autoreply.err.not_writable": "В этот чат нельзя писать.",
-  "autoreply.err.bad_trigger": "Неверный триггер."
+  "autoreply.err.bad_trigger": "Неверный триггер.",
+  "chat.err.budget": "Дневной AI-бюджет исчерпан — продолжите завтра или увеличьте лимит.",
+  "chat.err.rate_limited": "Слишком часто — подождите немного.",
+  "web.dash.system": "Система",
+  "web.dash.budget": "Бюджет на сегодня",
+  "web.dash.db": "База",
+  "web.dash.redis": "Redis",
+  "web.dash.heartbeats": "Задачи worker (последний запуск)",
+  "web.dash.no_heartbeats": "Нет сигналов от worker",
+  "web.dash.ok": "работает",
+  "web.dash.fail": "ошибка"
 }

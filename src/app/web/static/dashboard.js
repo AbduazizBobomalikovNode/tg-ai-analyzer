@@ -88,8 +88,21 @@
   }
   async function load() {
     const days = +$("days").value;
-    const [ov, ing] = await Promise.all([api(`/api/stats/overview?days=${days}`), api("/api/stats/ingestion")]);
+    const [ov, ing, sys] = await Promise.all([api(`/api/stats/overview?days=${days}`), api("/api/stats/ingestion"), api("/api/stats/system").catch(() => null)]);
     last = ov;
+    if (sys) {
+      const b = sys.budget || {};
+      const hb = sys.heartbeats && !sys.heartbeats._error ? Object.entries(sys.heartbeats) : [];
+      const okTxt = (o) => o && o.ok ? `✅ ${t("web.dash.ok")} · ${o.ms} ms` : `❌ ${t("web.dash.fail")}${o && o.error ? " · " + esc(o.error) : ""}`;
+      const rows = [
+        [t("web.dash.db"), okTxt(sys.db)],
+        [t("web.dash.redis"), okTxt(sys.redis)],
+        [t("web.dash.budget"), `${fmt(b.tokens || 0)} tok${b.token_limit ? ` / ${fmt(b.token_limit)} (${b.tokens_pct}%)` : ""} · ${money(b.cost_usd || 0)}${b.cost_limit ? ` / ${money(b.cost_limit)}` : ""}`],
+        [t("web.dash.heartbeats"), hb.length ? hb.map(([k, v]) => `${esc(k)}: ${esc((v && v.at || "").slice(0, 16).replace("T", " "))}`).join("<br>") : t("web.dash.no_heartbeats")],
+        ["v", esc(sys.version || "")],
+      ];
+      $("system").innerHTML = rows.map(([k, v]) => `<div class="kv-row"><span>${esc(k)}</span><b>${v}</b></div>`).join("");
+    }
     const T = ov.totals;
     const set = (k, v) => { const e = document.querySelector(`[data-k="${k}"]`); if (e) e.textContent = v; };
     set("requests", fmt(T.requests));

@@ -223,5 +223,15 @@
   "autoreply.err.not_found": "Chat not found.",
   "autoreply.err.read_only": "Chat is read-only — enable writing first.",
   "autoreply.err.not_writable": "Cannot post to this chat.",
-  "autoreply.err.bad_trigger": "Invalid trigger."
+  "autoreply.err.bad_trigger": "Invalid trigger.",
+  "chat.err.budget": "Daily AI budget exhausted — continue tomorrow or raise the limit.",
+  "chat.err.rate_limited": "Too fast — wait a moment.",
+  "web.dash.system": "System",
+  "web.dash.budget": "Today's budget",
+  "web.dash.db": "Database",
+  "web.dash.redis": "Redis",
+  "web.dash.heartbeats": "Worker jobs (last run)",
+  "web.dash.no_heartbeats": "No worker heartbeats",
+  "web.dash.ok": "ok",
+  "web.dash.fail": "failed"
 }

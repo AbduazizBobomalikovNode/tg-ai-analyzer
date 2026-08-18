@@ -223,5 +223,15 @@
   "autoreply.err.not_found": "Chat topilmadi.",
   "autoreply.err.read_only": "Chat faqat o'qish rejimida — avval yozishni yoqing.",
   "autoreply.err.not_writable": "Bu chatga yozib bo'lmaydi.",
-  "autoreply.err.bad_trigger": "Noto'g'ri trigger."
+  "autoreply.err.bad_trigger": "Noto'g'ri trigger.",
+  "chat.err.budget": "Kunlik AI byudjeti tugadi — ertaga davom eting yoki limitni oshiring.",
+  "chat.err.rate_limited": "Juda tez — biroz kuting.",
+  "web.dash.system": "Tizim",
+  "web.dash.budget": "Bugungi byudjet",
+  "web.dash.db": "Baza",
+  "web.dash.redis": "Redis",
+  "web.dash.heartbeats": "Worker ishlari (oxirgi)",
+  "web.dash.no_heartbeats": "Worker'dan signal yo'q",
+  "web.dash.ok": "ishlayapti",
+  "web.dash.fail": "xato"
 }

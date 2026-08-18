@@ -252,14 +252,40 @@ class LLM:
         max_tokens: int | None = None,
         json_mode: bool = False,
     ) -> ChatResult:
+        import time
+
+        from app.observability import record_llm
+
         provider, model = resolve(task)
-        result = await provider.chat(
-            messages,
-            model=model,
-            tools=tools,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            json_mode=json_mode,
+        t0 = time.perf_counter()
+        try:
+            result = await provider.chat(
+                messages,
+                model=model,
+                tools=tools,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                json_mode=json_mode,
+            )
+        except LLMError:
+            record_llm(
+                provider=provider.name,
+                model=model,
+                task=str(task),
+                ok=False,
+                tokens_in=0,
+                tokens_out=0,
+                seconds=time.perf_counter() - t0,
+            )
+            raise
+        record_llm(
+            provider=result.provider,
+            model=result.model,
+            task=str(task),
+            ok=True,
+            tokens_in=result.usage.tokens_in,
+            tokens_out=result.usage.tokens_out,
+            seconds=time.perf_counter() - t0,
         )
         log.info(
             "llm.chat",

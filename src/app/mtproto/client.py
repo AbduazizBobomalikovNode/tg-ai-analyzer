@@ -29,7 +29,7 @@ class GuardedTelegramClient(TelegramClient):  # type: ignore[misc]
 
     async def __call__(
         self, request: Any, ordered: bool = False, flood_sleep_threshold: Any = None
-    ):
+    ) -> Any:
         requests = request if isinstance(request, list | tuple) else [request]
         for req in requests:
             try:

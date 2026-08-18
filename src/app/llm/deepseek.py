@@ -111,7 +111,9 @@ class DeepSeekProvider(BaseProvider):
         if model in _REASONER:
             payload.pop("temperature", None)
 
-        data = await self._with_retry("chat", lambda: self._post("/chat/completions", payload))
+        data: dict[str, Any] = await self._with_retry(
+            "chat", lambda: self._post("/chat/completions", payload)
+        )
         return _parse_chat(data, model=model)
 
     # ── ichki ────────────────────────────────────────────────────────────────

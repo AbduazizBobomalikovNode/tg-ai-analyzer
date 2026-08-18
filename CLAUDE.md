@@ -116,6 +116,15 @@ bu testlarni o'chirish/yumshatish taqiqlanadi.
 - Scheduling — Telegram server-side (`schedule=`); o'z cron'imiz bilan post
   yuborish yo'q (`scheduled_jobs` hozircha bo'sh).
 
+## Kuzatuv va limitlar (8-bosqich)
+
+- Metrikalar `app/observability.py` — nomlar barqaror (`tgai_*`), yangi
+  metrikani shu yerga qo'shing; heartbeat cron oxirida (`heartbeat(name)`).
+- Kunlik byudjet (`services/limits.py`) chat so'rovidan **oldin** tekshiriladi;
+  agent/digest/judge chaqiruvlari ham `conversation_messages` tokenlariga kiradi.
+- CI invariant qadamini (`tests/test_allowlist.py`, `test_peer_guard.py`,
+  `test_write_actions.py`, delete-grep) yumshatmang.
+
 ## Sirlar
 
 - Session string, master key, 2FA parol, OTP kod **hech qachon log'ga tushmaydi**

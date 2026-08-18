@@ -45,6 +45,7 @@ from app.db.models import (
 )
 from app.logging import get_logger
 from app.mtproto.pool import PoolError, pool
+from app.observability import FLOODWAIT, SNAPSHOT_POSTS, SYNC_MESSAGES
 
 log = get_logger(__name__)
 
@@ -318,6 +319,7 @@ async def sync_chat(chat_id: int, *, max_messages: int | None = None) -> SyncRep
             report.done = True  # bo'sh chat
         await _finish(chat_id, report, state=SyncState.IDLE)
     except tg_errors.FloodWaitError as exc:
+        FLOODWAIT.inc()
         report.error = f"flood_wait:{exc.seconds}"
         await _finish(chat_id, report, state=SyncState.IDLE, error=report.error)
         raise SyncPaused(int(exc.seconds)) from exc
@@ -366,6 +368,8 @@ async def _pull(
     if batch:
         report.inserted_or_updated += await upsert_messages(batch)
     report.fetched += fetched
+    if fetched:
+        SYNC_MESSAGES.inc(fetched)
     if backfill and fetched < budget:
         report.done = True  # tarix boshiga yetildi (limitgacha yetmay tugadi)
     await _progress(chat_id, report, total_estimate)
@@ -524,6 +528,8 @@ async def snapshot_chat_metrics(chat_id: int, *, now: datetime | None = None) ->
                         )
                     )
             captured += len(snaps)
+    if captured:
+        SNAPSHOT_POSTS.inc(captured)
     log.info("ingest.snapshot", chat_id=chat_id, posts=captured, tiers=len(tiers))
     return captured
 

@@ -29,6 +29,7 @@ from app.db.models import ActionStatus, AgentAction, AgentRun, Chat
 from app.logging import get_logger
 from app.mtproto.guard import PeerBlocked, assert_writable
 from app.mtproto.pool import PoolError, pool
+from app.observability import WRITE_ACTIONS
 
 log = get_logger(__name__)
 
@@ -157,6 +158,7 @@ async def reject_action(session: AsyncSession, user_id: int, action_id: int) -> 
     a.status = ActionStatus.REJECTED
     a.confirmed_at = datetime.now(UTC)
     await session.flush()
+    WRITE_ACTIONS.labels(a.tool, "rejected").inc()
     log.info("write.rejected", action_id=a.id, tool=a.tool)
     return _view(a)
 
@@ -233,6 +235,7 @@ async def execute_action(session: AsyncSession, a: AgentAction, *, actor: str) -
     a.status = ActionStatus.EXECUTED
     a.result_msg_id = result_id
     await session.flush()
+    WRITE_ACTIONS.labels(a.tool, "executed").inc()
     log.info(
         "write.executed", action_id=a.id, tool=a.tool, peer=peer_id, result=result_id, actor=actor
     )

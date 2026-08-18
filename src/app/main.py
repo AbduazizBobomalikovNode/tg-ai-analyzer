@@ -99,7 +99,7 @@ async def _check() -> int:
     try:
         import redis.asyncio as aioredis
 
-        client = aioredis.from_url(s.redis_url)
+        client = aioredis.from_url(s.redis_url)  # type: ignore[no-untyped-call]
         await client.ping()
         await client.aclose()
         log.info("check.redis", ok=True)

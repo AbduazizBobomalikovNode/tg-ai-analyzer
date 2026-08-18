@@ -21,7 +21,8 @@ def _load(locale: str) -> dict[str, str]:
     path = LOCALES_DIR / f"{locale}.json"
     if not path.exists():
         return {}
-    return json.loads(path.read_text(encoding="utf-8"))
+    data: dict[str, str] = json.loads(path.read_text(encoding="utf-8"))
+    return data
 
 
 def normalize(locale: str | None) -> str:
