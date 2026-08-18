@@ -314,6 +314,12 @@ src/app/
 migrations/          Alembic
 ```
 
+## Hujjatlar
+
+To'liq hujjatlar — [`docs/`](docs/README.md): arxitektura, xavfsizlik, ma'lumot
+modeli, API, LLM/prompt/xarajat, ingestion, agent va yozish amallari, deploy,
+development.
+
 ## Bosqichlar
 
 To'liq reja, qarorlar va texnik tahlil: **[PLAN.md](PLAN.md)**
