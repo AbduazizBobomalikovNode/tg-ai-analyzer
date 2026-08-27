@@ -14,6 +14,8 @@ LLM uchun alohida API kalit shart emas: **Claude Code obunangiz** bo'lsa
 (`claude setup-token`) shu token bilan ishlaydi; xohlasangiz Gemini yoki
 DeepSeek API kalitini ulaysiz.
 
+**Sahifa:** [abduazizbobomalikovnode.github.io/tg-ai-analyzer/](https://abduazizbobomalikovnode.github.io/tg-ai-analyzer/)
+
 ## Texnologiyalar
 
 | Qatlam | Stack |
