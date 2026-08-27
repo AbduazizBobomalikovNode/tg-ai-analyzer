@@ -3,71 +3,238 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>TG AI Analyzer — Telegram chatlari uchun AI agent</title>
-<meta name="description" content="MTProto va Bot API orqali Telegram arxiviga kiradi, xabarlarni tahlil qiladi, qidiradi va xulosa chiqaradi. Model sifatida Gemini yoki DeepSeek ishlaydi."/>
+<title>TG AI Analyzer — Telegram arxivingiz bilan gaplashadigan agent</title>
+<meta name="description" content="Minglab xabar orasidan keraklisini ma'no bo'yicha topadi, kanal statistikasini chiqaradi, post yozadi va rejalashtiradi. Akkauntingiz nomidan — lekin hech narsani o'chira olmaydi."/>
 <meta property="og:title" content="TG AI Analyzer"/>
-<meta property="og:description" content="MTProto va Bot API orqali Telegram arxiviga kiradi, xabarlarni tahlil qiladi, qidiradi va xulosa chiqaradi. Model sifatida Gemini yoki DeepSeek ishlaydi."/>
-<meta property="og:type" content="website"/>
+<meta property="og:description" content="Telegram arxivingiz bilan gaplashadigan AI agent. Xavfsizlik kafolatlari promptga emas, kodga o'rnatilgan."/>
 <style>
-  :root { --accent: #06b6d4; --bg: #0b0d12; --ink: #e8e6e0; --ink2: #9aa1ad; --line: rgba(232,230,224,.12); }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    background: var(--bg); color: var(--ink); min-height: 100vh;
-    font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-    display: flex; flex-direction: column; align-items: center; padding: 6vh 20px 40px;
-    background-image: radial-gradient(900px 500px at 50% -10%, #06b6d41f, transparent 70%);
-  }
-  main { width: 100%; max-width: 680px; }
-  .icon { font-size: 46px; line-height: 1; margin-bottom: 18px; }
-  h1 { font-size: clamp(30px, 6vw, 44px); letter-spacing: -.02em; font-weight: 700; }
-  .tagline { color: var(--accent); font-size: 15px; letter-spacing: .06em; text-transform: uppercase; margin: 10px 0 22px; font-weight: 600; }
-  .lede { font-size: clamp(16px, 2.4vw, 19px); color: #cfd3da; }
-  h2 { font-size: 13px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink2); margin: 40px 0 14px; font-weight: 600; }
-  ul { list-style: none; }
-  li { padding: 11px 0 11px 26px; position: relative; border-bottom: 1px solid var(--line); color: #cfd3da; }
-  li::before { content: ""; position: absolute; left: 4px; top: 20px; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
-  .stack { display: flex; flex-wrap: wrap; gap: 8px; }
-  .stack span { border: 1px solid var(--line); border-radius: 999px; padding: 6px 13px; font-size: 13px; color: var(--ink2); }
-  .actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 38px; }
-  a.btn {
-    display: inline-flex; align-items: center; gap: 9px; text-decoration: none;
-    padding: 13px 22px; border-radius: 10px; font-weight: 600; font-size: 15px;
-    border: 1px solid var(--line); color: var(--ink); transition: border-color .18s, transform .18s;
-  }
-  a.btn:hover { border-color: var(--accent); transform: translateY(-1px); }
-  a.btn.primary { background: var(--accent); color: #0b0d12; border-color: var(--accent); }
-  footer { margin-top: 56px; padding-top: 22px; border-top: 1px solid var(--line); color: var(--ink2); font-size: 14px; }
-  footer a { color: var(--ink); text-decoration: none; border-bottom: 1px solid var(--line); }
-  footer a:hover { border-color: var(--accent); }
-  @media (prefers-reduced-motion: reduce) { a.btn { transition: none; } }
+:root{
+  --bg:#07090f; --ink:#eef1f6; --ink2:#98a2b3; --ink3:#6b7480;
+  --accent:#22d3ee; --accent2:#8b5cf6; --warn:#f59e0b; --ok:#34d399;
+  --line:rgba(238,241,246,.10); --card:rgba(255,255,255,.028);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{
+  background:var(--bg);color:var(--ink);
+  font:16px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+  -webkit-font-smoothing:antialiased;overflow-x:hidden;
+}
+/* orqa fon: ikki qatlam — jonli gradient va nozik to'r */
+body::before{
+  content:"";position:fixed;inset:-30%;z-index:-2;
+  background:
+    radial-gradient(48rem 32rem at 18% 8%, rgba(34,211,238,.16), transparent 60%),
+    radial-gradient(42rem 30rem at 82% 22%, rgba(139,92,246,.15), transparent 62%),
+    radial-gradient(38rem 28rem at 50% 92%, rgba(52,211,153,.09), transparent 65%);
+  animation:drift 26s ease-in-out infinite alternate;
+}
+body::after{
+  content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;
+  background-image:linear-gradient(var(--line) 1px,transparent 1px),linear-gradient(90deg,var(--line) 1px,transparent 1px);
+  background-size:64px 64px;
+  mask-image:radial-gradient(ellipse 90% 60% at 50% 0%,#000 30%,transparent 78%);
+  -webkit-mask-image:radial-gradient(ellipse 90% 60% at 50% 0%,#000 30%,transparent 78%);
+  opacity:.55;
+}
+@keyframes drift{from{transform:translate3d(0,0,0) scale(1)}to{transform:translate3d(-3%,2%,0) scale(1.08)}}
+
+.wrap{max-width:860px;margin:0 auto;padding:0 22px}
+section{padding:72px 0}
+.eyebrow{
+  display:inline-flex;align-items:center;gap:8px;
+  font-size:12px;letter-spacing:.14em;text-transform:uppercase;font-weight:700;
+  color:var(--accent);border:1px solid rgba(34,211,238,.32);
+  border-radius:999px;padding:6px 14px;background:rgba(34,211,238,.07);
+}
+h1{font-size:clamp(34px,6.4vw,60px);line-height:1.06;letter-spacing:-.03em;font-weight:800;margin:22px 0 0}
+h1 .grad{background:linear-gradient(100deg,var(--accent),var(--accent2));-webkit-background-clip:text;background-clip:text;color:transparent}
+h2{font-size:clamp(24px,3.6vw,34px);letter-spacing:-.02em;font-weight:700;margin-bottom:14px}
+h3{font-size:17px;font-weight:700;margin-bottom:6px}
+.lede{font-size:clamp(17px,2.3vw,21px);color:#c6ccd6;margin-top:20px;max-width:64ch}
+.muted{color:var(--ink2)}
+.small{font-size:14px;color:var(--ink3)}
+code{font:600 13.5px/1 ui-monospace,SFMono-Regular,Menlo,monospace;background:rgba(255,255,255,.06);padding:2px 6px;border-radius:5px}
+
+/* HERO */
+header{padding:14vh 0 20px;position:relative}
+.hero-meta{display:flex;flex-wrap:wrap;gap:10px;margin-top:32px}
+.hero-meta span{border:1px solid var(--line);border-radius:8px;padding:7px 12px;font-size:13px;color:var(--ink2);background:var(--card)}
+
+/* MUAMMO */
+.problem{border-left:3px solid var(--warn);padding-left:22px;margin-top:8px}
+.problem p{color:#c6ccd6;max-width:62ch}
+.problem p + p{margin-top:14px}
+.quote{font-size:clamp(19px,2.8vw,25px);line-height:1.42;color:var(--ink);font-weight:600;letter-spacing:-.01em}
+
+/* QADAMLAR */
+.steps{counter-reset:s;margin-top:26px}
+.step{counter-increment:s;position:relative;padding:20px 0 20px 62px;border-bottom:1px solid var(--line)}
+.step:last-child{border-bottom:0}
+.step::before{
+  content:counter(s,decimal-leading-zero);position:absolute;left:0;top:19px;
+  font:700 13px/1 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--accent);
+  border:1px solid rgba(34,211,238,.34);border-radius:8px;padding:8px 9px;background:rgba(34,211,238,.07);
+}
+.step p{color:var(--ink2);font-size:15px;margin-top:3px}
+
+/* GRID KARTOCHKALAR */
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(238px,1fr));gap:14px;margin-top:26px}
+.card{
+  border:1px solid var(--line);border-radius:14px;padding:20px;background:var(--card);
+  transition:border-color .2s,transform .2s,background .2s;
+}
+.card:hover{border-color:rgba(34,211,238,.4);transform:translateY(-2px);background:rgba(34,211,238,.05)}
+.card .ic{font-size:20px;margin-bottom:12px;display:block}
+.card p{font-size:14.5px;color:var(--ink2)}
+
+/* XAVFSIZLIK */
+.safety{border:1px solid rgba(52,211,153,.26);border-radius:16px;padding:26px;background:linear-gradient(180deg,rgba(52,211,153,.07),transparent 70%)}
+.safety h2{margin-bottom:8px}
+.slist{margin-top:20px;display:grid;gap:12px}
+.srow{display:flex;gap:14px;align-items:flex-start;padding-bottom:12px;border-bottom:1px solid var(--line)}
+.srow:last-child{border-bottom:0;padding-bottom:0}
+.srow .no{color:var(--ok);font-weight:800;font-size:15px;flex:0 0 auto;line-height:1.55}
+.srow b{display:block;font-size:15px}
+.srow span{font-size:14px;color:var(--ink2)}
+.pill{display:inline-block;margin-top:18px;font-size:13.5px;color:var(--ok);border:1px solid rgba(52,211,153,.3);border-radius:999px;padding:7px 14px;background:rgba(52,211,153,.08)}
+
+/* STACK */
+.stack{display:flex;flex-wrap:wrap;gap:8px;margin-top:20px}
+.stack span{border:1px solid var(--line);border-radius:999px;padding:7px 14px;font-size:13.5px;color:var(--ink2);background:var(--card)}
+
+/* CTA */
+.cta{text-align:center;border-top:1px solid var(--line);margin-top:20px}
+.btns{display:flex;flex-wrap:wrap;gap:12px;justify-content:center;margin-top:26px}
+a.btn{
+  display:inline-flex;align-items:center;gap:9px;text-decoration:none;font-weight:650;font-size:15.5px;
+  padding:14px 26px;border-radius:11px;border:1px solid var(--line);color:var(--ink);
+  transition:border-color .2s,transform .2s;
+}
+a.btn:hover{border-color:var(--accent);transform:translateY(-1px)}
+a.btn.primary{background:linear-gradient(100deg,var(--accent),var(--accent2));color:#07090f;border:0;font-weight:750}
+footer{padding:34px 0 60px;text-align:center;color:var(--ink3);font-size:14px}
+footer a{color:var(--ink2);text-decoration:none;border-bottom:1px solid var(--line)}
+footer a:hover{color:var(--ink);border-color:var(--accent)}
+
+/* kirish animatsiyasi */
+.rise{opacity:0;transform:translateY(14px);animation:rise .7s cubic-bezier(.2,.7,.3,1) forwards}
+.d1{animation-delay:.06s}.d2{animation-delay:.13s}.d3{animation-delay:.2s}
+@keyframes rise{to{opacity:1;transform:none}}
+@media (prefers-reduced-motion:reduce){
+  *{animation:none!important;transition:none!important}
+  .rise{opacity:1;transform:none}
+  html{scroll-behavior:auto}
+}
 </style>
 </head>
 <body>
-<main>
-  <div class="icon">🤖</div>
-  <h1>TG AI Analyzer</h1>
-  <div class="tagline">Telegram chatlari uchun AI agent</div>
-  <p class="lede">MTProto va Bot API orqali Telegram arxiviga kiradi, xabarlarni tahlil qiladi, qidiradi va xulosa chiqaradi. Model sifatida Gemini yoki DeepSeek ishlaydi.</p>
 
-  <h2>Nima qiladi</h2>
-  <ul>
-    <li>MTProto orqali chat arxivini oʻqish</li>
-    <li>Xabarlar boʻyicha qidiruv va tahlil</li>
-    <li>Gemini / DeepSeek modellari bilan xulosa</li>
-    <li>Docker bilan ishga tushadi</li>
-  </ul>
-
-  <h2>Texnologiyalar</h2>
-  <div class="stack"><span>Python</span><span>MTProto</span><span>Gemini</span><span>DeepSeek</span><span>Docker</span></div>
-
-  <div class="actions">
-    <a class="btn primary" href="https://github.com/AbduazizBobomalikovNode/tg-ai-analyzer">Kodni koʻrish →</a>
-    <a class="btn" href="https://4d-portfolio.vercel.app">Boshqa loyihalar</a>
+<header class="wrap">
+  <div class="rise"><span class="eyebrow">Python · MTProto · LLM</span></div>
+  <h1 class="rise d1">Telegram arxivingiz<br/><span class="grad">bilan gaplashadigan agent</span></h1>
+  <p class="lede rise d2">
+    Minglab xabar orasidan keraklisini <b>ma'no bo'yicha</b> topadi, kanal statistikasini chiqaradi,
+    post yozadi va rejalashtiradi. Akkauntingiz nomidan ishlaydi — lekin hech narsani o'chira olmaydi.
+  </p>
+  <div class="hero-meta rise d3">
+    <span>Claude · Gemini · DeepSeek</span>
+    <span>PostgreSQL + pgvector</span>
+    <span>Docker bilan bir buyruqda</span>
   </div>
+</header>
 
-  <footer>
-    <b>Abduaziz Bobomalikov</b> — <a href="https://4d-portfolio.vercel.app">4D Portfolio</a> · <a href="https://t.me/Bobomalikov_Abduaziz">Telegram</a>
-  </footer>
-</main>
+<section class="wrap">
+  <h2>Muammo</h2>
+  <div class="problem">
+    <p class="quote">"O'tgan oy o'sha shartnoma haqida nima gaplashgandik?"</p>
+    <p>
+      Telegram bu savolga javob bermaydi. Qidiruvi so'z bo'yicha ishlaydi: aniq qaysi so'z ishlatilganini
+      eslashingiz kerak. Eslay olmasangiz — yillik arxiv siz uchun yopiq.
+    </p>
+    <p>
+      Kanal yuritsangiz muammo ikkilanadi. Qaysi post ishladi, qachon chiqarish kerak, keyingisi nima haqida —
+      bularning javobi xabarlar ichida yotibdi, lekin uni qo'lda sanab chiqib bo'lmaydi.
+    </p>
+  </div>
+</section>
+
+<section class="wrap">
+  <h2>Qanday ishlaydi</h2>
+  <p class="muted">To'rt qadam, birinchisidan keyin hammasi avtomatik.</p>
+  <div class="steps">
+    <div class="step">
+      <h3>Akkauntingizga ulanadi</h3>
+      <p>Telethon orqali MTProto ulanishi — bot emas, o'zingizning akkauntingiz. Shuning uchun barcha chatlar,
+         shu jumladan yopiq guruhlar ham ko'rinadi.</p>
+    </div>
+    <div class="step">
+      <h3>Arxivni bazaga yig'adi</h3>
+      <p>Xabarlar PostgreSQL'ga tushadi, pgvector bilan vektorga aylantiriladi. Sinxronizatsiya fonda,
+         Redis navbati orqali ishlaydi.</p>
+    </div>
+    <div class="step">
+      <h3>Siz savol berasiz</h3>
+      <p>Oddiy bot chatida, o'z tilingizda. "O'tgan hafta eng ko'p ko'rilgan post qaysi?" yoki
+         "Shartnoma haqidagi gaplarni yig'ib ber".</p>
+    </div>
+    <div class="step">
+      <h3>Agent topadi va xulosa qiladi</h3>
+      <p>Gibrid qidiruv: to'liq matn qidiruvi va semantik qidiruv birga. Topilgan xabarlarni LLM o'qiydi
+         va javobni Telegram formatida qaytaradi.</p>
+    </div>
+  </div>
+</section>
+
+<section class="wrap">
+  <h2>Nima qila oladi</h2>
+  <div class="grid">
+    <div class="card"><span class="ic">🔍</span><h3>Ma'no bo'yicha qidiruv</h3><p>Aniq so'zni eslash shart emas — mazmunan yaqin xabarlarni topadi.</p></div>
+    <div class="card"><span class="ic">📊</span><h3>Kanal statistikasi</h3><p>Ko'rishlar, reaksiyalar, forwardlar — kun, hafta, oy, yil yoki butun davr kesimida.</p></div>
+    <div class="card"><span class="ic">📝</span><h3>Post yozadi</h3><p>Yozish, tahrirlash, forward, pin va berilgan vaqtga rejalashtirish.</p></div>
+    <div class="card"><span class="ic">💡</span><h3>G'oya beradi</h3><p>Chat xulosasidan keyingi post uchun mavzu va senariy taklif qiladi.</p></div>
+    <div class="card"><span class="ic">🖼</span><h3>Rasm topadi</h3><p>Internetdan qidiradi yoki Gemini bilan yangisini yasaydi.</p></div>
+    <div class="card"><span class="ic">🔑</span><h3>Alohida kalit shart emas</h3><p>Claude Code obunangiz bo'lsa shu token bilan ishlaydi.</p></div>
+  </div>
+</section>
+
+<section class="wrap">
+  <div class="safety">
+    <h2>Nima qila <u>olmaydi</u></h2>
+    <p class="muted">Agentga akkauntingizni berish qo'rqinchli. Shuning uchun cheklovlar so'rov matniga emas, kodga o'rnatilgan.</p>
+    <div class="slist">
+      <div class="srow"><span class="no">✕</span><div><b>Xabar o'chira olmaydi</b><span>Barcha <code>Delete*</code> metodlari RPC allowlist'da taqiqlangan. Agentning vositalar ro'yxatida o'chirish tooli umuman yo'q.</span></div></div>
+      <div class="srow"><span class="no">✕</span><div><b>Boshqaruv botiga yoza olmaydi</b><span>Peer deny-list. Bu chat tanlash ro'yxatidan ham chiqarib tashlanadi.</span></div></div>
+      <div class="srow"><span class="no">✕</span><div><b>Logout, ban yoki profil o'zgartira olmaydi</b><span>Hammasi taqiqlangan — hatto login oynasining ichida ham.</span></div></div>
+      <div class="srow"><span class="no">✕</span><div><b>Ruxsatsiz yoza olmaydi</b><span>Standart rejim — har bir yozishdan oldin sizdan tasdiq so'raydi.</span></div></div>
+      <div class="srow"><span class="no">✕</span><div><b>Izini yashira olmaydi</b><span>Harakatlar jadvali faqat qo'shiladi, o'chirilmaydi — buni Postgres triggeri ushlab turadi.</span></div></div>
+    </div>
+    <span class="pill">Bu kafolatlar har ishga tushishda testlar bilan tekshiriladi</span>
+  </div>
+</section>
+
+<section class="wrap">
+  <h2>Nimadan qurilgan</h2>
+  <div class="stack">
+    <span>Python 3.12 · asyncio</span><span>Telethon (MTProto)</span><span>aiogram 3</span>
+    <span>PostgreSQL 16 + pgvector</span><span>SQLAlchemy 2 · Alembic</span><span>Redis + ARQ</span>
+    <span>FastAPI</span><span>Claude / Gemini / DeepSeek</span><span>Docker Compose</span>
+  </div>
+  <p class="small" style="margin-top:18px">Kerak bo'ladi: Telegram bot tokeni, API ID/hash, Gemini kaliti va Docker. Qolganini <code>make up</code> qiladi.</p>
+</section>
+
+<section class="wrap cta">
+  <h2>Ko'rib chiqing</h2>
+  <p class="muted">Kod ochiq, o'rnatish yo'riqnomasi README'da.</p>
+  <div class="btns">
+    <a class="btn primary" href="https://github.com/AbduazizBobomalikovNode/tg-ai-analyzer">GitHub'da ochish →</a>
+    <a class="btn" href="https://4d-portfolio.vercel.app">Boshqa loyihalarim</a>
+  </div>
+</section>
+
+<footer>
+  <b>Abduaziz Bobomalikov</b> · <a href="https://4d-portfolio.vercel.app">4D Portfolio</a> · <a href="https://t.me/Bobomalikov_Abduaziz">Telegram</a>
+</footer>
+
 </body>
 </html>
