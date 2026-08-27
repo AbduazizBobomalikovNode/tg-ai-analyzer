@@ -1,17 +1,24 @@
+# bog'liqliklar
+node_modules/
+
+# sirlar — hech qachon commit qilinmasin
 .env
-*.session
-*.session-journal
-sessions/
+.env.*
+!.env.example
+
+# loglar va vaqtinchalik fayllar
+*.log
+logs/
+npm-debug.log*
+
+# muharrir va OS
+.DS_Store
+.vscode/
+.idea/
+
+# python
 __pycache__/
-*.py[cod]
+*.pyc
 .venv/
 venv/
-.mypy_cache/
-.ruff_cache/
-.pytest_cache/
-dist/
-build/
 *.egg-info/
-.DS_Store
-data/
-logs/
