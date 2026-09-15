@@ -25,7 +25,17 @@ def _strings(locale: str) -> dict[str, str]:
         k: v
         for k, v in merged.items()
         if k.startswith(
-            ("web.", "auth.err.", "pool.err.", "chat.err.", "action.err.", "sync.err.", "error.")
+            (
+                "web.",
+                "auth.err.",
+                "pool.err.",
+                "chat.err.",
+                "action.err.",
+                "sync.err.",
+                "alert.err.",  # phase3/C
+                "briefing.err.",  # phase3/B
+                "error.",
+            )
         )
     }
 
@@ -81,3 +91,16 @@ async def dashboard_page(request: Request) -> Any:
     if identity_of(request) is None:
         return RedirectResponse("/login", status_code=302)
     return _render(request, "dashboard.html")
+
+
+# ── phase3/B: shaxsiy briefing (Mini App chuqur havolasi shu sahifaga tushadi) ──
+
+
+@router.get("/briefings", response_class=HTMLResponse)
+@router.get("/briefings/{day}", response_class=HTMLResponse)
+async def briefings_page(request: Request, day: str = "") -> Any:
+    if identity_of(request) is None:
+        return RedirectResponse("/login", status_code=302)
+    # `day` faqat sahifa qobig'iga beriladi; ma'lumot /api/briefings dan keladi
+    # va u yerda egalik tekshiriladi.
+    return _render(request, "briefings.html", day=day[:10])

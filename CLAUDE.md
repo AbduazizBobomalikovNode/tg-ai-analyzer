@@ -92,9 +92,9 @@ synth → qamrov. Web: `POST /api/conversations/{id}/messages` `mode="deep"`
   ichida, har satr `untrusted.neutralize` dan o'tgan. Ikkinchi konvert
   qo'shmang.
 - **Qamrov (`Coverage`) kodda hisoblanadi**, modelga yozdirilmaydi. `gaps` =
-  `synced_min_id != 1` chatlar; `server_rungs_used` hozircha har doim `False`
-  (server pog'onalari 3-bosqichda). "Hamma xabarlarni ko'rdim" degan gap
-  chiqmasin.
+  `synced_min_id != 1` chatlar; `server_rungs_used` / `server_calls` /
+  `server_hits` / `server_skipped` / `external_hits` — server pog'onalarining
+  **rost** hisobi. "Hamma xabarlarni ko'rdim" degan gap chiqmasin.
 - **Yagona yozuvchi — `deep_search._persist`.** User turn + assistant turn +
   `agent_runs` bitta joyda yoziladi; boshqa joydan `conversation_messages`
   ga deep natijasini yozmang. Rejim `context.mode = "deep"` da.
@@ -109,6 +109,32 @@ synth → qamrov. Web: `POST /api/conversations/{id}/messages` `mode="deep"`
 - Fan-out'da har subquery **o'z sessiyasi** bilan ishlaydi (bitta
   `AsyncSession` parallelga xavfsiz emas). Reja oynasi (`since`/`until`)
   `hybrid_search_multi` ga ham, `node_search` ga ham uzatiladi.
+
+### Server pog'onalari (3-bosqich)
+
+Xom MTProto qidiruv mantiqi `services/tg_search.py` da — konvertsiz, tipli
+(`ServerHits` / `ServerHit`). `tools.search_telegram` / `search_global` /
+`search_calendar` / `saved_messages_search` / `discover_channels` shuning
+ustidagi **yupqa o'ramchi**; ikkinchi nusxa yozmang. Shift bitta joyda:
+`tools.bucket_guard` → `tools._buckets` (tool yo'li ham, deep search yo'li ham
+bitta akkaunt kvotasini bo'lishadi).
+
+- Chiqish sharti **kodda** (`deep_search.needs_server`), modelda emas:
+  (a) bo'shliqli chat, (b) lokal hit `DEEP_SERVER_MIN_LOCAL_HITS` (8) dan kam,
+  (c) `lookup`/`person` oynasi eng eski sinxronlangan xabardan oldin,
+  (d) planner/reflect `server_scope` ni `global`/`discover` qilgan.
+  `server_scope="none"` hammasini bekor qiladi.
+- Pog'onalar tartibi: bo'shliqli chatlar (`messages.Search`, top 2 subquery) →
+  global (`messages.SearchGlobal`) → `discover` (`channels.SearchPosts`) —
+  oxirgisi **faqat** `server_scope=="discover"` da. Jami
+  `DEEP_SERVER_MAX_CALLS` (6) chaqiruv.
+- To'lgan bucket — xato emas: pog'ona **o'tkazib yuboriladi** va
+  `coverage.server_skipped` ga yoziladi. Kutish yo'q, retry yo'q.
+- Server hitlari alohida RRF ro'yxati (og'irlik 0.9). Lokal `chats` da bor
+  chatdan kelgani `ingestion.upsert_messages` orqali saqlanadi (sitata lokal
+  id fazasida qolsin); qolgani **saqlanmaydi**, manfiy sintetik id oladi va
+  dalilda `[server external]` deb belgilanadi — u lokal indeks bilan
+  solishtirilmagan.
 
 ### `retrieval_nodes` (`services/nodes.py`, `services/episodes.py`)
 
@@ -231,6 +257,70 @@ serverga boradi, shift bir xil.
   `messages.GetMessageReadParticipants`, `stats.*`). Ular ataylab qo'shilmagan:
   maxfiylik qiymati past, token narxi yuqori. Qo'shsangiz shu mezon bilan
   o'lchang.
+
+## Briefing (3-bosqich/B)
+
+- Bitta jadval, migratsiya `0010`: `briefings` (`uq_briefing_account_day` —
+  bitta akkaunt + bitta **lokal** kun uchun bitta qator, cron shu kalitga
+  tayanib idempotent bo'ladi) va `accounts.tz` / `quiet_from` / `quiet_to` /
+  `briefing_enabled` / `briefing_hour` / `briefing_chats` ustunlari. Bu
+  ustunlar **Alertlar** bo'limidagi jim soatlar bilan **bir xil** — ikkinchi
+  nusxa qo'shmang.
+- `services/briefing.py` — yagona nuqta. Uch qaror:
+  1. **Salience kodda, sintez modelda.** Chat muhimligi — 28 kunlik mediana
+     z-og'ishi + egasi tilga olingani (+2) + ochiq savol (+1 har biri).
+     Model tartib tanlamaydi, faqat tanlangan `BRIEFING_TOP_CHATS` haqida
+     yozadi.
+  2. **Sitatalar mexanik tekshiriladi.** Har `#<id>` manba tugunlari
+     matnidagi id to'plamida bo'lishi shart; bo'lmasa havola o'chiriladi,
+     havolasiz qolgan qator **tashlanadi** — hallyutsinatsiya qilingan
+     sitata chiqishga yetmaydi.
+  3. **"Kim ko'p yozdi" kodda sanaladi**, modeldan so'ralmaydi.
+- Kun tugunlari matni — begona odamlar yozgani (invariant 3): bitta
+  `<untrusted_data kind="digests">` konvertida, `untrusted.neutralize`dan
+  o'tgan holda. Chain-of-Density raundlari ham shu konvertdan foydalanadi
+  (arzon `Task.ROUTE`); asosiy sintez bitta `Task.SEARCH` chaqiruvi.
+- Yetkazish **faqat** akkaunt egasiga (`accounts.user_id → users.tg_user_id`),
+  `bot/push.py::send_html` orqali — MTProto bu yo'lda umuman ishlatilmaydi
+  (hech narsa Telegram akkaunt nomidan yuborilmaydi). `deliver_account`
+  `Briefing.delivered_at` ni tekshiradi — qayta yuborish yo'q.
+- Jim soatlar — **yetkazishni** to'xtatadi (`delivery_check` →
+  `in_quiet_hours`), **qurishni** emas: kun tugunlari mavjud bo'lganda
+  briefing baribir tayyorlanadi, faqat push kutadi (keyingi yetkazish
+  cronida `delivered_at is None` bo'lgani qayta tekshiriladi).
+- Cron: `build_briefings` (har soat, `minute={45}`) — lokal vaqti 02:00
+  bo'lgan akkauntlar uchun **kechagi** briefingni quradi; `deliver_briefings`
+  (`minute={6,21,36,51}`, har 15 daqiqa) tayyor-lekin-yetkazilmagan
+  briefinglarni push qiladi. `worker/tasks.PHASE3B_CRONS`,
+  `settings.briefing_enabled` — global o'chiruv kaliti.
+
+## Alertlar (3-bosqich/C)
+
+- Ikki jadval, migratsiya `0011`: `alert_rules` (kalit so'z yoki semantik
+  qoida, `chat_id` NULL = barcha chatlar) va `alert_events`
+  (`uq_alert_event(rule_id, message_id)` — **dedup bazada**, kodda emas).
+- `services/alerts.py` — yagona nuqta. `compile_keyword_query` naqshni
+  `search.fold_terms` orqali **indeks bilan bir xil** fold fazosiga tushiradi
+  (`tsv_uz`), va alohida **xom** variantini `tsv_ru` uchun quradi. Ikki kanal
+  kerak: `simple` konfiguratsiyada ruscha stemming yo'q.
+- Uchta qopqoq olib tashlanmaydi: kursor (`last_checked_msg_id`, har skaner
+  faqat yangi xabarlarni ko'radi), `cooldown_minutes` (`(rule, chat)` bo'yicha
+  — gapiradigan chat aks holda soatiga o'nlab push beradi) va
+  `MAX_EVENTS_PER_PUSH = 5` ("va yana N ta").
+- Semantik qoidaning vektori `alert_rules.embedding` da **keshlanadi**;
+  `pattern`/`kind` o'zgarsa router uni `NULL` ga tushiradi. Skaner har 5
+  daqiqada yuguradi — keshsiz bu kunlik ortiqcha embedding xarajati.
+- Push **faqat** egasining boshqaruv boti chatiga (`accounts.user_id →
+  users.tg_user_id`), `bot.push.send_html` orqali. Xabar matni
+  `untrusted.neutralize` **va** `html.escape` dan o'tadi (`alerts.snippet`):
+  biri konvert tegini, ikkinchisi Telegram HTML tegini o'ldiradi.
+- Jim soatlar — B'ning `accounts.tz/quiet_from/quiet_to` ustunlari,
+  `alerts.is_quiet()` sof funksiyasi (yarim tun orqali o'raladi). Jim
+  soatlarda **yetkazish** to'xtaydi, **skaner** emas: kursor oldinga siljib
+  turmasa, tong otganda bir yugurishda butun tun qayta skanerlanardi.
+- Cron: `scan_alerts` (har 5 daqiqa, 1/6/11…) va `deliver_alerts_task`
+  (4/9/14…), `worker/tasks.PHASE3C_CRONS`. `sync_account` oxirida yangi
+  xabar bo'lsa `scan_alerts` darhol navbatga tushadi.
 
 ## Yozish amallari (6-bosqich)
 

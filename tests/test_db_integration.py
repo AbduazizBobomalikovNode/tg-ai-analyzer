@@ -492,3 +492,213 @@ async def test_node_rows_die_with_the_chat(pg_engine: AsyncEngine) -> None:
             )
         ).scalar_one()
     assert left == 0
+
+
+# ─── migratsiya 0011: alertlar ──────────────────────────────────────────────
+
+
+async def test_alert_rules_halfvec_column_and_dedup(pg_engine: AsyncEngine) -> None:
+    """`alert_rules.embedding` — `halfvec(768)`; `uq_alert_event` takrorni to'sadi."""
+    account_id, chat_id = await _fixture_chat(pg_engine)
+    vec = "[" + ",".join(["0.01"] * 768) + "]"
+
+    async with pg_engine.begin() as conn:
+        rule_id = (
+            await conn.execute(
+                text(
+                    "INSERT INTO alert_rules (account_id, chat_id, kind, label, pattern, "
+                    "embedding, threshold, enabled, cooldown_minutes) "
+                    "VALUES (:a, :c, 'semantic', 'test', 'ish haqida shikoyat', "
+                    "CAST(:v AS halfvec), 0.82, true, 30) RETURNING id"
+                ),
+                {"a": account_id, "c": chat_id, "v": vec},
+            )
+        ).scalar_one()
+        msg_id = (
+            await conn.execute(
+                text(
+                    "INSERT INTO messages (chat_id, tg_msg_id, sender_id, published_at, text) "
+                    "VALUES (:c, 1, 42, now(), 'to''lov qilindi') RETURNING id"
+                ),
+                {"c": chat_id},
+            )
+        ).scalar_one()
+
+    # ustun turi va `<=>` operatori ishlaydi (halfvec_cosine_ops)
+    async with pg_engine.connect() as conn:
+        udt = (
+            await conn.execute(
+                text(
+                    "SELECT udt_name FROM information_schema.columns "
+                    "WHERE table_name = 'alert_rules' AND column_name = 'embedding'"
+                )
+            )
+        ).scalar_one()
+        assert udt == "halfvec"
+        dist = (
+            await conn.execute(
+                text("SELECT embedding <=> CAST(:v AS halfvec) FROM alert_rules WHERE id = :r"),
+                {"r": rule_id, "v": vec},
+            )
+        ).scalar_one()
+        assert abs(float(dist)) < 1e-6
+
+    # `ON CONFLICT DO NOTHING` — ikkinchi hodisa yozilmaydi
+    async with pg_engine.begin() as conn:
+        for _ in range(2):
+            await conn.execute(
+                text(
+                    "INSERT INTO alert_events (rule_id, message_id, chat_id, tg_msg_id, score) "
+                    "VALUES (:r, :m, :c, 1, 0.9) ON CONFLICT (rule_id, message_id) DO NOTHING"
+                ),
+                {"r": rule_id, "m": msg_id, "c": chat_id},
+            )
+    async with pg_engine.connect() as conn:
+        n = (
+            await conn.execute(
+                text("SELECT count(*) FROM alert_events WHERE rule_id = :r"), {"r": rule_id}
+            )
+        ).scalar_one()
+    assert n == 1
+
+
+async def test_alert_rows_die_with_the_chat(pg_engine: AsyncEngine) -> None:
+    """Chat o'chsa qoida ham, hodisalari ham qolmaydi (`ON DELETE CASCADE`)."""
+    account_id, chat_id = await _fixture_chat(pg_engine)
+    async with pg_engine.begin() as conn:
+        rule_id = (
+            await conn.execute(
+                text(
+                    "INSERT INTO alert_rules (account_id, chat_id, kind, pattern) "
+                    "VALUES (:a, :c, 'keyword', 'tolov') RETURNING id"
+                ),
+                {"a": account_id, "c": chat_id},
+            )
+        ).scalar_one()
+        msg_id = (
+            await conn.execute(
+                text(
+                    "INSERT INTO messages (chat_id, tg_msg_id, published_at, text) "
+                    "VALUES (:c, 7, now(), 'x') RETURNING id"
+                ),
+                {"c": chat_id},
+            )
+        ).scalar_one()
+        await conn.execute(
+            text(
+                "INSERT INTO alert_events (rule_id, message_id, chat_id, tg_msg_id) "
+                "VALUES (:r, :m, :c, 7)"
+            ),
+            {"r": rule_id, "m": msg_id, "c": chat_id},
+        )
+        await conn.execute(text("DELETE FROM chats WHERE id = :c"), {"c": chat_id})
+    async with pg_engine.connect() as conn:
+        left = (
+            await conn.execute(
+                text(
+                    "SELECT (SELECT count(*) FROM alert_rules WHERE id = :r) + "
+                    "(SELECT count(*) FROM alert_events WHERE rule_id = :r)"
+                ),
+                {"r": rule_id},
+            )
+        ).scalar_one()
+    assert left == 0
+
+
+# ─── (f) phase3/B: migratsiya 0010 — briefing ustunlari va jadvali ───────────
+
+
+async def test_account_briefing_columns_have_defaults(pg_engine: AsyncEngine) -> None:
+    """Yangi akkaunt avtomatik `Asia/Tashkent`, o'chiq briefing, soat 8 bilan keladi."""
+    account_id, _ = await _fixture_chat(pg_engine)
+    async with pg_engine.begin() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT tz, quiet_from, quiet_to, briefing_enabled, briefing_hour, "
+                    "briefing_chats FROM accounts WHERE id = :a"
+                ),
+                {"a": account_id},
+            )
+        ).one()
+    assert row.tz == "Asia/Tashkent"
+    assert row.quiet_from is None and row.quiet_to is None
+    assert row.briefing_enabled is False
+    assert row.briefing_hour == 8
+    assert row.briefing_chats is None
+
+
+async def test_quiet_hours_store_local_time_of_day(pg_engine: AsyncEngine) -> None:
+    """`quiet_from`/`quiet_to` — timezone'siz `time`, yarim tun orqali o'ralishi mumkin."""
+    account_id, _ = await _fixture_chat(pg_engine)
+    async with pg_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE accounts SET tz = 'Europe/Moscow', quiet_from = '22:00', "
+                "quiet_to = '07:30', briefing_enabled = true, briefing_hour = 9, "
+                "briefing_chats = CAST(:chats AS jsonb) WHERE id = :a"
+            ),
+            {"a": account_id, "chats": "[1, 2, 3]"},
+        )
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT tz, quiet_from, quiet_to, briefing_hour, briefing_chats "
+                    "FROM accounts WHERE id = :a"
+                ),
+                {"a": account_id},
+            )
+        ).one()
+    assert row.tz == "Europe/Moscow"
+    assert (row.quiet_from.hour, row.quiet_from.minute) == (22, 0)
+    assert (row.quiet_to.hour, row.quiet_to.minute) == (7, 30)
+    assert row.quiet_from > row.quiet_to  # o'ralgan oyna
+    assert row.briefing_hour == 9 and row.briefing_chats == [1, 2, 3]
+
+
+async def test_briefing_is_unique_per_account_and_day(pg_engine: AsyncEngine) -> None:
+    """`uq_briefing_account_day` — cron idempotentligi shu kalitga tayanadi."""
+    from sqlalchemy.exc import IntegrityError
+
+    account_id, _ = await _fixture_chat(pg_engine)
+    ins = text(
+        "INSERT INTO briefings (account_id, day, text, structured, tokens_in, tokens_out) "
+        "VALUES (:a, DATE '2026-09-14', 'tldr', CAST(:s AS jsonb), 10, 5)"
+    )
+    async with pg_engine.begin() as conn:
+        await conn.execute(ins, {"a": account_id, "s": '{"tldr": "x"}'})
+    with pytest.raises(IntegrityError):
+        async with pg_engine.begin() as conn:
+            await conn.execute(ins, {"a": account_id, "s": "{}"})
+
+    async with pg_engine.begin() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT structured, cost_usd, delivered_at, delivery_error, created_at "
+                    "FROM briefings WHERE account_id = :a"
+                ),
+                {"a": account_id},
+            )
+        ).one()
+    assert row.structured == {"tldr": "x"}
+    assert row.cost_usd is None and row.delivered_at is None and row.delivery_error is None
+    assert row.created_at is not None
+
+
+async def test_briefing_rows_die_with_the_account(pg_engine: AsyncEngine) -> None:
+    account_id, _ = await _fixture_chat(pg_engine)
+    async with pg_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO briefings (account_id, day, text) VALUES (:a, DATE '2026-09-13', 'x')"
+            ),
+            {"a": account_id},
+        )
+        await conn.execute(text("DELETE FROM accounts WHERE id = :a"), {"a": account_id})
+        left = (
+            await conn.execute(
+                text("SELECT count(*) FROM briefings WHERE account_id = :a"), {"a": account_id}
+            )
+        ).scalar_one()
+    assert left == 0

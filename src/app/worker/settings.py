@@ -98,9 +98,13 @@ class WorkerSettings:
         tasks.build_daily_digests,
         tasks.process_autoreplies,
         *tasks.PHASE2_FUNCTIONS,  # phase2/A: epizod/tugun indeksi
+        *tasks.PHASE3C_FUNCTIONS,  # phase3/C: alert skaneri va yetkazish
+        *tasks.PHASE3B_FUNCTIONS,  # phase3/B: briefing qurish va yetkazish
     ]
     cron_jobs: ClassVar[list[Any]] = [
         *tasks.PHASE2_CRONS,  # phase2/A: embed_nodes (15 daq), week_nodes (du 03:30)
+        *tasks.PHASE3C_CRONS,  # phase3/C: scan_alerts (5 daq), deliver_alerts (5 daq)
+        *tasks.PHASE3B_CRONS,  # phase3/B: build_briefings (soatiga), deliver_briefings (15 daq)
         cron(heartbeat, minute={0, 30}, run_at_startup=False),
         # ⚠️ Snapshot cron'ini o'chirmang — views/reactions vaqt qatori shu yerdan (4.6)
         cron(tasks.snapshot_metrics, minute={5}, run_at_startup=False, timeout=3000),

@@ -204,6 +204,42 @@ class Settings(BaseSettings):
     # Hafta tugunlari (level 3) — bitta `Task.ROUTE` chaqiruvi, chat bo'yicha.
     week_nodes_enabled: bool = True
 
+    # --- phase3/B ---
+    # Shaxsiy kunlik briefing (L3) — `services/briefing.py`, arxitektura v2, 9-bo'lim.
+    # Akkaunt darajasidagi sozlamalar (`tz`, `quiet_*`, `briefing_hour`,
+    # `briefing_chats`) DB'da (migratsiya 0010); bu yerda faqat global tugmalar.
+    briefing_enabled: bool = True  # False = cron'lar umuman ishlamaydi
+    # Chain-of-Density raundlari (TL;DR + mavzular ustida, arzon `Task.ROUTE`).
+    # 0 = o'chiq. Har raund = bitta qo'shimcha LLM chaqiruvi.
+    briefing_cod_rounds: int = Field(default=2, ge=0, le=4)
+    # To'liq ishlov ko'radigan chatlar soni; qolgani bir qatordan (9-bo'lim).
+    briefing_top_chats: int = Field(default=3, ge=1, le=10)
+    # Bitta briefingga kiradigan chatlar (xarajat qopqog'i).
+    briefing_max_chats: int = Field(default=20, ge=1, le=100)
+
+    # --- phase3/C ---
+    # Alertlar (`services/alerts.py`, migratsiya 0011). Qoidaning o'zi DB'da —
+    # bu yerda faqat global tugmalar va xarajat qopqoqlari.
+    alerts_enabled: bool = True  # False = skaner ham, yetkazish ham ishlamaydi
+    # Bitta skaner yugurishida bitta qoida ko'radigan xabarlar soni.
+    # Oshirish = uzoq tranzaksiya; kamaytirish = kursor sekinroq siljiydi.
+    alerts_scan_limit: int = Field(default=500, ge=10, le=5000)
+    # Akkauntga qo'yish mumkin bo'lgan qoidalar soni. Semantik qoida har
+    # skanerlashda pgvector bo'ylab yuguradi — cheksiz ro'yxat DB'ni yeydi.
+    alerts_max_rules_per_account: int = Field(default=20, ge=1, le=200)
+
+    # --- phase3/A ---
+    # Deep search'ning Telegram **server** pog'onalari (arxitektura v2 §8,
+    # `services/deep_search.escalate` + `services/tg_search.py`). Lokal indeks
+    # birinchi: server rung'lari faqat qamrov yetmaganda ishga tushadi.
+    deep_server_rungs_enabled: bool = True
+    # Lokal fan-out shundan kam hit bersa — server pog'onasiga chiqiladi.
+    deep_server_min_local_hits: int = Field(default=8, ge=0, le=500)
+    # Bitta deep run'da **jami** server RPC chaqiruvlari qopqog'i. Bu narx
+    # qopqog'i emas, ban riskini kamaytirish: har chaqiruv real MTProto so'rovi
+    # va `MethodBuckets` kvotasini yeydi.
+    deep_server_max_calls: int = Field(default=6, ge=0, le=40)
+
     @field_validator("master_key_b64")
     @classmethod
     def _check_master_key(cls, v: str) -> str:

@@ -585,16 +585,21 @@ jimgina ishlamay qoladi.
 |---|---|---|
 | **0 — joriy** | 5 ta HIGH xato: envelope escape, `input_peer` access_hash, duplicate row, confirm race, strict `zip` | `test_phase0.py`, `test_write_actions.py` |
 | **1 — Retrieval poydevori** (akkauntsiz testlanadi) | migratsiya (ustunlar, generated columns, GIN, `lang`, fwd, `top_msg_id`, `deleted_at`/`edited_at`, `link_prefix`, `chat_digests` kengaytmasi); `services/textnorm.py` + SQL `uz_fold`; sanitizatsiya `ingestion.py` da; `services/stopwords.py`; trigram fix + `task_type` (`search.py`); so'rov kengaytirish + og'irlikli RRF; `services/rerank.py`; `services/cluster.py`; Telethon 1.44; `allowlist.py` +12; token bucket'lar (`tools.py`); `search_telegram` parametrlari + 4 yangi tool + `prompts.py` | `test_textnorm.py` (SQL/Python paritet), `test_search_quality.py`, `test_allowlist.py`, `test_tg_search.py`, CI'ga Postgres service + append-only trigger testi |
-| **2 — Ierarxik indeks + deep search** ✅ *(qolgani pastda)* | ✅ `retrieval_nodes` / epizodlar / `halfvec` (migratsiya `0009`); ✅ kontekstli embedding; ✅ digest embedding + L2/L3 (`services/nodes.py`); ✅ `services/deep_search.py` (plan → fan-out → cluster → rerank → reflect → synth); ✅ SSE `/api/deep/stream` + UI (klaster yorliqlari, qamrov paneli); ✅ updates listener (`worker/updates.py`, `TG_UPDATES_LISTENER`); ✅ eval harness (`evals/`, `test_evals.py`) | ✅ `test_episodes.py`, `test_nodes.py`, `test_deep_search.py` (taint chegarasi), `test_updates.py`, `test_evals.py` |
-| **3 — Qamrov + mahsulot** | ⬜ `discover_channels` / `SearchPosts` / forum tool'lar; ⬜ digest push + quiet hours; ⬜ alertlar; ⬜ `node_entities`; ⬜ golden set (real akkaunt bilan to'ldirish); ⬜ Batch API; ⬜ `gemini-embedding-2` re-embed | `evals/` harness, `test_digest_push.py` |
+| **2 — Ierarxik indeks + deep search** ✅ *(qolgani 3-bosqichda bajarildi)* | ✅ `retrieval_nodes` / epizodlar / `halfvec` (migratsiya `0009`); ✅ kontekstli embedding; ✅ digest embedding + L2/L3 (`services/nodes.py`); ✅ `services/deep_search.py` (plan → fan-out → cluster → rerank → reflect → synth); ✅ SSE `/api/deep/stream` + UI (klaster yorliqlari, qamrov paneli); ✅ updates listener (`worker/updates.py`, `TG_UPDATES_LISTENER`); ✅ eval harness (`evals/`, `test_evals.py`) | ✅ `test_episodes.py`, `test_nodes.py`, `test_deep_search.py` (taint chegarasi), `test_updates.py`, `test_evals.py` |
+| **3 — Qamrov + mahsulot** | ✅ server pog'onalari (`services/tg_search.py`, deep search fan-out'ga qo'shildi); ⬜ `discover_channels` / `SearchPosts` (Stars qarori kutilmoqda, §13.1) / forum tool'lar; ✅ briefing/digest push + jim soatlar (`services/briefing.py`, migratsiya `0010`); ✅ alertlar (`services/alerts.py`, migratsiya `0011`); ⬜ `node_entities`; ⬜ golden set (real akkaunt bilan to'ldirish); ⬜ Batch API; ⬜ `gemini-embedding-2` re-embed | `test_tg_search_internal.py`, `test_briefing.py`, `test_bot_push.py`, `test_alerts.py`, `evals/` harness |
 
-**2-bosqichdan qolgani** (3-bosqichga o'tdi, chunki server burchaklariga
-bog'liq): deep search ichida **server pog'onalari** — `search_telegram` /
-`search_global` ni fan-out'ga qo'shish hali yo'q (hozir faqat lokal DB
-kanallari: `hybrid_search_multi` + `node_search`). Qamrov hisobotida
-"sinxronlanmagan tarix" `gaps` bo'lib ko'rinadi, lekin avtomatik
-to'ldirilmaydi. `test_coverage_report.py` alohida fayl sifatida yozilmadi —
-qamrov matematikasi `test_deep_search.py` ichida qo'riqlanadi.
+**2-bosqichdan qolgani — endi bajarildi (3-bosqich).** Deep search ichida
+**server pog'onalari** qo'shildi: `services/tg_search.py` orqali
+`search_telegram` / `search_global` endi fan-out'ga kiradi
+(`deep_search.needs_server`, batafsil — CLAUDE.md "Server pog'onalari
+(3-bosqich)"). Qamrov hisobotida "sinxronlanmagan tarix" hamon `gaps` bo'lib
+ko'rinadi va DB'ga avtomatik yozilmaydi (faqat lokal `chats`dagi chatdan
+kelgan server hit saqlanadi, qolgani manfiy sintetik id bilan
+`[server external]`), lekin bo'shliqli chatlar endi server qidiruvi bilan
+**evidentsial** qamraladi (`coverage.server_rungs_used` /`server_calls` /
+`server_hits` / `server_skipped`). `test_coverage_report.py` alohida fayl
+sifatida yozilmadi — qamrov matematikasi `test_deep_search.py` va
+`test_tg_search_internal.py` ichida qo'riqlanadi.
 
 Har bosqich o'z testlari bilan tugaydi; CI invariant qadami
 (`test_allowlist.py`, `test_peer_guard.py`, `test_write_actions.py`,

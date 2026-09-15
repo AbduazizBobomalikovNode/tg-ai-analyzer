@@ -28,7 +28,9 @@ from app.logging import get_logger, setup_logging
 from app.observability import http_middleware, init_sentry, metrics_payload
 from app.services.auth_flow import AuthFlowStore
 from app.web.routers import actions as actions_router
+from app.web.routers import alerts as alerts_router
 from app.web.routers import auth as auth_router
+from app.web.routers import briefings as briefings_router
 from app.web.routers import chat as chat_router
 from app.web.routers import content as content_router
 from app.web.routers import deep as deep_router
@@ -78,6 +80,8 @@ def create_app() -> FastAPI:
     app.include_router(actions_router.router)
     app.include_router(content_router.router)
     app.include_router(deep_router.router)
+    app.include_router(alerts_router.router)  # phase3/C
+    app.include_router(briefings_router.router)  # phase3/B
     app.include_router(pages_router.router)
 
     @app.get("/health")

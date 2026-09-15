@@ -75,6 +75,7 @@ ignore = ["S101"]  # assert allowed in tests
 "tests/test_textnorm.py" = ["RUF001", "RUF002", "RUF003"]
 "tests/test_db_integration.py" = ["RUF001", "RUF002", "RUF003"]
 "tests/test_ingest_normalization.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_alerts.py" = ["RUF001", "RUF002", "RUF003"]  # phase3/C: fold parite korpusi
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -10,7 +10,7 @@ Dizayn qarorlari:
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, time
 from enum import StrEnum
 from typing import Any
 
@@ -29,9 +29,13 @@ from sqlalchemy import (
     SmallInteger,
     String,
     Text,
+    Time,
     UniqueConstraint,
     func,
     text,
+)
+from sqlalchemy import (
+    Enum as SAEnum,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -107,6 +111,23 @@ class Account(Base):
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now())
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    # ── 3-bosqich/B (migratsiya 0010): shaxsiy briefing va jim soatlar ──
+    # Sozlama **akkauntda**, chunki briefing mazmuni akkauntning kun
+    # tugunlaridan (`retrieval_nodes`, level 2) va uning chatlaridan quriladi.
+    # Yetkazish manzili esa `user.tg_user_id` — bot faqat egasiga yozadi.
+    tz: Mapped[str] = mapped_column(
+        String(64), default="Asia/Tashkent", server_default="Asia/Tashkent"
+    )
+    # Lokal (`tz` dagi) vaqt; yarim tun orqali o'ralishi mumkin (22:00 → 07:00).
+    quiet_from: Mapped[time | None] = mapped_column(Time)
+    quiet_to: Mapped[time | None] = mapped_column(Time)
+    briefing_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false")
+    )
+    briefing_hour: Mapped[int] = mapped_column(SmallInteger, default=8, server_default="8")
+    # null = barcha chatlar; aks holda `chats.id` ro'yxati
+    briefing_chats: Mapped[list[int] | None] = mapped_column(JSONB)
 
     user: Mapped[User] = relationship(back_populates="accounts")
     chats: Mapped[list[Chat]] = relationship(back_populates="account")
@@ -543,3 +564,104 @@ class ScheduledJob(Base):
     tg_scheduled_msg_id: Mapped[int | None] = mapped_column(BigInteger)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now())
+
+
+class Briefing(Base):
+    """Kunlik shaxsiy briefing (L3, 3-bosqich/B — arxitektura v2, 9-bo'lim).
+
+    Bir akkauntning bir **lokal** kuni uchun bitta qator
+    (`uq_briefing_account_day`) — cron idempotent bo'lishi shu kalitga
+    tayanadi. `text` — foydalanuvchi ko'radigan markdown; `structured` —
+    mexanik tekshiruvdan o'tgan bloklar (tldr, chatlar, qarorlar, ochiq
+    savollar, kim faol bo'lgani).
+
+    Yetkazish maydonlari (`delivered_at` / `delivery_error`) ataylab shu
+    yerda: qayta yuborishning oldini olish uchun "qurilgan" va "yetkazilgan"
+    bitta qatorda ko'rinib turishi kerak.
+    """
+
+    __tablename__ = "briefings"
+    __table_args__ = (
+        UniqueConstraint("account_id", "day", name="uq_briefing_account_day"),
+        Index("ix_briefings_account_day", "account_id", "day"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"))
+    day: Mapped[date] = mapped_column(Date)
+
+    text: Mapped[str] = mapped_column(Text, default="")
+    structured: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+
+    model: Mapped[str] = mapped_column(String(64), default="")
+    tokens_in: Mapped[int] = mapped_column(Integer, default=0)
+    tokens_out: Mapped[int] = mapped_column(Integer, default=0)
+    cost_usd: Mapped[float | None] = mapped_column(Float)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now())
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    delivery_error: Mapped[str | None] = mapped_column(String(500))
+
+
+# ─── 3-bosqich/C: alertlar (migratsiya 0011) ─────────────────────────────────
+
+
+class AlertKind(StrEnum):
+    KEYWORD = "keyword"  # vergul bilan ajratilgan so'zlar, fold fazosida
+    SEMANTIC = "semantic"  # tabiiy tildagi tavsif → embedding → cosine
+
+
+#: `alert_rules.kind` uchun native PG enum. Nomi migratsiya 0011 bilan bir xil;
+#: `create_type=False` — turni migratsiya yaratadi, ORM emas.
+ALERT_KIND_ENUM = SAEnum(AlertKind.KEYWORD.value, AlertKind.SEMANTIC.value, name="alert_kind")
+
+
+class AlertRule(Base):
+    """Kuzatuv qoidasi: yangi xabar mos kelsa — boshqaruv botiga push.
+
+    `chat_id is None` → akkauntning **barcha** chatlari. Kursor
+    `last_checked_msg_id` — `messages.id` (global monoton), `tg_msg_id` emas.
+    """
+
+    __tablename__ = "alert_rules"
+    __table_args__ = (Index("ix_alert_rules_account_enabled", "account_id", "enabled"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"))
+    chat_id: Mapped[int | None] = mapped_column(ForeignKey("chats.id", ondelete="CASCADE"))
+
+    kind: Mapped[str] = mapped_column(ALERT_KIND_ENUM, default=AlertKind.KEYWORD)
+    label: Mapped[str] = mapped_column(String(64), default="")
+    pattern: Mapped[str] = mapped_column(Text, default="")
+    # Semantik qoidaning keshlangan vektori — `pattern` o'zgarsa NULL ga tushadi.
+    embedding: Mapped[Any] = mapped_column(HALFVEC(get_settings().embed_dim), nullable=True)
+    threshold: Mapped[float] = mapped_column(Float, default=0.80, server_default="0.80")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))
+    cooldown_minutes: Mapped[int] = mapped_column(Integer, default=30, server_default="30")
+    last_checked_msg_id: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=_now(), onupdate=_now()
+    )
+
+
+class AlertEvent(Base):
+    """Bitta mos kelgan xabar. `uq_alert_event` — dedup bazada, kodda emas."""
+
+    __tablename__ = "alert_events"
+    __table_args__ = (
+        UniqueConstraint("rule_id", "message_id", name="uq_alert_event"),
+        Index("ix_alert_events_rule_time", "rule_id", text("created_at DESC")),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    rule_id: Mapped[int] = mapped_column(ForeignKey("alert_rules.id", ondelete="CASCADE"))
+    message_id: Mapped[int] = mapped_column(ForeignKey("messages.id", ondelete="CASCADE"))
+    chat_id: Mapped[int] = mapped_column(ForeignKey("chats.id", ondelete="CASCADE"))
+    tg_msg_id: Mapped[int] = mapped_column(BigInteger)
+    score: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now())
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    delivery_error: Mapped[str | None] = mapped_column(String(500))

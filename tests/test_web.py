@@ -543,3 +543,352 @@ def test_chat_api_accepts_deep_mode(client: TestClient, monkeypatch: pytest.Monk
         "/api/conversations/1/messages", json={"text": "savol", "mode": "turbo"}, headers=H
     )
     assert bad.status_code == 422
+
+
+# ─── alertlar API (phase3/C) ────────────────────────────────────────────────
+
+
+class _AlertScopeFactory:
+    """`session_scope()` o'rnini bosuvchi soxta kontekst — DB'siz router testi."""
+
+    def __init__(self, session: Any) -> None:
+        self.session = session
+
+    def __call__(self) -> Any:
+        session = self.session
+
+        class _Scope:
+            async def __aenter__(self) -> Any:
+                return session
+
+            async def __aexit__(self, *exc: Any) -> None: ...
+
+        return _Scope()
+
+
+class _AlertSession:
+    def __init__(self, objects: dict[tuple[str, int], Any], rows: list[Any] | None = None) -> None:
+        self.objects = objects
+        self.rows = rows or []
+        self.added: list[Any] = []
+        self.deleted = 0
+
+    async def get(self, model: Any, pk: int) -> Any:
+        return self.objects.get((model.__name__, int(pk)))
+
+    async def execute(self, stmt: Any) -> Any:
+        text_ = str(stmt)
+        rows = self.rows
+        if text_.lstrip().upper().startswith("DELETE"):
+            self.deleted += 1
+            rows = []
+
+        class _Res:
+            def all(self) -> list[Any]:
+                return rows
+
+            def scalar(self) -> Any:
+                return 0
+
+            def scalars(self) -> Any:
+                return SimpleNamespace(
+                    all=lambda: [r[0] if isinstance(r, tuple) else r for r in rows]
+                )
+
+        return _Res()
+
+    def add(self, obj: Any) -> None:
+        obj.id = 1
+        obj.created_at = datetime(2026, 9, 15, tzinfo=UTC)
+        obj.last_checked_msg_id = 0
+        self.added.append(obj)
+
+    async def flush(self) -> None:
+        return None
+
+
+def _alert_client(client: TestClient, monkeypatch: pytest.MonkeyPatch, session: Any) -> TestClient:
+    from app.web.routers import alerts as alerts_router
+
+    monkeypatch.setattr(alerts_router, "session_scope", _AlertScopeFactory(session))
+    client.cookies.set(sec.SESSION_COOKIE, sec.issue_session(7))
+    return client
+
+
+def test_alerts_require_login_and_csrf(client: TestClient) -> None:
+    assert client.get("/api/alerts").status_code == 401
+    # CSRF dependency identity'dan oldin ishlaydi — 403, 401 emas
+    for req in (
+        client.post("/api/alerts", json={"account_id": 1, "pattern": "x"}),
+        client.put("/api/alerts/1", json={"enabled": False}),
+        client.delete("/api/alerts/1"),
+    ):
+        assert req.status_code == 403 and req.json()["detail"]["code"] == "csrf"
+
+
+def test_alerts_ownership_is_checked(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Begona akkaunt/qoida — 404 (mavjudligi ham oshkor qilinmaydi)."""
+    from app.db.models import AlertRule
+
+    foreign = SimpleNamespace(id=9, user_id=99)  # boshqa foydalanuvchi
+    rule = SimpleNamespace(
+        id=5,
+        account_id=9,
+        kind="keyword",
+        pattern="x",
+        threshold=0.8,
+        cooldown_minutes=30,
+        label="",
+        enabled=True,
+        chat_id=None,
+        last_checked_msg_id=0,
+        created_at=None,
+        embedding=None,
+    )
+    session = _AlertSession({("Account", 9): foreign, ("AlertRule", 5): rule})
+    c = _alert_client(client, monkeypatch, session)
+
+    assert (
+        c.post("/api/alerts", json={"account_id": 9, "pattern": "to'lov"}, headers=H).status_code
+        == 404
+    )
+    assert c.put("/api/alerts/5", json={"enabled": False}, headers=H).status_code == 404
+    assert c.delete("/api/alerts/5", headers=H).status_code == 404
+    assert c.get("/api/alerts/5/events").status_code == 404
+    assert session.deleted == 0
+    assert isinstance(AlertRule.__tablename__, str)
+
+
+def test_alerts_create_and_validation(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    mine = SimpleNamespace(id=3, user_id=7)
+    session = _AlertSession({("Account", 3): mine})
+    c = _alert_client(client, monkeypatch, session)
+
+    r = c.post("/api/alerts", json={"account_id": 3, "pattern": "to'lov, shartnoma"}, headers=H)
+    assert r.status_code == 201, r.text
+    assert r.json()["rule"]["pattern"] == "to'lov, shartnoma"
+    assert "embedding" not in r.json()["rule"]
+
+    # pydantic shakl validatsiyasi
+    assert (
+        c.post("/api/alerts", json={"account_id": 3, "pattern": "x" * 301}, headers=H).status_code
+        == 422
+    )
+    assert (
+        c.post(
+            "/api/alerts", json={"account_id": 3, "pattern": "a", "threshold": 0.99}, headers=H
+        ).status_code
+        == 422
+    )
+    assert (
+        c.post(
+            "/api/alerts",
+            json={"account_id": 3, "pattern": "a", "cooldown_minutes": 5000},
+            headers=H,
+        ).status_code
+        == 422
+    )
+    assert (
+        c.post(
+            "/api/alerts", json={"account_id": 3, "pattern": "a", "kind": "magic"}, headers=H
+        ).status_code
+        == 422
+    )
+    # mazmuniy validatsiya (tsquery'ga aylanmaydigan naqsh)
+    bad = c.post("/api/alerts", json={"account_id": 3, "pattern": "!!!"}, headers=H)
+    assert bad.status_code == 400 and bad.json()["detail"]["code"] == "alert.err.empty_pattern"
+
+
+def test_alerts_update_clears_cached_vector(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mine = SimpleNamespace(id=3, user_id=7)
+    rule = SimpleNamespace(
+        id=5,
+        account_id=3,
+        kind="semantic",
+        pattern="eski",
+        threshold=0.8,
+        cooldown_minutes=30,
+        label="",
+        enabled=True,
+        chat_id=None,
+        last_checked_msg_id=0,
+        created_at=None,
+        embedding=[0.1] * 8,
+    )
+    session = _AlertSession({("Account", 3): mine, ("AlertRule", 5): rule})
+    c = _alert_client(client, monkeypatch, session)
+
+    r = c.put("/api/alerts/5", json={"pattern": "yangi tavsif"}, headers=H)
+    assert r.status_code == 200, r.text
+    assert rule.embedding is None and rule.pattern == "yangi tavsif"
+
+    # faqat `enabled` o'zgarsa vektor saqlanadi
+    rule.embedding = [0.2] * 8
+    assert c.put("/api/alerts/5", json={"enabled": False}, headers=H).status_code == 200
+    assert rule.embedding is not None and rule.enabled is False
+
+
+# ─── phase3/B: briefing API ─────────────────────────────────────────────────
+
+
+class _BriefSession:
+    """`briefings.py` router uchun soxta sessiya (DB'siz)."""
+
+    def __init__(self, objects: dict[tuple[str, int], Any], rows: list[Any] | None = None) -> None:
+        self.objects = objects
+        self.rows = rows or []
+        self.flushed = 0
+
+    async def get(self, model: Any, pk: int) -> Any:
+        return self.objects.get((model.__name__, int(pk)))
+
+    async def execute(self, stmt: Any) -> Any:
+        rows = self.rows
+
+        class _Res:
+            def all(self) -> list[Any]:
+                return rows
+
+            def scalar_one_or_none(self) -> Any:
+                return rows[0] if rows else None
+
+            def scalars(self) -> Any:
+                return SimpleNamespace(
+                    all=lambda: [r[0] if isinstance(r, tuple) else r for r in rows]
+                )
+
+        return _Res()
+
+    async def flush(self) -> None:
+        self.flushed += 1
+
+
+def _brief_client(client: TestClient, monkeypatch: pytest.MonkeyPatch, session: Any) -> TestClient:
+    from app.web.routers import briefings as briefings_router
+
+    monkeypatch.setattr(briefings_router, "session_scope", _AlertScopeFactory(session))
+    client.cookies.set(sec.SESSION_COOKIE, sec.issue_session(7))
+    return client
+
+
+def _account(**kw: Any) -> Any:
+    return SimpleNamespace(
+        id=kw.get("id", 3),
+        user_id=kw.get("user_id", 7),
+        tz=kw.get("tz", "Asia/Tashkent"),
+        quiet_from=kw.get("quiet_from"),
+        quiet_to=kw.get("quiet_to"),
+        briefing_enabled=kw.get("briefing_enabled", False),
+        briefing_hour=kw.get("briefing_hour", 8),
+        briefing_chats=kw.get("briefing_chats"),
+    )
+
+
+def test_briefings_require_login_and_csrf(client: TestClient) -> None:
+    assert client.get("/api/briefings").status_code == 401
+    assert client.get("/api/briefings/2026-09-14").status_code == 401
+    assert client.get("/api/settings/briefing").status_code == 401
+    r = client.put("/api/settings/briefing", json={"account_id": 1})
+    assert r.status_code == 403 and r.json()["detail"]["code"] == "csrf"
+    assert client.get("/briefings", follow_redirects=False).status_code == 302
+
+
+def test_briefings_settings_ownership_is_checked(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    foreign = _account(id=9, user_id=99)
+    session = _BriefSession({("Account", 9): foreign})
+    c = _brief_client(client, monkeypatch, session)
+    r = c.put("/api/settings/briefing", json={"account_id": 9, "tz": "UTC"}, headers=H)
+    assert r.status_code == 404 and session.flushed == 0
+
+
+def test_briefings_settings_roundtrip_and_validation(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mine = _account()
+    session = _BriefSession({("Account", 3): mine})
+    c = _brief_client(client, monkeypatch, session)
+
+    body = {
+        "account_id": 3,
+        "tz": "Europe/Moscow",
+        "enabled": True,
+        "hour": 9,
+        "quiet_from": "22:00",
+        "quiet_to": "07:30",
+        "chats": None,
+    }
+    r = c.put("/api/settings/briefing", json=body, headers=H)
+    assert r.status_code == 200, r.text
+    out = r.json()["settings"]
+    assert out["tz"] == "Europe/Moscow" and out["enabled"] is True and out["hour"] == 9
+    assert out["quiet_from"] == "22:00" and out["quiet_to"] == "07:30"
+    assert mine.briefing_enabled is True and mine.quiet_to.minute == 30
+
+    # noma'lum vaqt zonasi va buzuq soat — 422 (pydantic)
+    assert (
+        c.put("/api/settings/briefing", json={**body, "tz": "Mars/Olympus"}, headers=H).status_code
+        == 422
+    )
+    assert c.put("/api/settings/briefing", json={**body, "hour": 25}, headers=H).status_code == 422
+    assert (
+        c.put("/api/settings/briefing", json={**body, "quiet_from": "9am"}, headers=H).status_code
+        == 422
+    )
+
+
+def test_briefings_settings_rejects_foreign_chat_ids(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mine = _account()
+    session = _BriefSession({("Account", 3): mine}, rows=[(11,), (12,)])
+    c = _brief_client(client, monkeypatch, session)
+    r = c.put(
+        "/api/settings/briefing",
+        json={"account_id": 3, "tz": "UTC", "chats": [11, 999]},
+        headers=H,
+    )
+    assert r.status_code == 400 and r.json()["detail"]["code"] == "briefing.err.unknown_chat"
+
+
+def test_briefings_list_and_detail(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    from datetime import date
+
+    row = SimpleNamespace(
+        account_id=3,
+        day=date(2026, 9, 14),
+        text="TL;DR",
+        structured={"tldr": "Kun tinch.", "chats": [{"title": "A"}]},
+        tokens_in=100,
+        tokens_out=50,
+        cost_usd=0.001,
+        model="gemini-2.5-flash",
+        delivered_at=None,
+        delivery_error=None,
+        created_at=datetime(2026, 9, 15, tzinfo=UTC),
+    )
+    session = _BriefSession({("Account", 3): _account()}, rows=[row])
+    c = _brief_client(client, monkeypatch, session)
+
+    items = c.get("/api/briefings?limit=5&account_id=3").json()["items"]
+    assert items[0]["day"] == "2026-09-14" and items[0]["tokens"] == 150
+    assert "text" not in items[0]  # ro'yxatda to'liq matn yo'q
+
+    full = c.get("/api/briefings/2026-09-14?account_id=3").json()
+    assert full["text"] == "TL;DR" and full["structured"]["tldr"] == "Kun tinch."
+
+    empty = _BriefSession({("Account", 3): _account()}, rows=[])
+    c2 = _brief_client(client, monkeypatch, empty)
+    assert c2.get("/api/briefings/2026-09-14?account_id=3").status_code == 404
+
+
+def test_briefings_page_renders_for_logged_in_user(client: TestClient) -> None:
+    client.cookies.set(sec.SESSION_COOKIE, sec.issue_session(7))
+    r = client.get("/briefings/2026-09-14?lang=en")
+    assert r.status_code == 200
+    assert "Briefing" in r.text and "/static/briefings.js" in r.text
+    assert 'window.TGAI_BRIEF_DAY = "2026-09-14"' in r.text
+    client.cookies.clear()
