@@ -176,6 +176,17 @@ READ: frozenset[str] = frozenset(
         # bilan bir sinf (u DENIED'da). Avval `CheckSearchPostsFlood`, faqat
         # bepul slot bo'lsa `query=`; aks holda hashtag yoki lokal qidiruv.
         "channels.SearchPostsRequest",
+        # ── ui/R1a: chat profil rasmi ────────────────────────────────────────
+        # `upload.GetFile` — **faqat o'qish**: bayt oqimini olib keladi, hech
+        # narsa yaratmaydi/o'chirmaydi. Telethon `download_profile_photo()`
+        # shu metodga tushadi (`InputPeerPhotoFileLocation` + chunk'lar).
+        #
+        # Bu **xabar mediasini** yuklab olishga ruxsat EMAS: "media saqlanmaydi"
+        # siyosati kuchda qoladi va kodda qo'riqlanadi — yagona chaqiruvchi
+        # `services/avatars.py` (profil rasmi, ≤512 KB), boshqa hech bir modul
+        # `download_media` / `download_file` / `GetFileRequest` ishlatmaydi
+        # (`tests/test_avatars.py::test_no_other_module_downloads_files` grep).
+        "upload.GetFileRequest",
     }
 )
 

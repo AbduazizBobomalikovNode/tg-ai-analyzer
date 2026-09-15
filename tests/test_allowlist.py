@@ -242,3 +242,33 @@ def test_with_real_telethon_classes() -> None:
     with pytest.raises(RpcBlocked):
         check_request(m.DeleteMessagesRequest.__new__(m.DeleteMessagesRequest))
     assert tl is not None
+
+
+# ─── ui/R1a: chat profil rasmi ───────────────────────────────────────────────
+
+
+def test_upload_getfile_is_read_only() -> None:
+    """`upload.GetFile` — O'QISH: bayt oqimini oladi, hech narsa o'zgartirmaydi.
+
+    Profil rasmi uchun kerak (`services/avatars.py`). **Xabar mediasini**
+    yuklashga ruxsat emas: siyosat kodda qo'riqlanadi —
+    `tests/test_avatars.py::test_no_other_module_downloads_files`.
+    """
+    key = check_request(fake_request("upload", "GetFileRequest"))
+    assert key == "upload.GetFileRequest"
+    assert key in READ and not is_write(key)
+
+
+def test_upload_getfile_exists_in_telethon() -> None:
+    pytest.importorskip("telethon.tl.functions")
+    from telethon.tl.functions.upload import GetFileRequest
+
+    assert request_key(GetFileRequest.__new__(GetFileRequest)) in ALLOWED
+
+
+def test_profile_photo_upload_stays_denied() -> None:
+    """O'qish qo'shildi, yozish yo'q: profil rasmini **almashtirish** bloklangan."""
+    assert "photos.UploadProfilePhotoRequest" in DENIED
+    assert "photos.DeletePhotosRequest" in DENIED
+    with pytest.raises(RpcBlocked, match="qora ro'yxatda"):
+        check_request(fake_request("photos", "UploadProfilePhotoRequest"))

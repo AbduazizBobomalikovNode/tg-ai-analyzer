@@ -27,7 +27,7 @@ from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from typing import Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import case, func, null, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from telethon import errors as tg_errors
 from telethon.tl.types import Channel
@@ -222,6 +222,27 @@ def _is_writable(ent: Any) -> bool:
     return not bool(getattr(ent, "left", False))
 
 
+#: `chats.last_message_text` ustunining kengligi (ui/R1a, migratsiya 0017).
+PREVIEW_CHARS = 200
+
+
+def _dialog_preview(dialog: Any) -> str | None:
+    """Dialogdagi oxirgi xabarning qisqa ko'rinishi (UI ro'yxati uchun).
+
+    Bu **kontent**, ya'ni ishonchsiz ma'lumot: faqat UI'da ko'rsatiladi,
+    promptga `<untrusted_data>` konvertisiz hech qachon qo'shilmaydi.
+    """
+    msg = getattr(dialog, "message", None)
+    text_ = strip_invisible(str(getattr(msg, "message", "") or "")).strip() if msg else ""
+    return text_[:PREVIEW_CHARS] or None
+
+
+def _photo_id(ent: Any) -> int | None:
+    """Entity'dagi profil rasmi id'si (`ChatPhotoEmpty` → `None`)."""
+    pid = getattr(getattr(ent, "photo", None), "photo_id", None)
+    return int(pid) if pid else None
+
+
 async def refresh_chats(account_id: int, *, limit: int = DIALOGS_LIMIT) -> int:
     """Dialoglarni `chats` jadvaliga upsert qiladi. Qaytaradi: nechta yozuv."""
     try:
@@ -252,6 +273,13 @@ async def refresh_chats(account_id: int, *, limit: int = DIALOGS_LIMIT) -> int:
                 "last_message_at": getattr(d.message, "date", None) if d.message else None,
                 # yangi chat uchun DEFAULT_WRITE_MODE; mavjudlarga tegilmaydi (upsert set_ da yo'q)
                 "write_mode": str(get_settings().default_write_mode),
+                # ── ui/R1a: chat profili, **qo'shimcha RPC'siz** ──
+                # Uchalasi ham shu `GetDialogs` javobida bor. `avatar_photo_id`
+                # faqat **o'zgarishni aniqlash** kaliti: fayl `services/avatars.py`
+                # da alohida yuklanadi (xabar mediasi hech qachon emas).
+                "unread_count": int(getattr(d, "unread_count", 0) or 0),
+                "last_message_text": _dialog_preview(d),
+                "avatar_photo_id": _photo_id(ent),
             }
         )
     if not rows:
@@ -271,6 +299,20 @@ async def refresh_chats(account_id: int, *, limit: int = DIALOGS_LIMIT) -> int:
                 "is_admin": stmt.excluded.is_admin,
                 "participants_count": stmt.excluded.participants_count,
                 "last_message_at": stmt.excluded.last_message_at,
+                # ── ui/R1a ──
+                "unread_count": stmt.excluded.unread_count,
+                "last_message_text": stmt.excluded.last_message_text,
+                "avatar_photo_id": stmt.excluded.avatar_photo_id,
+                # Rasm id'si o'zgargan bo'lsa `avatar_updated_at` NULL bo'ladi —
+                # ya'ni qator `refresh_chat_profiles` navbatiga tushadi. O'zgarmasa
+                # tegilmaydi: fayl qayta yuklanmaydi (RPC tejash).
+                "avatar_updated_at": case(
+                    (
+                        Chat.avatar_photo_id.is_distinct_from(stmt.excluded.avatar_photo_id),
+                        null(),
+                    ),
+                    else_=Chat.avatar_updated_at,
+                ),
             },
         )
         await db.execute(stmt)

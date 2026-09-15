@@ -78,6 +78,11 @@ class _Entry:
     dialogs_at: float = 0.0
     input_peers: dict[int, Any] = field(default_factory=dict)
     titles: dict[int, str] = field(default_factory=dict)
+    # `GetDialogs` javobidagi to'liq entity'lar (User/Chat/Channel) — profil
+    # rasmi uchun kerak (`services/avatars.py`). Qo'shimcha RPC yo'q: bu aynan
+    # shu javobning keshi. `get_entity()` HECH QACHON chaqirilmaydi — u
+    # allowlist'da yo'q metodlarga borishi mumkin (`messages.GetChats`).
+    entities: dict[int, Any] = field(default_factory=dict)
 
 
 class ClientPool:
@@ -181,6 +186,7 @@ class ClientPool:
                 out.append(info)
                 entry.input_peers[pid] = d.input_entity
                 entry.titles[pid] = info.title
+                entry.entities[pid] = ent
 
             entry.dialogs = out
             entry.dialogs_at = time.monotonic()
@@ -209,6 +215,22 @@ class ClientPool:
         if peer is None:
             raise PoolError("no_dialog", str(peer_id))
         return peer
+
+    async def entity(self, account_id: int, peer_id: int, *, refresh: bool = False) -> Any | None:
+        """Dialog javobidan keshlangan to'liq entity (yo'q bo'lsa `None`).
+
+        Faqat kesh + kerak bo'lsa bitta `GetDialogs` — `get_entity()` emas
+        (u `messages.GetChats` ga borishi mumkin, u esa allowlist'da yo'q).
+        Entity'dagi `photo` profil rasmi uchun yagona ishonchli manba:
+        unda `photo_id` ham, `dc_id` ham bor.
+        """
+        entry = await self._entry(account_id)
+        if not refresh:
+            ent = entry.entities.get(peer_id)
+            if ent is not None:
+                return ent
+        await self.dialogs(account_id, limit=DIALOGS_LIMIT, force=True)
+        return entry.entities.get(peer_id)
 
     async def recent_messages(
         self, account_id: int, peer_id: int, *, limit: int = 50
