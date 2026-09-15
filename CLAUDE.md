@@ -386,6 +386,40 @@ serverga boradi, shift bir xil.
   agent/digest/judge chaqiruvlari ham `conversation_messages` tokenlariga kiradi.
 - CI invariant qadamini (`tests/test_allowlist.py`, `test_peer_guard.py`,
   `test_write_actions.py`, delete-grep) yumshatmang.
+- **Worker metrikalari alohida portdan.** `api` dagi `/metrics` faqat api
+  jarayonini ko'radi; ingest/cron/alert hisoblagichlari worker'da o'sadi.
+  `WORKER_METRICS_PORT` (default 0 = o'chiq) berilsa `worker/settings.py::startup`
+  `observability.start_metrics_server()` ni chaqiradi. Portni tashqariga
+  ochmang — token yo'q.
+- Judge va rasm generatsiya xarajati ham kunlik byudjetga kiradi: ikkalasi
+  yashirin suhbatga (`"Judge"` / `"Images"`) `assistant` qatori bo'lib yoziladi
+  (briefing bilan bir uslub), chunki `limits.daily_usage` faqat
+  `conversation_messages` ni o'qiydi. Rasm tokenlari **taxmin**
+  (`images.IMAGE_OUTPUT_TOKENS`, rasm = 1290 output token).
+
+### Hardening (web perimetri)
+
+- **Logout server tomonda bekor qiladi.** Cookie o'chirish yetarli emas edi:
+  nusxasi 14 kun ishlardi. `web/security.py::revoke_sessions` Redis'ga
+  `web:sess:revoked:<uid>` = hozirgi vaqtni yozadi, `identity_of` esa `iat <=`
+  chegarali cookie'ni rad etadi. Redis yo'q → **fail-open** (ogohlantirish
+  log'i): imzo va TTL baribir kuchda. Cookie'da `v` (`SESSION_VERSION`)
+  da'vosi bor — global rotatsiya migratsiyasiz.
+- **`X-Forwarded-For` ga ishonilmaydi**, agar TCP peer `TRUSTED_PROXIES`
+  (CIDR, default bo'sh) ichida bo'lmasa. Zanjir o'ngdan chapga yuriladi —
+  birinchi ishonchsiz hop. Proxy ortida ishlatsangiz env'ni to'ldiring.
+- **Log maskalash rekursiv** (`app/logging.py::scrub`): ichma-ich dict/list,
+  kalit nomi bo'yicha (`token|secret|password|session|api_key|authorization|otp|code`,
+  `_KEY_ALLOW` istisnolari bilan) va matn ichidagi sir shakllari bo'yicha
+  (Telethon session string, `sk-`/`AIza`, bot tokeni). Sentry `before_send`
+  ham shu funksiyani chaqiradi — implementatsiya bitta.
+- Konteyner `app` (UID 1000) bo'lib yuguradi, `.dockerignore` `.env*`, `data/`,
+  `tests/`, `.git` ni kontekstdan chiqaradi, `HEALTHCHECK` → `GET /healthz`
+  (auth yo'q, `{"ok": true}`). Bot/worker/migrate'da healthcheck compose'da
+  o'chirilgan.
+- Snapshot cron bitta yugurishda `SNAPSHOT_MAX_MESSAGES_PER_RUN` (5000) post
+  oladi, **eng eski `captured_at`** dan boshlab — katta kanal qolganlarini
+  ochlikda qoldirmaydi.
 
 ## Sirlar
 
@@ -497,6 +531,19 @@ qolganda startupda `llm.model_retiring` ogohlantirishi chiqadi, lekin default
 Embedding tomonida `EMBED_MODEL` / `EMBED_DIMS`; model almashsa
 `python -m app.main reembed --model X` (hech narsa o'chirmaydi, qatorlar
 yonma-yon, qidiruv joriy modelni filtrlaydi) — batafsil `docs/llm.md`.
+
+**"Yonma-yon" sxemada qo'riqlanadi** (migratsiya `0016`):
+`message_embeddings` PK = `(message_id, model)`,
+`retrieval_node_embeddings` PK = `(node_id, model)`. Kalitni bir ustunga
+qaytarmang — u holda "joriy model bo'yicha yetishmayapti" tanlovi bilan
+INSERT to'qnashadi (`UniqueViolation` sikli) va model almashtirish
+qidiruvni **bo'sh** qoldiradi. Har bir yozuvchi
+(`worker.embed_messages`, `worker.reembed_all`, `nodes.embed_nodes`,
+`embed_batches._write_vectors`) `ON CONFLICT (id, model) DO NOTHING` bilan
+yozadi; joriy model nomi **yagona manba** — `llm.embed_model_name()`
+(`LLM_TASK_EMBED` → `LLM_MODEL_EMBED` → `EMBED_MODEL`).
+`EMBED_DIMS` ≠ `embed_dim` bo'lsa har INSERT yiqiladi —
+`python -m app.main check` va api/worker startupi buni aytadi.
 
 Yangi provider qo'shish: `BaseProvider` dan meros oling, `capabilities()` ni
 rostgo'ylik bilan e'lon qiling (yo'q imkoniyatni bor deb ko'rsatmang —

@@ -179,8 +179,13 @@ class Message(Base):
         # 0008 — generated ustunlar ustidagi indekslar
         Index("ix_messages_tsv_uz", "tsv_uz", postgresql_using="gin"),
         Index("ix_messages_tsv_ru", "tsv_ru", postgresql_using="gin"),
+        # 0015 — `chat_id` bilan birlashtirilgan trigram indeksi (btree_gin).
+        # Yolg'iz `text_fold` ustidagi eski indeks (`ix_messages_fold_trgm`)
+        # "bitta chat ichida trigram" so'rovida ishlatilmasdi; bu indeks
+        # ikkala shartni bitta skanga qo'yadi va o'lchovda kichikroq chiqdi.
         Index(
-            "ix_messages_fold_trgm",
+            "ix_messages_chat_trgm",
+            "chat_id",
             "text_fold",
             postgresql_using="gin",
             postgresql_ops={"text_fold": "gin_trgm_ops"},
@@ -190,6 +195,20 @@ class Message(Base):
             "chat_id",
             "top_msg_id",
             postgresql_where=text("top_msg_id IS NOT NULL"),
+        ),
+        # 0015 — o'qish yo'llarining deyarli hammasi `deleted_at IS NULL` bilan.
+        Index(
+            "ix_messages_chat_msgid_alive",
+            "chat_id",
+            "tg_msg_id",
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
+        # 0015 — alert kursori (`alerts._scope_max_id`).
+        Index(
+            "ix_messages_chat_created_id",
+            "chat_id",
+            "created_at",
+            postgresql_include=["id"],
         ),
     )
 
@@ -263,12 +282,21 @@ class Message(Base):
 
 
 class MessageEmbedding(Base):
+    """Xabar vektori — PK **`(message_id, model)`** (migratsiya 0016).
+
+    Model ustuni kalitning bir qismi: `EMBED_MODEL` almashtirilganda yangi
+    model qatorlari eskilari bilan **yonma-yon** yoziladi (`reembed_all` hech
+    narsa o'chirmaydi), qidiruv esa `search._embed_model` bilan joriy modelni
+    filtrlaydi. Bir ustunli PK'da bu mumkin emas edi — yozuvchilar
+    `UniqueViolation` da qulardi.
+    """
+
     __tablename__ = "message_embeddings"
 
     message_id: Mapped[int] = mapped_column(
         ForeignKey("messages.id", ondelete="CASCADE"), primary_key=True
     )
-    model: Mapped[str] = mapped_column(String(64))
+    model: Mapped[str] = mapped_column(String(64), primary_key=True)
     vector: Mapped[Any] = mapped_column(Vector(get_settings().embed_dim))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now())
 
@@ -341,6 +369,8 @@ class RetrievalNodeEmbedding(Base):
 
     `model` ustuni bosqichma-bosqich re-embed uchun: yangi model qatorlari
     eskilari bilan yonma-yon turadi, qidiruv joriy modelni filtrlaydi.
+    Shuning uchun u PK'ning bir qismi (migratsiya 0016) — `MessageEmbedding`
+    bilan bir xil sabab.
     """
 
     __tablename__ = "retrieval_node_embeddings"
@@ -349,7 +379,7 @@ class RetrievalNodeEmbedding(Base):
     node_id: Mapped[int] = mapped_column(
         ForeignKey("retrieval_nodes.id", ondelete="CASCADE"), primary_key=True
     )
-    model: Mapped[str] = mapped_column(String(64))
+    model: Mapped[str] = mapped_column(String(64), primary_key=True)
     vector: Mapped[Any] = mapped_column(HALFVEC(get_settings().embed_dim))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now())
 

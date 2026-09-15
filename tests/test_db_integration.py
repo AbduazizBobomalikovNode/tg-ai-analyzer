@@ -321,11 +321,17 @@ async def test_trigram_index_exists(pg_engine: AsyncEngine) -> None:
             .scalars()
             .all()
         )
-    for expected in ("ix_messages_tsv_uz", "ix_messages_tsv_ru", "ix_messages_fold_trgm"):
+    for expected in ("ix_messages_tsv_uz", "ix_messages_tsv_ru", "ix_messages_chat_trgm"):
         assert expected in names
     # 0008 eski ifodali indekslarni olib tashlaydi
     assert "ix_messages_fts" not in names
     assert "ix_messages_trgm" not in names
+    # 0015: yolg'iz `text_fold` ustidagi trigram indeksi `(chat_id, text_fold)`
+    # bilan almashtirildi — u ham kichikroq, ham "bitta chat ichida trigram"
+    # so'roviga xizmat qiladi (o'lchov: docs/architecture-v2.md §11.1).
+    assert "ix_messages_fold_trgm" not in names
+    for expected in ("ix_messages_chat_msgid_alive", "ix_messages_chat_created_id"):
+        assert expected in names
 
 
 # ─── (e) 0009: retrieval_nodes + halfvec (phase2/A) ──────────────────────────
@@ -888,7 +894,7 @@ class _FakeBatchProvider:
         }
         return BatchStatus(job=job, state=mapping[raw], raw_state=raw, model=_EMB_MODEL)
 
-    async def embed_batch_fetch(self, job: str):  # type: ignore[no-untyped-def]
+    async def embed_batch_fetch(self, job: str, *, model: str = ""):  # type: ignore[no-untyped-def]
         from app.llm.base import EmbedResult, Usage
 
         return EmbedResult(

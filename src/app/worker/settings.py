@@ -15,7 +15,7 @@ from typing import Any, ClassVar
 from arq.connections import RedisSettings
 from arq.cron import cron
 
-from app.config import get_settings
+from app.config import embed_dims_mismatch, get_settings
 from app.logging import get_logger, setup_logging
 from app.worker import tasks
 
@@ -25,9 +25,18 @@ log = get_logger("worker")
 async def startup(ctx: dict[str, Any]) -> None:
     s = get_settings()
     setup_logging(s.log_level, json_output=s.is_prod)
-    from app.observability import init_sentry
+    from app.observability import init_sentry, start_metrics_server
 
     init_sentry("worker")
+    try:
+        start_metrics_server()  # WORKER_METRICS_PORT=0 → hech narsa qilmaydi
+    except Exception as exc:  # port band bo'lsa worker baribir ko'tarilsin
+        log.warning("worker.metrics_server_failed", error=str(exc)[:200])
+    # L10: `EMBED_DIMS` DB ustuni bilan mos kelmasa embedding yozuvi butunlay
+    # yiqiladi (har INSERT). Worker — asosiy yozuvchi, shuning uchun startupda.
+    dims_error = embed_dims_mismatch(s)
+    if dims_error:
+        log.warning("worker.embed_dims_mismatch", error=dims_error)
     await _reset_stuck_syncs()
     await _start_updates_listener()
     log.info("worker.start", max_jobs=WorkerSettings.max_jobs)

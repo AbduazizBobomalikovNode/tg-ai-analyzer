@@ -160,6 +160,26 @@ async def _budget_blocked_accounts() -> set[int]:
         return set()
 
 
+async def _upsert_message_vectors(db: Any, pairs: list[tuple[int, Any]], model: str) -> None:
+    """`message_embeddings` ga yozadi — PK `(message_id, model)`, konflikt jim.
+
+    `db.add_all()` emas: PK 0016 dan beri ikki ustunli, ya'ni bitta xabarda
+    bir nechta model qatori bo'lishi **normal**. Oraliqda (batch yo'li,
+    parallel cron) o'sha `(id, model)` yozilib qolgan bo'lsa ustidan
+    yozilmaydi — birinchi yozilgani qoladi, ikkinchisi jimgina tushadi.
+    """
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    from app.db.models import MessageEmbedding
+
+    if not pairs:
+        return
+    stmt = pg_insert(MessageEmbedding).values(
+        [{"message_id": mid, "model": model, "vector": vec} for mid, vec in pairs]
+    )
+    await db.execute(stmt.on_conflict_do_nothing(index_elements=["message_id", "model"]))
+
+
 async def embed_messages(ctx: dict[str, Any], limit: int | None = None) -> dict[str, Any]:
     """Embedding'siz xabarlarni batch'lab vektorlaydi (3-bosqich, hybrid qidiruv uchun).
 
@@ -186,7 +206,10 @@ async def embed_messages(ctx: dict[str, Any], limit: int | None = None) -> dict[
     if blocked:
         log.info("worker.embed.budget_skip", accounts=len(blocked))
     if s.embed_mode == "batch":
-        result = await _submit_embed_batch(KIND_MESSAGES, limit)
+        # M3: byudjet qopqog'i batch yo'lida ham amal qiladi — batch **oldindan
+        # to'lanadi**, ya'ni bu yerda o'tkazib yuborilmagan chat kelasi oyda
+        # hisobda paydo bo'lardi.
+        result = await _submit_embed_batch(KIND_MESSAGES, limit, skip_accounts=blocked)
         if result is not None:
             return result
     limit = limit or s.embed_batch_per_run
@@ -240,11 +263,10 @@ async def embed_messages(ctx: dict[str, Any], limit: int | None = None) -> dict[
             )
             continue
         async with session_scope() as db:
-            db.add_all(
-                [
-                    MessageEmbedding(message_id=int(mid), model=res.model, vector=vec)
-                    for (mid, _), vec in zip(chunk, res.vectors, strict=True)
-                ]
+            await _upsert_message_vectors(
+                db,
+                [(int(mid), vec) for (mid, _), vec in zip(chunk, res.vectors, strict=True)],
+                res.model,
             )
         done += len(chunk)
     log.info("worker.embed.done", embedded=done, pending=len(rows) - done)
@@ -393,7 +415,7 @@ async def embed_nodes_task(ctx: dict[str, Any], limit: int | None = None) -> dic
         return {"skipped": "disabled"}
     blocked = await _budget_blocked_accounts()  # M3
     if s.embed_mode == "batch":  # phase4/C — quyidagi izohga qarang
-        result = await _submit_embed_batch(KIND_NODES, limit)
+        result = await _submit_embed_batch(KIND_NODES, limit, skip_accounts=blocked)
         if result is not None:
             return result
     async with session_scope() as db:
@@ -780,11 +802,12 @@ async def reembed_all(
             )
             return {"model": want, "embedded": embedded, "error": "misaligned", "done": False}
         async with session_scope() as db:
-            db.add_all(
-                [
-                    MessageEmbedding(message_id=int(mid), model=res.model, vector=vec)
-                    for (mid, _), vec in zip(rows, res.vectors, strict=True)
-                ]
+            # Eski model qatorlariga **tegilmaydi**: PK `(message_id, model)`
+            # (migratsiya 0016), ya'ni bu INSERT yangi fazani yonma-yon qo'yadi.
+            await _upsert_message_vectors(
+                db,
+                [(int(mid), vec) for (mid, _), vec in zip(rows, res.vectors, strict=True)],
+                res.model,
             )
         embedded += len(rows)
         pending = len(rows)
@@ -902,10 +925,14 @@ async def backfill_entities(
 
 
 async def backfill_entities_all(ctx: dict[str, Any]) -> dict[str, Any]:
-    """Soatiga bir marta: qoldig'i bor akkauntlar uchun backfill navbatga qo'yiladi.
+    """Soatiga bir marta (`minute={17}`): qoldig'i bor akkauntlar uchun backfill navbatga qo'yiladi.
 
-    Qiladigan ish bo'lmasa (kursor akkauntdagi eng katta `messages.id` ga
-    yetgan) — **hech narsa** navbatga qo'yilmaydi va cron darhol chiqadi.
+    Cron "darhol chiqmaydi": har **faol akkaunt** uchun bitta
+    `max(messages.id)` agregati va bitta Redis kursor o'qishi baribir
+    bajariladi. Tejaladigan narsa — **ish**: kursor eng katta `messages.id`
+    ga yetgan akkaunt uchun hech narsa navbatga qo'yilmaydi (`queued` o'smaydi),
+    ya'ni `backfill_entities` umuman yugurmaydi. Bitta akkaunt xatosi
+    qolganlarini to'xtatmaydi — log'ga tushadi va tsikl davom etadi.
     """
     from sqlalchemy import func, select
 
@@ -975,19 +1002,27 @@ KIND_MESSAGES = "messages"
 KIND_NODES = "nodes"
 
 
-async def _submit_embed_batch(kind: str, limit: int | None) -> dict[str, Any] | None:
-    """Batch job yuboradi. `None` = batch ishlamadi, sinxron yo'l davom etsin."""
+async def _submit_embed_batch(
+    kind: str, limit: int | None, *, skip_accounts: set[int] | None = None
+) -> dict[str, Any] | None:
+    """Batch job yuboradi. `None` = batch ishlamadi, sinxron yo'l davom etsin.
+
+    `skip_accounts` — kunlik byudjeti tugagan egalarning akkauntlari (M3).
+    Sinxron yo'ldagi bilan **bir xil** ro'yxat: batch arzonroq bo'lsa ham
+    pulni o'sha byudjetdan yeydi.
+    """
     from app.db.base import session_scope
     from app.services import embed_batches as eb
 
     if not eb.batch_embedding_available():
         log.warning("worker.embed_batch.unavailable", kind=kind)
         return None
+    skip = set(skip_accounts or ())
     async with session_scope() as db:
         rep = (
-            await eb.submit_messages(db, limit=limit)
+            await eb.submit_messages(db, limit=limit, skip_accounts=skip)
             if kind == KIND_MESSAGES
-            else await eb.submit_nodes(db, limit=limit)
+            else await eb.submit_nodes(db, limit=limit, skip_accounts=skip)
         )
     if rep.error:
         return None

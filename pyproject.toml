@@ -81,6 +81,12 @@ ignore = ["S101"]  # assert allowed in tests
 # phase4/A: entity regexlari kirill hashtag'larni ham qamraydi — namunalar kirillda.
 "src/app/services/entities.py" = ["RUF001", "RUF002", "RUF003"]
 "tests/test_entities.py" = ["RUF001", "RUF002", "RUF003"]
+# perf o'lchovi: korpus **sintetik** — `random` shu yerda kriptografiya emas,
+# takrorlanadigan urug' (S311). `S608` esa `EXPLAIN` uchun o'zimiz kompilyatsiya
+# qilgan SQL matnini oldiga qo'shishdan kelib chiqadi, foydalanuvchi kiritmasi yo'q.
+"evals/perf/seed.py" = ["S311", "RUF001", "RUF002", "RUF003"]
+"evals/perf/bench.py" = ["S311", "S608", "RUF001", "RUF002", "RUF003"]
+"tests/test_perf_smoke.py" = ["S311", "RUF001", "RUF002", "RUF003"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

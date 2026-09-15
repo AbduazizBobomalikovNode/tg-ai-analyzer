@@ -602,6 +602,155 @@ yozilmaydi. Yangi model nomi `llm/pricing.py` ga **qaytgan** nom bilan
 qo'shiladi, aks holda `estimate_cost` `None` qaytaradi va kunlik xarajat limiti
 jimgina ishlamay qoladi.
 
+### 11.1 O'lchov natijalari — SQL miqyosi (300k xabar)
+
+Bu bo'lim taxmin emas, **o'lchov**. Korpus `evals/perf/seed.py` bilan
+quriladi, o'lchov `evals/perf/bench.py` bilan; har raqam ≥5 yugurishning
+p50/p95 qiymati (CLAUDE.md qoidasi: bitta yugurish hech narsani isbotlamaydi).
+
+```bash
+# bir martalik konteyner (repo bazasiga tegmaydi)
+docker run -d --name tgai-perfpg -e POSTGRES_PASSWORD=perf -p 55433:5432 \
+  --shm-size=1g pgvector/pgvector:pg16 postgres \
+  -c shared_buffers=512MB -c work_mem=64MB -c maintenance_work_mem=512MB
+export PERF_DATABASE_URL=postgresql+asyncpg://postgres:perf@localhost:55433/postgres
+
+make perf-seed                     # alembic upgrade head + 300k xabar (~4 daqiqa)
+make perf-bench                    # o'lchov + EXPLAIN + pg_stat_user_indexes
+make perf-bench args="--sections hybrid,explain --runs 7"
+```
+
+**Korpus:** 60 chat (40 supergruh, 15 kanal, 5 shaxsiy), 299 970 xabar
+(5 chatda 30k+, qolgani uzun dum), 179 740 embedding (768-d, **sintetik**
+tasodifiy birlik vektorlar — LLM chaqirilmaydi), 15 043 entity, 18 oylik
+vaqt oynasi kunlik ritm bilan, uz/ru/en aralash matn (apostrof va kirill
+variantlari bilan), 30% reply, 5% forward. Seed vaqti 227 s (shundan 130 s —
+HNSW indeksini qayta qurish).
+
+**Muhit:** `pgvector/pgvector:pg16` (pgvector 0.8.6), `shared_buffers=512MB`,
+`work_mem=64MB`; ilova kodi `python:3.12-slim` asosidagi konteynerda.
+
+| Yo'l | oldin p50 / p95 | keyin p50 / p95 | |
+|---|---|---|---|
+| `hybrid_search` katta chat (35k) | 3832 / 4027 ms | **805 / 815 ms** | 4.8× |
+| `hybrid_search` katta + kengaytirish | 4500 / 5844 ms | **1259 / 1352 ms** | 3.6× |
+| `hybrid_search` kichik chat (983) | 240 / 324 ms | **151 / 154 ms** | 1.6× |
+| `hybrid_search` kichik + kengaytirish | 284 / 331 ms | **184 / 193 ms** | 1.5× |
+| `hybrid_search_multi` (1 so'rov) | 10 674 / 11 436 ms | **1239 / 1488 ms** | 8.6× |
+| `hybrid_search_multi` (6 sub-query) | 52 015 / 56 381 ms | **6155 / 6285 ms** | 8.5× |
+| `entity_search` (3 entity) | 67 / 99 ms | 61 / 100 ms | — |
+| `node_search` (akkaunt, L1-3) | 173 / 259 ms | 153 / 190 ms | — |
+| `node_search` (5 katta chat) | 177 / 200 ms | 191 / 263 ms | — |
+| `node_hits_to_messages` (12 tugun) | 59 / 65 ms | 57 / 79 ms | — |
+| `build_episodes` full ×5 katta chat | 54 602 / 59 133 ms | 54 098 / 60 243 ms | — |
+| `build_episodes` inkremental (+500) | 5265 / 5416 ms | **225 / 562 ms** | ⚠ pastga qarang |
+| `alerts.scan_rule` keyword, 1 chat | 467 / 649 ms | 365 / 506 ms | 1.3× |
+| `alerts.scan_rule` keyword, akkaunt | 570 / 642 ms | **255 / 294 ms** | 2.2× |
+| `alerts.scan_rule` semantic, 1 chat | 2213 / 2924 ms | 1684 / 2079 ms | 1.3× |
+| `alerts.scan_rule` semantic, akkaunt | 1921 / 2144 ms | 1506 / 2000 ms | 1.3× |
+| `digests.day_fingerprint` (1 kun) | 47 / 61 ms | 67 / 78 ms | — |
+| `analytics.chat_stats` (30 kun) | 85 / 130 ms | 147 / 189 ms | — |
+| `analytics.chat_stats` (540 kun) | 298 / 374 ms | 364 / 447 ms | — |
+| `cluster.dedup` (400 hit, 768-d) | 5754 / 6257 ms | **1802 / 2049 ms** | 3.2× |
+| `cluster.cluster_topics` (400 hit) | 5463 / 6108 ms | **1557 / 1702 ms** | 3.5× |
+
+⚠ **`build_episodes` inkremental** — bu qatorni to'liq fixlarga yozib
+bo'lmaydi: "oldin" yugurishida muhitda Redis yo'q edi va epizod qurish
+oxiridagi `enqueue("embed_nodes_task")` turtkisi (u ataylab
+`contextlib.suppress` ichida) ulanishni kutib turgan. DB tomondagi ish
+ikkala holatda ham kichik: 512 xabar o'qiladi va `link_entities` `UPDATE`
+`EXPLAIN ANALYZE` da 13 ms. "Keyin" raqami (225 ms) — Redis bor muhitda
+o'lchangan haqiqiy qiymat.
+
+#### Nima aniqlandi va nima tuzatildi
+
+**1. Trigram kanali indeksdan umuman foydalanmasdi.** `pg_stat_user_indexes`
+oldingi yugurishda `ix_messages_fold_trgm` uchun **`idx_scan = 0`** ko'rsatdi —
+76 MB indeks, nol skan. Sabab: `strict_word_similarity(t, text_fold) > 0.55`
+— bu **funksiya chaqirig'i**, Postgres uni indekslay olmaydi; planner
+`ix_messages_chat_id` ni tanlab, chatdagi har qatorda funksiyani hisoblardi
+(107 belgili matnda ≈30 µs; 35k xabarli chatda 4 so'z uchun 4.4 s; akkaunt
+bo'ylab — 300k qator).
+
+Tuzatish `services/search.py` da, ikki qismdan:
+
+  * predikatga pg_trgm **operatori** qo'shildi (`t <<% col`, zaxira yo'lda
+    `t <% col`). Operator GIN bilan bajariladi va sukut ostonasi (0.5 / 0.6)
+    bizning ostonadan past, ya'ni u aniq shartning nadto'plami — natija
+    o'zgarmaydi;
+  * so'rov ikki qavatli bo'ldi: ichki qavat indeks orqali nomzod beradi
+    (`TRGM_CANDIDATE_CAP = 2000`), tashqi qavat **faqat shu nomzodlarda**
+    ball hisoblab, aniq `> 0.55` bilan qirqadi.
+
+  Tanlanadigan so'zda farq katta: `count(*) where strict_word_similarity(...)`
+  964 ms → operator shaklida **8.5 ms** (bitta 35k chat).
+
+**2. Bir chatdagi trigram uchun mos indeks yo'q edi.** `btree_gin` bilan
+`GIN (chat_id, text_fold gin_trgm_ops)` ikkala shartni bitta skanga qo'yadi.
+Eski, yolg'iz ustunli indeks **o'chirildi**: yangisi uni to'liq qoplaydi
+(GIN'da yetakchi ustun shart emas — `text_fold %>> 'x'` yolg'iz ham shu
+indeksdan o'qiydi) va kichikroq: **49 MB vs 76 MB**.
+
+**3. HNSW filtr bilan jimgina qamrovni yo'qotardi.** `vector_search` bitta
+chat so'raganda `LIMIT 40` ga **33 qator** qaytarardi: HNSW `chat_id` haqida
+hech narsa bilmaydi, `ef_search` tagacha nomzod berib to'xtaydi va filtr
+**keyin** qo'llanadi (kichik chatda deyarli hech narsa qolmasdi). Bu narx
+emas, **sifat** xatosi edi. `search.tune_hnsw` endi vektor kanalidan oldin
+bitta `set_config(..., is_local := true)` yuboradi:
+`hnsw.ef_search = 100`, `hnsw.iterative_scan = relaxed_order` (pgvector ≥0.8).
+Natija — 40/40 qator, narx o'sha darajada (o'lchovda 250 ms → 338 ms bitta
+kanal uchun, `hybrid_search` esa umuman tezlashdi).
+
+**4. `cluster` da cosine har juftlikda uch marta o'tardi.** `cosine(a, b)`
+ikkala vektorning normini har chaqiruvda qayta hisoblardi; 400 hit = ~80k
+juftlik × 768 o'lchov. Endi vektorlar bir marta birlik uzunlikka keltiriladi
+(`cluster.unit` / `unit_map`) va taqqoslash bitta skalyar ko'paytma
+(`cluster.dot`, `map(operator.mul, …)` — sikl C tomonda). numpy qo'shilmadi.
+
+#### 0015-migratsiyadagi indekslar
+
+| Indeks | Nima uchun | Hajm (300k) |
+|---|---|---|
+| `ix_messages_chat_trgm` `GIN (chat_id, text_fold gin_trgm_ops)` | trigram kanali (1, 2-band); `ix_messages_fold_trgm` o'rniga | 51 MB |
+| `ix_messages_chat_msgid_alive` `(chat_id, tg_msg_id) WHERE deleted_at IS NULL` | `node_hits_to_messages` oralig'i, `search` dumi, `window_context`, epizod qurish | 9 MB |
+| `ix_messages_chat_created_id` `(chat_id, created_at) INCLUDE (id)` | `alerts._scope_max_id` kursori (har 5 daqiqada) | 12 MB |
+
+`btree_gin` — contrib kengaytmasi, Postgres bilan keladi.
+
+#### Hali sekin (tuzatilmagan) — raqamlar bilan
+
+* **`build_episodes full` — 54 s / 5 katta chat (≈11 s, 35k xabar).** Bu SQL
+  emas, ORM: `select(Message)` 35 ming obyektni yig'adi va segmentatsiya
+  sof Python. Inkremental yo'l (real hayotdagi yo'l) 225 ms, shuning uchun
+  to'liq qurish faqat bir martalik/qo'lda ish. Tuzatish yo'li ma'lum —
+  `Session.execute` o'rniga `yield_per` yoki tuple select — lekin u
+  `episodes.py` ning butun ichki shaklini o'zgartiradi, o'lchov doirasidan
+  tashqarida.
+* **`alerts.scan_rule` semantic — 1.5-1.7 s.** So'rov `sim >= threshold`
+  ko'rinishida, ya'ni **top-k emas, filtr** — HNSW bunday shartga yordam
+  bera olmaydi va 180k vektor ketma-ket o'qiladi. Tuzatish uchun so'rov
+  shaklini "eng yaqin N ni ol, keyin ostona bilan qirq" ga o'zgartirish
+  kerak, bu esa semantikani o'zgartiradi (qoida "ostonadan yuqori
+  **hammasi**" deydi) — user qaroriga qoldirildi. Kursor tufayli amalda
+  bu narx faqat birinchi skanerda to'liq to'lanadi.
+* **`cluster.dedup` / `cluster_topics` — 1.8 s / 1.6 s.** 2 s chegarasidan
+  past, lekin hali qimmat: `MAX_CLUSTER_INPUT = 400` sof Python O(n²)
+  uchun halol chegara. Yana kerak bo'lsa keyingi qadam — 300 ga tushirish
+  (chiziqli emas, ~1.8× arzon), numpy emas.
+* **`hybrid_search_multi` 6 sub-query — 6.2 s.** Kanallar bitta sessiyada
+  **ketma-ket** yuradi (asyncpg `InterfaceError`); haqiqiy parallellik har
+  kanalga alohida sessiya talab qiladi — arxitektura qarori, o'lchov emas.
+
+#### O'lchovning halol chegarasi
+
+Sintetik korpusda lug'at atigi ~170 so'z, shuning uchun **leksik kanallar
+haqiqiydan ko'ra og'irroq**: bitta so'z 300k xabarning ~25% iga mos keladi,
+real chatda esa bunday emas. Ya'ni yuqoridagi "keyin" raqamlari yomon tomonga
+yaxlitlangan; tanlanadigan so'zlarda (trigramning asl vazifasi — imlo xatosi)
+farq ancha kattaroq (964 ms → 8.5 ms). Aksincha, vektor kanali va HNSW
+qamrovi vektorlar tasodifiy bo'lgani uchun **realdan qiyinroq**: qo'shni
+qidirish uchun grafda haqiqiy klasterlar yo'q.
+
 ## 12. Roadmap
 
 | Bosqich | Fayllar | Testlar |

@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 from enum import StrEnum
 from functools import lru_cache
+from typing import Any
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -300,6 +301,38 @@ class Settings(BaseSettings):
     # har jobda 2000 ta 768 o'lchamli vektor).
     embed_batch_poll_limit: int = Field(default=4, ge=1, le=50)
 
+    # --- hardening ---
+    # Ishonchli reverse-proxy tarmoqlari (CIDR ro'yxati, vergul bilan).
+    # **Bo'sh (default) = `X-Forwarded-For` ga hech qachon ishonilmaydi** —
+    # mijoz IP'si TCP peer'dan olinadi. Proxy ortida ishlatsangiz shu yerga
+    # proxy tarmog'ini yozing (masalan `10.0.0.0/8,172.18.0.0/16`), aks holda
+    # istalgan mijoz shift kalitini (`client_ip`) soxtalashtira oladi.
+    trusted_proxies: str = ""
+    # Worker jarayonida Prometheus HTTP eksporti (`/metrics`). 0 = o'chiq.
+    # `api` dagi `/metrics` faqat api jarayonining metrikalarini beradi —
+    # cron/ingest hisoblagichlari shu portdan chiqadi.
+    worker_metrics_port: int = Field(default=0, ge=0, le=65535)
+    # Bitta snapshot yugurishida bitta chatdan olinadigan postlar qopqog'i.
+    # Usiz katta kanal butun soatlik oynani yeb, qolgan kanallarni ochlikda
+    # qoldiradi (snapshot eng eski `captured_at` dan boshlab oladi).
+    snapshot_max_messages_per_run: int = Field(default=5000, ge=100, le=100_000)
+
+    @property
+    def trusted_proxy_networks(self) -> tuple[Any, ...]:
+        """`TRUSTED_PROXIES` → `ip_network` ro'yxati. Noto'g'ri yozuv e'tiborsiz."""
+        import ipaddress
+
+        nets: list[Any] = []
+        for part in self.trusted_proxies.split(","):
+            raw = part.strip()
+            if not raw:
+                continue
+            try:
+                nets.append(ipaddress.ip_network(raw, strict=False))
+            except ValueError:
+                continue
+        return tuple(nets)
+
     @field_validator("master_key_b64")
     @classmethod
     def _check_master_key(cls, v: str) -> str:
@@ -351,3 +384,27 @@ class Settings(BaseSettings):
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings()  # type: ignore[call-arg]
+
+
+def embed_dims_mismatch(s: Settings | None = None) -> str:
+    """`EMBED_DIMS` ↔ DB ustuni mosligini tekshiradi; mos bo'lsa bo'sh satr (L10).
+
+    `EMBED_DIMS` provider'ga `output_dimensionality` bo'lib ketadi, DB ustuni
+    esa `Vector(embed_dim)` / `HALFVEC(embed_dim)` bilan **migratsiya vaqtida**
+    qurilgan. Ikkalasi ajralsa har INSERT `expected N dimensions, not M` bilan
+    yiqiladi — ya'ni indekslash to'liq to'xtaydi, lekin buni faqat cron
+    loglaridan bilib olish mumkin edi. Shuning uchun tekshiruv startupda.
+
+    O'lchamni haqiqatan o'zgartirish ustun turini almashtiradigan **migratsiya**
+    talab qiladi (va butun korpusni qayta embed qilishni): `EMBED_DIMS` yolg'iz
+    o'zi hech narsani ko'chirmaydi.
+    """
+    s = s or get_settings()
+    if s.embed_dims == s.embed_dim:
+        return ""
+    return (
+        f"EMBED_DIMS={s.embed_dims}, DB ustuni esa {s.embed_dim} o'lchamda "
+        "(`Vector(embed_dim)`) — har embedding INSERT'i xato beradi. "
+        "O'lchamni o'zgartirish ustun turini almashtiradigan migratsiya + "
+        "to'liq qayta embed talab qiladi."
+    )
