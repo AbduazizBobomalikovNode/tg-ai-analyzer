@@ -1,23 +1,29 @@
-{% extends "base.html" %}
+{% extends "_shell.html" %}
+{% import "_macros.html" as m %}
+{% set nav_current = "ask" %}
 {% block title %}{{ t('web.chat.title') }} · {{ t('web.title') }}{% endblock %}
 {% block body_class %}page-chat{% endblock %}
-{% block content %}
+
+{# 2-bosqichda bu sahifa `/ask` ga aylanadi va chap paneldagi chat ro'yxati
+   `/chats` ga ko'chadi (`pane_list`). Hozircha eski `.app` karkasi
+   `pane_content` ichida to'liq balandlikda ishlaydi — `chat.js` shartnomasi
+   (element id'lari) o'zgarmagan. #}
+
+{% block pane_content %}
+<div class="pane-content">
 <div class="app" id="app">
   <!-- chap panel -->
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-head">
-      <div class="brand small">
-        <span class="brand-logo" aria-hidden="true">✈️</span>
-        <span class="brand-name">{{ t('web.title') }}</span>
-      </div>
-      <button class="icon-btn" id="btn-close-sidebar" aria-label="close">✕</button>
+      {{ m.brand(t, '/chat') }}
+      <button class="icon-btn" id="btn-close-sidebar" aria-label="{{ t('web.close') }}">{{ m.icon("x") }}</button>
     </div>
 
     <section class="block">
       <label class="block-title" for="account-select">{{ t('web.chat.account') }}</label>
       <div class="row">
         <select id="account-select"></select>
-        <a class="btn ghost small" href="/login" title="{{ t('web.chat.add_account') }}">＋</a>
+        <a class="btn ghost small" href="/login" aria-label="{{ t('web.chat.add_account') }}" title="{{ t('web.chat.add_account') }}">{{ m.icon("plus") }}</a>
       </div>
       <div id="account-warn" class="warn" hidden></div>
     </section>
@@ -25,13 +31,13 @@
     <section class="block grow">
       <div class="row between">
         <div class="block-title">{{ t('web.chat.dialogs') }}</div>
-        <button class="btn ghost small" id="btn-sync-all" title="{{ t('web.chat.sync_all') }}">⟳ {{ t('web.chat.sync_all') }}</button>
+        <button class="btn ghost small" id="btn-sync-all" title="{{ t('web.chat.sync_all') }}">{{ m.icon("refresh-cw") }} {{ t('web.chat.sync_all') }}</button>
       </div>
       <div id="sync-note" class="warn" hidden></div>
       <input id="dialog-search" type="search" placeholder="{{ t('web.chat.search_dialogs') }}" autocomplete="off">
       <ul id="dialog-list" class="list dialogs">
         <li class="dialog-item selected" data-peer="0">
-          <span class="dialog-avatar">∅</span>
+          <span class="dialog-avatar" aria-hidden="true">{{ m.icon("layers") }}</span>
           <span class="dialog-body"><span class="dialog-title">{{ t('web.chat.context_none') }}</span></span>
         </li>
       </ul>
@@ -44,10 +50,9 @@
     </section>
 
     <div class="sidebar-foot">
-      <nav class="lang-switch">
-        {% for l in langs %}<a href="?lang={{ l }}" class="{% if l == lang %}active{% endif %}">{{ l|upper }}</a>{% endfor %}
-      </nav>
-      <a class="btn link" href="/dashboard">📊 {{ t('web.chat.dashboard') }}</a>
+      {{ m.lang_switch(t, langs, lang) }}
+      <a class="btn link" href="/briefings">{{ m.icon("inbox") }} {{ t('web.brief.title') }}</a>
+      <a class="btn link" href="/dashboard">{{ m.icon("bar-chart-3") }} {{ t('web.chat.dashboard') }}</a>
       <button class="btn link" id="btn-logout">{{ t('web.chat.logout') }}</button>
     </div>
   </aside>
@@ -55,25 +60,27 @@
   <!-- asosiy -->
   <main class="main">
     <header class="topbar">
-      <button class="icon-btn" id="btn-open-sidebar" aria-label="menu">☰</button>
+      <button class="icon-btn" id="btn-open-sidebar" aria-label="{{ t('web.a11y.open_nav') }}">{{ m.icon("menu") }}</button>
       <div class="topbar-title" id="conv-title">{{ t('web.chat.title') }}</div>
       <div class="topbar-ctx" id="ctx-badge" hidden></div>
-      <label class="opt topbar-wm" id="wm-wrap" hidden title="{{ t('web.chat.write_mode') }}">✍️
-        <select id="write-mode">
+      <label class="opt topbar-wm" id="wm-wrap" hidden title="{{ t('web.chat.write_mode') }}">
+        {{ m.icon("edit-3", label=t('web.chat.write_mode')) }}
+        <select id="write-mode" aria-label="{{ t('web.chat.write_mode') }}">
           <option value="read_only">{{ t('web.chat.wm_read_only') }}</option>
           <option value="write_with_confirm">{{ t('web.chat.wm_write_with_confirm') }}</option>
           <option value="autonomous">{{ t('web.chat.wm_autonomous') }}</option>
         </select>
       </label>
       <a class="topbar-ctx" id="pending-badge" href="#" hidden></a>
-      <button class="icon-btn" id="btn-autoreply" title="{{ t('web.ar.title') }}" hidden>🤖</button>
-      <button class="icon-btn" id="btn-scheduled" title="{{ t('web.sched.title') }}" hidden>⏰</button>
-      <button class="icon-btn danger" id="btn-delete" title="{{ t('web.chat.delete') }}" hidden>🗑</button>
+      <button class="icon-btn" id="btn-search-cmd" data-cmdk-open aria-label="{{ t('web.cmd.open') }}" title="{{ t('web.cmd.open') }}">{{ m.icon("search") }}</button>
+      <button class="icon-btn" id="btn-autoreply" aria-label="{{ t('web.ar.title') }}" title="{{ t('web.ar.title') }}" hidden>{{ m.icon("bolt") }}</button>
+      <button class="icon-btn" id="btn-scheduled" aria-label="{{ t('web.sched.title') }}" title="{{ t('web.sched.title') }}" hidden>{{ m.icon("clock") }}</button>
+      <button class="icon-btn danger" id="btn-delete" aria-label="{{ t('web.chat.delete') }}" title="{{ t('web.chat.delete') }}" hidden>{{ m.icon("trash-2") }}</button>
     </header>
 
     <div class="messages" id="messages">
       <div class="empty" id="empty-state">
-        <div class="empty-icon" aria-hidden="true">✨</div>
+        <div class="empty-icon" aria-hidden="true">{{ m.icon("sparkles") }}</div>
         <h2 class="empty-title">{{ t('web.chat.empty_title') }}</h2>
         <p class="empty-text">{{ t('web.chat.empty_state') }}</p>
         <div class="suggests" id="suggests">
@@ -87,7 +94,7 @@
     <!-- panellar: kutayotgan amallar / auto-reply / rejalashtirilganlar -->
     <div class="panel-backdrop" id="panel-backdrop" hidden>
       <div class="panel" role="dialog" aria-modal="true">
-        <div class="panel-head"><b id="panel-title"></b><button class="icon-btn" id="panel-close" aria-label="{{ t('web.pending.close') }}">✕</button></div>
+        <div class="panel-head"><b id="panel-title"></b><button class="icon-btn" id="panel-close" aria-label="{{ t('web.pending.close') }}">{{ m.icon("x") }}</button></div>
         <div class="panel-body" id="panel-body"></div>
       </div>
     </div>
@@ -116,11 +123,13 @@
         <label class="opt" id="deep-wrap" title="{{ t('web.deep.hint') }}"><input type="checkbox" id="deep"> {{ t('web.chat.deep') }}</label>
       </div>
       <div class="composer-row">
-        <textarea id="input" rows="1" placeholder="{{ t('web.chat.placeholder') }}"></textarea>
+        <textarea id="input" rows="1" placeholder="{{ t('web.chat.placeholder') }}" aria-label="{{ t('web.chat.placeholder') }}"></textarea>
         <button type="submit" class="btn primary" id="btn-send">{{ t('web.chat.send') }}</button>
       </div>
     </form>
   </main>
 </div>
+</div>
 {% endblock %}
-{% block scripts %}<script src="/static/chat.js"></script>{% endblock %}
+
+{% block scripts %}{{ super() }}<script src="{{ asset('chat.js') }}"></script>{% endblock %}

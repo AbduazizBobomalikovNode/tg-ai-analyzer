@@ -48,7 +48,11 @@
 
   // ── render ───────────────────────────────────────────────────────────────
   function initials(s) { return (s || "?").trim().split(/\s+/).slice(0, 2).map((w) => w[0]).join("").toUpperCase() || "?"; }
-  const kindIcon = { channel: "📣", group: "👥", user: "👤" };
+  // Sprite ikonkalari (Lucide) — emoji o'rniga: platformada bir xil
+  // ko'rinadi va ekran o'quvchi uni ism deb o'qimaydi (aria-hidden).
+  const SPRITE = (window.TGAI && window.TGAI.sprite) || "/static/icons.svg";
+  const ico = (name) => `<svg class="icon" aria-hidden="true" focusable="false"><use href="${SPRITE}#${name}"></use></svg>`;
+  const kindIcon = { channel: ico("hash"), group: ico("users"), user: ico("user") };
 
   function renderAccounts() {
     el.accountSelect.innerHTML = "";
@@ -75,14 +79,14 @@
     const q = el.dialogSearch.value.trim().toLowerCase();
     const items = state.dialogs.filter((d) => !q || d.title.toLowerCase().includes(q) || (d.username || "").toLowerCase().includes(q));
     const noneSel = state.peerId === 0 ? " selected" : "";
-    let html = `<li class="dialog-item${noneSel}" data-peer="0"><span class="dialog-avatar">∅</span><span class="dialog-body"><span class="dialog-title">${esc(t("web.chat.context_none"))}</span></span></li>`;
+    let html = `<li class="dialog-item${noneSel}" data-peer="0"><span class="dialog-avatar">${ico("layers")}</span><span class="dialog-body"><span class="dialog-title">${esc(t("web.chat.context_none"))}</span></span></li>`;
     for (const d of items) {
       const c = state.chatsByPeer[d.peer_id];
       html += `<li class="dialog-item${d.peer_id === state.peerId ? " selected" : ""}" data-peer="${d.peer_id}" data-title="${esc(d.title)}" data-chat="${c ? c.id : ""}">
         <span class="dialog-avatar">${esc(initials(d.title))}</span>
         <span class="dialog-body"><span class="dialog-title">${kindIcon[d.kind] || ""} ${esc(d.title)}</span>
         <span class="dialog-sub">${esc(d.last_message_text || "")}</span>${syncBadge(c)}</span>
-        ${c ? `<button class="sync-btn" data-sync="${c.id}" title="${esc(t("web.chat.sync"))}">⟳</button>` : ""}</li>`;
+        ${c ? `<button class="sync-btn" data-sync="${c.id}" aria-label="${esc(t("web.chat.sync"))}" title="${esc(t("web.chat.sync"))}">${ico("refresh-cw")}</button>` : ""}</li>`;
     }
     el.dialogList.innerHTML = html;
     updateCtxUI();
@@ -121,13 +125,18 @@
     const label = t(`web.act.tool_${a.tool}`) === `web.act.tool_${a.tool}` ? a.tool : t(`web.act.tool_${a.tool}`);
     const p = a.preview || {};
     let body = "";
-    if (p.image_url) body += `<img class="gen-img" src="${esc(p.image_url)}" alt="">`;
+    // Rasm faqat o'zimizning endpoint'dan (`/api/images/<id>`) — `md.js`
+    // dagi qoida bilan bir xil. Boshqa sxema (`javascript:`, `data:`)
+    // umuman chizilmaydi.
+    if (/^\/api\/images\/[A-Za-z0-9-]{8,40}$/.test(String(p.image_url || ""))) {
+      body += `<img class="gen-img" src="${esc(p.image_url)}" alt="" loading="lazy">`;
+    }
     if (p.text) body += `<div class="action-text">${esc(p.text)}</div>`;
     const meta = [];
     if (p.chat) meta.push(`→ ${esc(p.chat)}`);
     if (p.message_id) meta.push(`#${p.message_id}`);
     if (p.reply_to) meta.push(`reply #${p.reply_to}`);
-    if (p.schedule_at) meta.push(`⏰ ${esc(String(p.schedule_at).slice(0, 16).replace("T", " "))}`);
+    if (p.schedule_at) meta.push(`${ico("clock")} ${esc(String(p.schedule_at).slice(0, 16).replace("T", " "))}`);
     if (p.drop_author) meta.push("copy");
     if (p.image_id) meta.push(`🖼 ${esc(t("web.act.image"))}`);
     if (a.result_msg_id) meta.push(t("web.act.result", { id: a.result_msg_id }));
@@ -473,7 +482,7 @@
     try {
       const d = await api("GET", `/api/accounts/${state.accountId}/chats/${c.id}/scheduled`);
       el.panelBody.innerHTML = d.items.length
-        ? d.items.map((m) => `<div class="sched-item"><div class="muted">⏰ ${esc((m.date || "").slice(0, 16).replace("T", " "))} · #${m.msg_id}${m.has_media ? " · 🖼" : ""}</div>${esc(m.text || "")}</div>`).join("")
+        ? d.items.map((m) => `<div class="sched-item"><div class="muted">${ico("clock")} ${esc((m.date || "").slice(0, 16).replace("T", " "))} · #${m.msg_id}${m.has_media ? ` · ${ico("image")}` : ""}</div>${esc(m.text || "")}</div>`).join("")
         : `<p class="muted">${esc(t("web.sched.empty"))}</p>`;
     } catch (err) { el.panelBody.innerHTML = `<p class="warn">${esc(err.message)}</p>`; }
   }
@@ -522,6 +531,9 @@
       const data = await api("GET", `/api/accounts/${state.accountId}/chats`);
       state.chatsByPeer = {};
       for (const c of data.items) state.chatsByPeer[c.peer_id] = c;
+      // ⌘K palitrasi shu ro'yxatdan oziqlanadi — qayta so'rov yo'q.
+      window.TGAI.chats = data.items;
+      window.dispatchEvent(new CustomEvent("tgai:chats", { detail: data.items }));
       // jonli dialoglar bo'lmasa (sessiya yo'q) — DB registry'dan ro'yxat
       if (!state.dialogs.length && data.items.length) {
         state.dialogs = data.items.map((c) => ({ peer_id: c.peer_id, title: c.title, kind: c.type === "private" ? "user" : c.type === "channel" ? "channel" : "group", username: c.username, last_message_text: "" }));

@@ -7,7 +7,12 @@
     return v;
   };
   const $ = (id) => document.getElementById(id);
-  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  // Yagona escape manbai — `md.js` (renderer bilan bir xil mantiq).
+  const esc = window.TGAI.esc;
+  // Sprite ikonkalari (Lucide) — emoji o'rniga: platformada bir xil
+  // ko'rinadi va ekran o'quvchi uni ism deb o'qimaydi (aria-hidden).
+  const SPRITE = (window.TGAI && window.TGAI.sprite) || "/static/icons.svg";
+  const ico = (name) => `<svg class="icon" aria-hidden="true" focusable="false"><use href="${SPRITE}#${name}"></use></svg>`;
   const fmt = (n) => n == null ? "—" : n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e4 ? (n / 1e3).toFixed(0) + "k" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(Math.round(n));
   const money = (v) => v == null ? "—" : "$" + (v < 1 ? v.toFixed(3) : v.toFixed(2));
   const ms = (v) => v == null || v === 0 ? "—" : v >= 1000 ? (v / 1000).toFixed(1) + " s" : v + " ms";
@@ -93,7 +98,7 @@
     if (sys) {
       const b = sys.budget || {};
       const hb = sys.heartbeats && !sys.heartbeats._error ? Object.entries(sys.heartbeats) : [];
-      const okTxt = (o) => o && o.ok ? `✅ ${t("web.dash.ok")} · ${o.ms} ms` : `❌ ${t("web.dash.fail")}${o && o.error ? " · " + esc(o.error) : ""}`;
+      const okTxt = (o) => o && o.ok ? `${ico("check")} ${t("web.dash.ok")} · ${o.ms} ms` : `${ico("alert-triangle")} ${t("web.dash.fail")}${o && o.error ? " · " + esc(o.error) : ""}`;
       const rows = [
         [t("web.dash.db"), okTxt(sys.db)],
         [t("web.dash.redis"), okTxt(sys.redis)],

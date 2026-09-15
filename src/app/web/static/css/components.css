@@ -1,0 +1,271 @@
+/* components.css — qayta ishlatiladigan komponentlar (holatlar bilan).
+ * Inventar va holatlar ro'yxati: `docs/ui-v2.md` § Komponentlar.
+ */
+
+/* ══ Ikonka ═══════════════════════════════════════════════════════════ */
+/* `lib/icons.js` chiqishi: <svg class="icon"><use href="/static/icons.svg#x">
+ * Chiziqlar `currentColor` — rang matn rangidan meros. */
+.icon {
+  inline-size: 1.15em; block-size: 1.15em;
+  flex: none; vertical-align: -.18em;
+  pointer-events: none;
+}
+.icon-btn-v2 {
+  display: inline-grid; place-items: center;
+  min-inline-size: var(--tap); min-block-size: var(--tap);
+  border: 0; border-radius: var(--r-md, 12px);
+  background: none; color: var(--muted); cursor: pointer;
+  transition: background var(--t-hover) var(--ease), color var(--t-hover) var(--ease);
+}
+.icon-btn-v2:hover { background: var(--panel-3); color: var(--text); }
+.icon-btn-v2[aria-pressed="true"] { color: var(--accent-text); background: var(--accent-soft); }
+.icon-btn-v2 .icon { inline-size: 20px; block-size: 20px; }
+.spin { animation: tgai-spin 1s linear infinite; }
+@keyframes tgai-spin { to { transform: rotate(1turn); } }
+
+/* ══ Avatar ═══════════════════════════════════════════════════════════ */
+.avatar {
+  position: relative; flex: none;
+  inline-size: var(--avatar-size, 44px); block-size: var(--avatar-size, 44px);
+  border-radius: var(--r-full, 999px);
+  display: grid; place-items: center;
+  font-weight: 700; font-size: calc(var(--avatar-size, 44px) * .38);
+  line-height: 1; letter-spacing: -.02em;
+  background: var(--peer, var(--panel-3));
+  color: var(--peer-ink, var(--text));
+  overflow: hidden;
+  user-select: none;
+}
+.avatar img { inline-size: 100%; block-size: 100%; object-fit: cover; display: block; }
+.avatar.sm { --avatar-size: 32px; }
+.avatar.lg { --avatar-size: 64px; }
+.avatar.is-loading { background: var(--skeleton); color: transparent; }
+.avatar .avatar-badge {
+  position: absolute; inset-block-end: -1px; inset-inline-end: -1px;
+  inline-size: 12px; block-size: 12px; border-radius: var(--r-full, 999px);
+  border: 2px solid var(--panel); background: var(--ok);
+}
+.peer-1 { --peer: var(--peer-1); --peer-ink: var(--peer-1-ink); }
+.peer-2 { --peer: var(--peer-2); --peer-ink: var(--peer-2-ink); }
+.peer-3 { --peer: var(--peer-3); --peer-ink: var(--peer-3-ink); }
+.peer-4 { --peer: var(--peer-4); --peer-ink: var(--peer-4-ink); }
+.peer-5 { --peer: var(--peer-5); --peer-ink: var(--peer-5-ink); }
+.peer-6 { --peer: var(--peer-6); --peer-ink: var(--peer-6-ink); }
+.peer-7 { --peer: var(--peer-7); --peer-ink: var(--peer-7-ink); }
+
+/* ══ Skeleton ═════════════════════════════════════════════════════════ */
+/* Spinner emas: kutish "tezroq" his qilinadi va layout sakramaydi. */
+.skeleton {
+  position: relative; overflow: hidden;
+  background: var(--skeleton);
+  border-radius: var(--r-sm, 8px);
+  block-size: 1em;
+}
+.skeleton::after {
+  content: ""; position: absolute; inset: 0;
+  background: linear-gradient(90deg, transparent, var(--skeleton-hi), transparent);
+  transform: translateX(-100%);
+  animation: tgai-shimmer 1.3s infinite;
+}
+@keyframes tgai-shimmer { to { transform: translateX(100%); } }
+.skeleton-row {
+  display: flex; align-items: center; gap: var(--s-3);
+  padding: var(--s-2) var(--s-3);
+}
+.skeleton-row .skeleton.circle { inline-size: 44px; block-size: 44px; border-radius: var(--r-full, 999px); flex: none; }
+.skeleton-row .skeleton-lines { flex: 1 1 auto; display: grid; gap: var(--s-2); min-inline-size: 0; }
+.skeleton-row .skeleton.l1 { inline-size: 55%; }
+.skeleton-row .skeleton.l2 { inline-size: 80%; block-size: .8em; }
+
+/* ══ Bo'sh holat ══════════════════════════════════════════════════════ */
+.empty-v2 {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: var(--s-3); text-align: center;
+  padding: var(--s-7) var(--s-4);
+  max-inline-size: var(--measure-narrow); margin-inline: auto;
+}
+.empty-v2 .empty-ico {
+  display: grid; place-items: center;
+  inline-size: 52px; block-size: 52px; border-radius: var(--r-full, 999px);
+  background: var(--accent-soft); color: var(--accent-text);
+}
+.empty-v2 .empty-ico .icon { inline-size: 26px; block-size: 26px; }
+.empty-v2 h2 { margin: 0; font-size: var(--fs-xl); letter-spacing: -.01em; }
+.empty-v2 p { margin: 0; color: var(--muted); font-size: var(--fs-sm); line-height: var(--lh-body); }
+.empty-v2 .empty-actions { display: flex; flex-wrap: wrap; gap: var(--s-2); justify-content: center; }
+
+/* ══ Toast ════════════════════════════════════════════════════════════ */
+.toast-root {
+  position: fixed; z-index: var(--z-toast);
+  inset-block-end: calc(var(--pad-bottom) + var(--s-4));
+  inset-inline: 0;
+  display: flex; flex-direction: column; align-items: center; gap: var(--s-2);
+  pointer-events: none;
+  padding-inline: var(--s-4);
+}
+.toast {
+  pointer-events: auto;
+  display: flex; align-items: center; gap: var(--s-3);
+  max-inline-size: min(440px, 100%);
+  padding: var(--s-3) var(--s-4);
+  background: var(--panel); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--r-md, 12px);
+  box-shadow: var(--sh-3);
+  font-size: var(--fs-sm);
+  animation: tgai-toast-in var(--t-chip) var(--ease-out-back) both;
+}
+.toast.err { border-color: var(--danger); color: var(--danger-ink, var(--danger)); background: var(--danger-soft); }
+.toast.ok .icon { color: var(--ok); }
+.toast button { flex: none; background: none; border: 0; color: var(--accent-text); font-weight: 600; cursor: pointer; }
+@keyframes tgai-toast-in { from { opacity: 0; transform: translateY(12px) scale(.97); } }
+
+/* ══ Segment (filtr) ══════════════════════════════════════════════════ */
+.segment {
+  display: inline-flex; gap: 2px; padding: 3px;
+  background: var(--panel-2); border: 1px solid var(--border-soft);
+  border-radius: var(--r-full, 999px);
+}
+.segment button {
+  min-block-size: 32px; padding-inline: var(--s-3);
+  border: 0; border-radius: var(--r-full, 999px);
+  background: none; color: var(--muted); font-size: var(--fs-sm); font-weight: 600;
+  cursor: pointer; white-space: nowrap;
+}
+.segment button[aria-selected="true"] { background: var(--panel); color: var(--text); box-shadow: var(--sh-1); }
+
+/* ══ Sync pill ════════════════════════════════════════════════════════ */
+.sync-pill {
+  display: inline-flex; align-items: center; gap: var(--s-1);
+  padding: 2px var(--s-2); border-radius: var(--r-full, 999px);
+  font-size: var(--fs-xs); font-weight: 600;
+  background: var(--panel-2); color: var(--muted);
+  border: 1px solid var(--border-soft);
+}
+.sync-pill::before { content: ""; inline-size: 6px; block-size: 6px; border-radius: 50%; background: currentColor; }
+.sync-pill.done { color: var(--ok); }
+.sync-pill.running { color: var(--accent-text); }
+.sync-pill.failed { color: var(--danger); }
+
+/* ══ Sitata chipi va bosqich chizig'i (P2 uchun poydevor) ═════════════ */
+.cite-chip {
+  display: inline-grid; place-items: center;
+  min-inline-size: 18px; block-size: 18px; padding-inline: 4px;
+  font-size: 11px; font-weight: 700; line-height: 1;
+  vertical-align: super;
+  background: var(--cite-bg); color: var(--cite);
+  border: 1px solid var(--cite-border); border-radius: var(--r-full, 999px);
+  text-decoration: none;
+}
+.cite-chip:hover { background: var(--cite); color: var(--panel); }
+@media (pointer: coarse) { .cite-chip { min-inline-size: 26px; block-size: 26px; font-size: 12px; } }
+
+.stage { display: flex; flex-direction: column; gap: var(--s-2); }
+.stage-item { display: flex; align-items: center; gap: var(--s-2); font-size: var(--fs-sm); color: var(--muted); }
+.stage-item::before {
+  content: ""; inline-size: 8px; block-size: 8px; border-radius: 50%;
+  background: var(--stage-idle); flex: none;
+}
+.stage-item[data-state="active"] { color: var(--text); }
+.stage-item[data-state="active"]::before { background: var(--stage-active); }
+.stage-item[data-state="done"]::before { background: var(--stage-done); }
+.stage-item[data-state="failed"] { color: var(--stage-failed); }
+.stage-item[data-state="failed"]::before { background: var(--stage-failed); }
+
+/* ══ Buyruq palitrasi (⌘K) ════════════════════════════════════════════ */
+.cmdk {
+  position: fixed; inset: 0; z-index: var(--z-palette);
+  display: flex; align-items: flex-start; justify-content: center;
+  padding: clamp(var(--s-4), 8vh, 96px) var(--s-4) var(--s-4);
+  background: var(--scrim);
+  animation: tgai-fade var(--t-card) var(--ease) both;
+}
+@keyframes tgai-fade { from { opacity: 0; } }
+.cmdk-box {
+  inline-size: min(620px, 100%);
+  max-block-size: min(70svh, 560px);
+  display: flex; flex-direction: column;
+  background: var(--panel); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--r-lg, 16px);
+  box-shadow: var(--sh-4);
+  overflow: hidden;
+  animation: tgai-cmdk-in var(--t-chip) var(--ease-out-back) both;
+}
+@keyframes tgai-cmdk-in { from { opacity: 0; transform: translateY(-10px) scale(.985); } }
+.cmdk-head {
+  display: flex; align-items: center; gap: var(--s-2);
+  padding: var(--s-3) var(--s-4);
+  border-block-end: 1px solid var(--border-soft);
+  color: var(--muted);
+}
+.cmdk-head input {
+  flex: 1 1 auto; min-inline-size: 0;
+  border: 0; background: none; box-shadow: none; padding: 0;
+  font-size: var(--fs-lg); color: var(--text);
+}
+.cmdk-head input:focus { outline: none; box-shadow: none; }
+.cmdk-kbd {
+  font-size: 10.5px; font-weight: 700; color: var(--faint);
+  border: 1px solid var(--border); border-radius: var(--r-xs, 6px);
+  padding: 2px 5px; background: var(--panel-2);
+}
+.cmdk-list { flex: 1 1 auto; overflow: auto; padding: var(--s-2); margin: 0; list-style: none; }
+.cmdk-group {
+  padding: var(--s-2) var(--s-2) var(--s-1);
+  font-size: var(--fs-xs); font-weight: 700; letter-spacing: .08em;
+  text-transform: uppercase; color: var(--faint);
+}
+.cmdk-item {
+  display: flex; align-items: center; gap: var(--s-3);
+  min-block-size: var(--tap);
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--r-sm, 8px);
+  cursor: pointer; color: var(--text);
+}
+.cmdk-item .cmdk-label { flex: 1 1 auto; min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cmdk-item .cmdk-meta { flex: none; font-size: var(--fs-xs); color: var(--faint); }
+.cmdk-item[aria-selected="true"] { background: var(--accent-soft); color: var(--accent-text); }
+.cmdk-item mark { background: none; color: var(--accent-text); font-weight: 700; }
+.cmdk-empty { padding: var(--s-5); text-align: center; color: var(--muted); font-size: var(--fs-sm); }
+
+/* ══ Pastki varaq (mobil "More") ══════════════════════════════════════ */
+.sheet {
+  position: fixed; inset: 0; z-index: var(--z-sheet);
+  display: flex; align-items: flex-end; justify-content: center;
+  background: var(--scrim);
+  animation: tgai-fade var(--t-card) var(--ease) both;
+}
+.sheet-box {
+  inline-size: min(560px, 100%);
+  background: var(--panel);
+  border-start-start-radius: var(--r-xl, 20px);
+  border-start-end-radius: var(--r-xl, 20px);
+  padding: var(--s-2) var(--s-3) calc(var(--pad-bottom) + var(--s-4));
+  box-shadow: var(--sh-4);
+  animation: tgai-sheet-in var(--t-sheet) var(--ease-sheet) both;
+  max-block-size: 80svh; overflow: auto;
+}
+@keyframes tgai-sheet-in { from { transform: translateY(100%); } }
+.sheet-grab {
+  inline-size: 36px; block-size: 4px; border-radius: 2px;
+  background: var(--border-strong); margin: var(--s-2) auto var(--s-3);
+}
+.sheet-item {
+  display: flex; align-items: center; gap: var(--s-3);
+  min-block-size: var(--tap); inline-size: 100%;
+  padding: var(--s-2) var(--s-3); border-radius: var(--r-md, 12px);
+  border: 0; background: none; color: var(--text); font-size: var(--fs-md);
+  text-align: start; text-decoration: none; cursor: pointer;
+}
+.sheet-item:hover { background: var(--panel-3); }
+.sheet-item.is-disabled { opacity: .45; pointer-events: none; }
+.sheet-item .icon { color: var(--muted); }
+
+/* ══ Til almashtirgich (macro) ════════════════════════════════════════ */
+.lang-switch-v2 { display: inline-flex; gap: 2px; }
+.lang-switch-v2 a {
+  min-inline-size: 34px; min-block-size: 32px;
+  display: grid; place-items: center;
+  font-size: var(--fs-xs); font-weight: 700; letter-spacing: .04em;
+  color: var(--muted); border-radius: var(--r-sm, 8px);
+}
+.lang-switch-v2 a[aria-current="true"] { color: var(--accent-ink); background: var(--accent); }

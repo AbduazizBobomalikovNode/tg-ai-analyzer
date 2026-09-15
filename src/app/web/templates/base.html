@@ -1,16 +1,64 @@
 <!doctype html>
-<html lang="{{ lang }}">
+<html lang="{{ lang }}" class="shell-root">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#eef1f5" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0b1219" media="(prefers-color-scheme: dark)">
   <title>{% block title %}{{ t('web.title') }}{% endblock %}</title>
-  <link rel="stylesheet" href="/static/app.css">
+
+  {# Tema bootstrap — CSS'dan OLDIN va paint'dan oldin. Usiz qorong'u tema
+     tanlagan foydalanuvchi har sahifada oq chaqnashni ko'radi. Kichik,
+     tashqi bog'liqliksiz va localStorage bloklangan bo'lsa jim o'tadi. #}
+  <script>
+    (function () {
+      try {
+        var m = JSON.parse(localStorage.getItem("tgai.theme") || '"system"');
+        if (m === "dark" || m === "light") document.documentElement.setAttribute("data-theme", m);
+      } catch (e) { /* xususiy oyna */ }
+      // Telegram Mini App konteksti — SDK'ni faqat shu holatda yuklaymiz.
+      try {
+        if (/tgWebApp/.test(location.hash) || window.TelegramWebviewProxy) {
+          document.documentElement.className += " in-telegram";
+          document.write('<script src="/static/vendor/telegram-web-app.js"><\/script>');
+        }
+      } catch (e) { /* no-op */ }
+    })();
+  </script>
+
+  {# Kritik yadro birinchi; @import yo'q (u ketma-ket yuklab kechiktiradi). #}
+  <link rel="stylesheet" href="{{ asset('css/tokens.css') }}">
+  <link rel="stylesheet" href="{{ asset('css/base.css') }}">
+  <link rel="stylesheet" href="{{ asset('app.css') }}">
+  <link rel="stylesheet" href="{{ asset('css/shell.css') }}">
+  <link rel="stylesheet" href="{{ asset('css/components.css') }}">
+  {% block head %}{% endblock %}
 </head>
-<body class="{% block body_class %}{% endblock %}">
+<body class="{% block body_class %}{% endblock %}"{% block body_attrs %}{% endblock %}>
   {% block content %}{% endblock %}
-  <script>window.TGAI = {strings: {{ strings_json|safe }}, lang: "{{ lang }}"};</script>
-  <script src="/static/md.js"></script>
+
+  <script>window.TGAI = {
+    strings: {{ strings_json|safe }},
+    lang: "{{ lang }}",
+    sprite: "{{ asset('icons.svg') }}",
+    {# Marshrut xaritasi — mavjud sahifalar `true`, 2-bosqichda yoqiladiganlar
+       `null`. Navigatsiya va ⌘K palitrasi shundan o'qiydi, ya'ni o'lik havola
+       chiqmaydi: yangi sahifa qo'shilganda faqat shu xarita o'zgaradi. #}
+    routes: {
+      login: "/login",
+      ask: "/chat",
+      briefings: "/briefings",
+      dashboard: "/dashboard",
+      today: null,
+      chats: null,
+      chatDetail: null,
+      alerts: null,
+      actions: null,
+      settings: null
+    }
+  };</script>
+  <script src="{{ asset('md.js') }}"></script>
   {% block scripts %}{% endblock %}
 </body>
 </html>

@@ -1,18 +1,18 @@
 {% extends "base.html" %}
+{% import "_macros.html" as m %}
 {% block title %}{{ t('web.login.title') }} · {{ t('web.title') }}{% endblock %}
 {% block body_class %}page-login{% endblock %}
 {% block content %}
 <main class="login-wrap">
   <div class="login-card">
     <div class="brand">
-      <div class="brand-logo" aria-hidden="true">✈️</div>
+      <div class="brand-logo" aria-hidden="true">{{ m.icon("sparkles") }}</div>
       <div>
         <div class="brand-name">{{ t('web.title') }}</div>
         <div class="brand-sub">{{ t('web.login.title') }}</div>
       </div>
-      <nav class="lang-switch" aria-label="{{ t('web.lang') }}">
-        {% for l in langs %}<a href="?lang={{ l }}" class="{% if l == lang %}active{% endif %}">{{ l|upper }}</a>{% endfor %}
-      </nav>
+      {{ m.lang_switch(t, langs, lang) }}
+      <button type="button" class="icon-btn-v2" data-theme-toggle aria-label="{{ t('web.theme.title') }}">{{ m.icon("monitor") }}</button>
     </div>
 
     <p class="muted">{{ t('web.login.subtitle') }}</p>
@@ -62,14 +62,21 @@
       <button type="button" class="btn link" data-back>{{ t('web.login.back') }}</button>
     </form>
 
-    <div id="step-done" class="step done" hidden>✅ {{ t('web.login.success') }}</div>
+    <div id="step-done" class="step done" hidden>{{ m.icon("check") }} {{ t('web.login.success') }}</div>
 
     <footer class="fineprint">
-      <p>🔐 {{ t('web.login.security_note') }}</p>
-      <p>⚠️ {{ t('web.login.tos_note') }}</p>
-      {% if logged_in %}<p><a href="/chat">→ {{ t('web.chat.title') }}</a></p>{% endif %}
+      <p>{{ m.icon("lock") }} {{ t('web.login.security_note') }}</p>
+      <p>{{ m.icon("alert-triangle") }} {{ t('web.login.tos_note') }}</p>
+      {% if logged_in %}<p><a href="/chat">{{ m.icon("arrow-right") }} {{ t('web.chat.title') }}</a></p>{% endif %}
     </footer>
   </div>
 </main>
 {% endblock %}
-{% block scripts %}<script src="/static/login.js"></script>{% endblock %}
+{% block scripts %}
+<script type="module">
+  import * as theme from "{{ asset('lib/theme.js') }}";
+  import { $$ } from "/static/lib/dom.js";
+  theme.init();
+  for (const b of $$("[data-theme-toggle]")) b.addEventListener("click", () => theme.cycle());
+</script>
+<script src="{{ asset('login.js') }}"></script>{% endblock %}

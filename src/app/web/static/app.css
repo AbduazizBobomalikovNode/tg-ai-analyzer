@@ -92,7 +92,7 @@
 
   /* o'lchamlar */
   --sidebar-w: 320px;
-  --composer-max: 40vh;   /* chat.js autosize() bilan bir xil bo`lsin */
+  --composer-max: 40svh;   /* chat.js autosize() bilan bir xil bo`lsin */
 }
 
 @media (prefers-color-scheme: dark) {
@@ -359,7 +359,7 @@ input[type=search] { -webkit-appearance: none; }
 
 /* ══ 5. Ilova karkasi ══════════════════════════════════════════════════════ */
 .page-chat { overflow: hidden; }
-.app { display: grid; grid-template-columns: var(--sidebar-w) 1fr; height: 100dvh; }
+.app { display: grid; grid-template-columns: var(--sidebar-w) 1fr; height: 100svh; }
 
 /* ── chap panel ── */
 .sidebar {
@@ -395,7 +395,7 @@ input[type=search] { -webkit-appearance: none; }
 .list { list-style: none; margin: 0; padding: 0; overflow: auto; min-height: 0; }
 .list::-webkit-scrollbar { width: 8px; }
 .dialogs { flex: 1; margin: 0 -.35rem; padding: 0 .35rem; }
-.convs { max-height: 26vh; margin: 0 -.35rem; padding: 0 .35rem; }
+.convs { max-height: 26svh; margin: 0 -.35rem; padding: 0 .35rem; }
 
 .dialog-item, .conv-item {
   display: flex; gap: .6rem; align-items: center;
@@ -649,7 +649,7 @@ a.topbar-ctx:hover { background: var(--accent-soft-2); }
 /* ── kiritish paneli ── */
 .composer {
   border-top: 1px solid var(--border); background: var(--panel);
-  padding: .6rem clamp(.75rem, 4vw, 2rem) max(.8rem, env(safe-area-inset-bottom));
+  padding: .6rem clamp(.75rem, 4vw, 2rem) max(.8rem, var(--pad-bottom, env(safe-area-inset-bottom)));
 }
 .composer-opts {
   display: flex; gap: .5rem; align-items: center; flex-wrap: wrap;
@@ -724,7 +724,7 @@ a.topbar-ctx:hover { background: var(--accent-soft-2); }
 }
 @keyframes fade-in { from { opacity: 0 } to { opacity: 1 } }
 .panel {
-  width: min(680px, 100%); max-height: 88dvh; overflow: auto;
+  width: min(680px, 100%); max-height: 88svh; overflow: auto;
   background: var(--panel); border: 1px solid var(--border);
   border-radius: var(--r-xl); box-shadow: var(--sh-4);
   animation: panel-in var(--t-base) var(--ease) both;
@@ -828,7 +828,7 @@ a.topbar-ctx:hover { background: var(--accent-soft-2); }
     transform: translateX(-100%);
     transition: transform var(--t-base) var(--ease);
     box-shadow: var(--sh-4);
-    padding-bottom: env(safe-area-inset-bottom);
+    padding-bottom: var(--pad-bottom, env(safe-area-inset-bottom));
   }
   .sidebar.open { transform: none; }
   #btn-close-sidebar, #btn-open-sidebar { display: inline-flex; }
@@ -842,7 +842,7 @@ a.topbar-ctx:hover { background: var(--accent-soft-2); }
 
   .msg { max-width: 96%; }
   .msg table { font-size: .8rem; }
-  .convs { max-height: 22vh; }
+  .convs { max-height: 22svh; }
   .messages { padding: 1rem .75rem; }
   .composer-opts { gap: .4rem; font-size: .74rem; }
   .opt input[type=range] { width: 92px; }
@@ -887,4 +887,43 @@ a.topbar-ctx:hover { background: var(--accent-soft-2); }
 .msg a.cite {
   font-variant-numeric: tabular-nums; text-decoration: none;
   color: var(--accent-text); border-bottom: 1px dotted currentColor;
+}
+
+/* ══ 11. Redizayn v2 — moslashuvchanlik va xavfsiz zona tuzatishlari ═══════
+ *
+ * Token'lar va yangi komponentlar `static/css/*.css` da (tokens → base →
+ * app → shell → components). Bu blok **eski** sahifa uslublarini yangi
+ * karkasga moslaydi, mavjud sinf nomlarini o'zgartirmasdan (JS shartnoma).
+ */
+
+/* Top bar va panel boshi — notch ostida qolmasin */
+.topbar { padding-block-start: calc(.65rem + var(--sa-top, 0px)); }
+.sidebar-head { padding-block-start: calc(.85rem + var(--sa-top, 0px)); }
+
+/* Teginish nishoni: loyiha minimumi 44px (tadqiqot § 3) */
+.icon-btn { min-width: 44px; min-height: 44px; }
+@media (pointer: coarse) {
+  .btn, .suggest, .dialog-item, .conv-item, .lang-switch a { min-height: 44px; }
+}
+
+/* Ikonka sprite tugma ichida — matn rangini oladi, o'lchami barqaror */
+.btn .icon, .icon-btn .icon, .brand-logo .icon, .empty-icon .icon,
+.dialog-avatar .icon, .fineprint .icon, .sidebar-foot .icon { inline-size: 1.05em; block-size: 1.05em; }
+.empty-icon .icon { inline-size: 32px; block-size: 32px; }
+.brand-logo .icon { inline-size: 1.3em; block-size: 1.3em; }
+
+/* Jadval/diagramma — gorizontal skroll konteynerda, sahifa siljimasin */
+.table-wrap { overscroll-behavior-x: contain; -webkit-overflow-scrolling: touch; }
+
+/* Uzun dialog ro'yxati — ko'rinmagan qatorlar chizilmaydi */
+.dialogs .dialog-item { content-visibility: auto; contain-intrinsic-size: 0 52px; }
+
+@media (max-width: 480px) {
+  .tiles { grid-template-columns: 1fr; }
+  .grid2 { grid-template-columns: 1fr; }
+  .dash { padding: .7rem .7rem 2rem; }
+  .dash-head { align-items: flex-start; }
+  .dash-actions { inline-size: 100%; justify-content: space-between; }
+  .composer-row .btn.primary { padding-inline: .8rem; }
+  .composer-opts { row-gap: .35rem; }
 }

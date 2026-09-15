@@ -9,8 +9,11 @@ Qo'riqlaydi:
 
 from __future__ import annotations
 
+import json as _json
+import re as _re
 import time
 from datetime import UTC, datetime
+from pathlib import Path as _Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -1102,6 +1105,17 @@ def _chat_row(chat_id: int, title: str) -> Any:
         sync_error=None,
         last_sync_at=None,
         last_message_at=None,
+        # ui/R1a (migratsiya 0017) — `chat_out` shu maydonlarni ham beradi
+        account_id=3,
+        about=None,
+        avatar_photo_id=None,
+        avatar_mime=None,
+        is_verified=False,
+        is_scam=False,
+        is_fake=False,
+        unread_count=0,
+        last_message_text=None,
+        link_prefix=None,
     )
 
 
@@ -1143,3 +1157,152 @@ def test_tg_chats_endpoint_auth_and_ownership(
 def test_tg_chats_endpoint_rejects_bad_limit(client: TestClient) -> None:
     client.cookies.set(sec.SESSION_COOKIE, sec.issue_session(7))
     assert client.get("/api/accounts/3/chats?limit=5000").status_code == 422
+
+
+# ─── UI redizayn v2: karkas, ikonkalar, tema, i18n ──────────────────────────
+#
+# Qo'riqlaydi (`docs/ui-v2.md`):
+#   * har sahifada navigatsiya karkasi bor (rail + tab bar) — foydalanuvchi
+#     hech qayerda "tupikda" qolmaydi;
+#   * emoji ikonka yo'q (Lucide sprite) — platformalarda bir xil ko'rinadi
+#     va ekran o'quvchi uni ism deb o'qimaydi;
+#   * `data-theme` bootstrap'i paint'dan oldin (qorong'u temada oq chaqnash
+#     bo'lmasin);
+#   * yangi UI matnlari **uchala** tilda bor.
+
+_WEB = _Path(__file__).resolve().parents[1] / "src/app/web"
+_LOCALES = _Path(__file__).resolve().parents[1] / "src/app/i18n/locales"
+
+#: Piktografik emoji (matn o'qlari `←`/`→` va tipografik belgilar emas).
+_EMOJI = _re.compile(
+    "[\U0001f000-\U0001faff☀-➿⬀-⯿️‍⏠-⏿]"
+)
+
+_SHELL_PAGES = ("/chat", "/dashboard", "/briefings")
+
+
+def _logged(client: TestClient) -> TestClient:
+    client.cookies.set(sec.SESSION_COOKIE, sec.issue_session(7))
+    return client
+
+
+def test_pages_render_with_the_navigation_shell(client: TestClient) -> None:
+    c = _logged(client)
+    for path in _SHELL_PAGES:
+        r = c.get(f"{path}?lang=uz")
+        assert r.status_code == 200, path
+        html = r.text
+        assert 'class="rail"' in html, f"{path}: desktop rail yo'q"
+        assert 'class="tabbar"' in html, f"{path}: mobil tab bar yo'q"
+        assert 'id="cmdk"' in html, f"{path}: buyruq palitrasi yo'q"
+        assert 'id="toast-root"' in html, f"{path}: toast ildizi yo'q"
+        assert 'id="more-sheet"' in html, f"{path}: More varag'i yo'q"
+        assert 'class="skip-link"' in html, f"{path}: skip-link yo'q"
+    c.cookies.clear()
+
+
+def test_pages_reference_the_icon_sprite_not_emoji(client: TestClient) -> None:
+    c = _logged(client)
+    for path in (*_SHELL_PAGES, "/login"):
+        r = c.get(f"{path}?lang=en")
+        assert r.status_code == 200, path
+        html = r.text
+        assert "/static/icons.svg" in html, f"{path}: sprite ishlatilmagan"
+        assert "<use href=" in html, f"{path}: <use> yo'q"
+        found = _EMOJI.findall(html)
+        assert not found, f"{path}: emoji ikonka qoldi: {sorted(set(found))}"
+    c.cookies.clear()
+
+
+def test_theme_bootstrap_runs_before_paint(client: TestClient) -> None:
+    """`data-theme` localStorage'dan CSS'dan **oldin** o'qilishi shart."""
+    r = client.get("/login?lang=uz")
+    html = r.text
+    boot = html.index('localStorage.getItem("tgai.theme")')
+    css = html.index("css/tokens.css")
+    assert boot < css, "tema bootstrap'i CSS'dan keyin — oq chaqnash bo'ladi"
+    assert 'setAttribute("data-theme"' in html
+    assert 'name="theme-color"' in html
+    # yangi CSS qatlamlari ham ulangan
+    for part in ("css/tokens.css", "css/base.css", "css/shell.css", "css/components.css"):
+        assert part in html, part
+
+
+def test_routes_map_has_no_dead_links(client: TestClient) -> None:
+    """`TGAI.routes` — hali yo'q sahifalar `null`; barcha satrlar haqiqiy."""
+    c = _logged(client)
+    html = c.get("/chat").text
+    raw = html.split("routes: {", 1)[1].split("}", 1)[0]
+    routes = _json.loads("{" + _re.sub(r"(\w+):", r'"\1":', raw).replace("null", "null") + "}")
+    for key, value in routes.items():
+        assert value is None or value.startswith("/"), key
+    live = {v for v in routes.values() if v}
+    for url in live:
+        assert c.get(url, follow_redirects=False).status_code in (200, 302), url
+    assert routes["today"] is None and routes["settings"] is None  # 2-bosqich
+    c.cookies.clear()
+
+
+def test_new_ui_strings_exist_in_all_three_locales() -> None:
+    locales = {
+        name: _json.loads((_LOCALES / f"{name}.json").read_text(encoding="utf-8"))
+        for name in ("uz", "ru", "en")
+    }
+    required = [
+        "web.close",
+        "web.nav.today", "web.nav.chats", "web.nav.ask", "web.nav.alerts",
+        "web.nav.actions", "web.nav.dashboard", "web.nav.settings",
+        "web.nav.more", "web.nav.soon",
+        "web.a11y.skip", "web.a11y.primary_nav", "web.a11y.open_nav",
+        "web.theme.title", "web.theme.system", "web.theme.light", "web.theme.dark",
+        "web.cmd.open", "web.cmd.placeholder", "web.cmd.results", "web.cmd.empty",
+        "web.cmd.sec_chats", "web.cmd.sec_goto", "web.cmd.sec_actions",
+        "web.cmd.toggle_theme", "web.cmd.language",
+        "web.fmt.now",
+        "web.n.messages.one", "web.n.messages.other",
+        "web.n.chats.one", "web.n.chats.other",
+    ]
+    missing = {
+        name: [k for k in required if not data.get(k)] for name, data in locales.items()
+    }
+    assert not any(missing.values()), missing
+    # ru ko'plikning uchala shakli bor (Intl.PluralRules: one/few/many)
+    for stem in ("web.n.messages", "web.n.chats"):
+        for form in ("one", "few", "many", "other"):
+            assert locales["ru"].get(f"{stem}.{form}"), f"{stem}.{form}"
+
+
+def test_ui_strings_carry_no_emoji_icons() -> None:
+    """UI yorliqlari — matn; ikonka sprite'dan keladi."""
+    prefixes = ("web.", "auth.err.", "chat.err.", "action.err.", "error.")
+    bad: dict[str, list[str]] = {}
+    for name in ("uz", "ru", "en"):
+        data = _json.loads((_LOCALES / f"{name}.json").read_text(encoding="utf-8"))
+        hits = [
+            k for k, v in data.items()
+            if k.startswith(prefixes) and isinstance(v, str) and _EMOJI.search(v)
+        ]
+        if hits:
+            bad[name] = hits
+    assert not bad, bad
+
+
+def test_macros_and_shell_templates_exist_and_are_used() -> None:
+    tpl = _WEB / "templates"
+    assert (tpl / "_macros.html").is_file() and (tpl / "_shell.html").is_file()
+    for page in ("chat.html", "dashboard.html", "briefings.html"):
+        text = (tpl / page).read_text(encoding="utf-8")
+        assert 'extends "_shell.html"' in text, page
+    # brend/lang-switch nusxalari macro'ga ko'chdi
+    for page in ("chat.html", "dashboard.html", "briefings.html", "login.html"):
+        text = (tpl / page).read_text(encoding="utf-8")
+        assert 'class="lang-switch"' not in text, f"{page}: eski lang-switch nusxasi qoldi"
+
+
+def test_static_assets_are_versioned_in_html(client: TestClient) -> None:
+    """R1b `asset()` global'i — static URL'lar fingerprint bilan."""
+    c = _logged(client)
+    html = c.get("/chat").text
+    assert _re.search(r"/static/css/tokens\.css\?v=[0-9a-f]{6,}", html)
+    assert _re.search(r"/static/md\.js\?v=[0-9a-f]{6,}", html)
+    c.cookies.clear()

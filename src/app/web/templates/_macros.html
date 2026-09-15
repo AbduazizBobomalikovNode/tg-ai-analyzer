@@ -1,0 +1,72 @@
+{# _macros.html — qayta ishlatiladigan bo'laklar.
+   Ilgari brand/lang-switch 4 ta shablonda nusxa edi (audit § Templates).
+
+   Xavfsizlik: hamma qiymat Jinja'ning avtoescape'i orqali chiqadi;
+   `|safe` bu faylda **yo'q**. `icon()` nomi faqat `[a-z0-9-]` ga
+   cheklanadi, ya'ni atributdan chiqib ketish mumkin emas. #}
+
+{# ── Ikonka: sprite'dan `<use>`. `label` berilsa ma'noli, aks holda bezak ── #}
+{% macro icon(name, cls="", label="") -%}
+  {%- set safe = name | replace("/", "") -%}
+  <svg class="icon {{ cls }}"{% if label %} role="img"{% else %} aria-hidden="true" focusable="false"{% endif %}>
+    {%- if label %}<title>{{ label }}</title>{% endif -%}
+    <use href="{{ asset('icons.svg') }}#{{ safe }}"></use>
+  </svg>
+{%- endmacro %}
+
+{# ── Brend ── #}
+{% macro brand(t, href="/", sub="") -%}
+  <a class="brand small" href="{{ href }}" aria-label="{{ t('web.title') }}">
+    <span class="brand-logo" aria-hidden="true">{{ icon("sparkles") }}</span>
+    <span class="brand-name">{{ t('web.title') }}</span>
+    {%- if sub %}<span class="muted">· {{ sub }}</span>{% endif -%}
+  </a>
+{%- endmacro %}
+
+{# ── Til almashtirgich ── #}
+{% macro lang_switch(t, langs, lang) -%}
+  <nav class="lang-switch-v2" aria-label="{{ t('web.lang') }}">
+    {%- for l in langs -%}
+      <a href="?lang={{ l }}" hreflang="{{ l }}" lang="{{ l }}"
+         {% if l == lang %}aria-current="true"{% endif %}>{{ l|upper }}</a>
+    {%- endfor -%}
+  </nav>
+{%- endmacro %}
+
+{# ── Avatar: rasm bo'lsa rasm, aks holda inisiallar peer rangida.
+      `peer` — 1..7 (server `hash(peer_id) % 7` bilan bersa), 0 = neytral. ── #}
+{% macro avatar(title, peer=0, src="", size="") -%}
+  <span class="avatar {{ size }}{% if peer %} peer-{{ peer }}{% endif %}" aria-hidden="true">
+    {%- if src %}<img src="{{ src }}" alt="" loading="lazy" decoding="async">
+    {%- else %}{{ (title or "?") | trim | truncate(2, True, "") | upper }}{% endif -%}
+  </span>
+{%- endmacro %}
+
+{# ── Skeleton qatorlar (ro'yxat yuklanayotganda; spinner emas) ── #}
+{% macro skeleton_rows(n=6, avatar=True) -%}
+  <div class="skeletons" aria-hidden="true">
+    {%- for _ in range(n) %}
+    <div class="skeleton-row">
+      {%- if avatar %}<span class="skeleton circle"></span>{% endif %}
+      <span class="skeleton-lines">
+        <span class="skeleton l1"></span><span class="skeleton l2"></span>
+      </span>
+    </div>
+    {%- endfor %}
+  </div>
+{%- endmacro %}
+
+{# ── Bo'sh holat ── #}
+{% macro empty_state(icon_name, title, text="", id="") -%}
+  <div class="empty-v2"{% if id %} id="{{ id }}"{% endif %}>
+    <span class="empty-ico">{{ icon(icon_name) }}</span>
+    <h2>{{ title }}</h2>
+    {%- if text %}<p>{{ text }}</p>{% endif %}
+    {{ caller() if caller is defined and caller }}
+  </div>
+{%- endmacro %}
+
+{# ── Toast ildizi (bitta, `lib/toast.js` shu yerga yozadi) ── #}
+{% macro toast_root() -%}
+  <div id="toast-root" class="toast-root" role="region" aria-live="polite" aria-atomic="false"></div>
+{%- endmacro %}

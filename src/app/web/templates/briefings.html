@@ -1,19 +1,16 @@
-{% extends "base.html" %}
+{% extends "_shell.html" %}
+{% import "_macros.html" as m %}
+{% set nav_current = "briefings" %}
 {% block title %}{{ t('web.brief.title') }} · {{ t('web.title') }}{% endblock %}
 {% block body_class %}page-dash{% endblock %}
-{% block content %}
+{% block pane_content %}
+<div class="pane-content scrolls">
 <div class="dash">
   <header class="dash-head">
-    <div class="brand small">
-      <span class="brand-logo" aria-hidden="true">📰</span>
-      <span class="brand-name">{{ t('web.title') }}</span>
-      <span class="muted">· {{ t('web.brief.title') }}</span>
-    </div>
+    {{ m.brand(t, '/chat', t('web.brief.title')) }}
     <div class="dash-actions">
-      <a class="btn ghost small" href="/dashboard">← {{ t('web.dash.title') }}</a>
-      <nav class="lang-switch">
-        {% for l in langs %}<a href="?lang={{ l }}" class="{% if l == lang %}active{% endif %}">{{ l|upper }}</a>{% endfor %}
-      </nav>
+      <a class="btn ghost small" href="/dashboard">{{ m.icon("arrow-left") }} {{ t('web.dash.title') }}</a>
+      {{ m.lang_switch(t, langs, lang) }}
     </div>
   </header>
 
@@ -53,6 +50,7 @@
     <p class="muted small">{{ t('web.brief.quiet_note') }}</p>
   </section>
 </div>
+</div>
 <script>window.TGAI_BRIEF_DAY = "{{ day }}";</script>
 {% endblock %}
-{% block scripts %}<script src="/static/briefings.js"></script>{% endblock %}
+{% block scripts %}{{ super() }}<script src="{{ asset('briefings.js') }}"></script>{% endblock %}

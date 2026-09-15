@@ -1,14 +1,13 @@
-{% extends "base.html" %}
+{% extends "_shell.html" %}
+{% import "_macros.html" as m %}
+{% set nav_current = "dashboard" %}
 {% block title %}{{ t('web.dash.title') }} · {{ t('web.title') }}{% endblock %}
 {% block body_class %}page-dash{% endblock %}
-{% block content %}
+{% block pane_content %}
+<div class="pane-content scrolls">
 <div class="dash">
   <header class="dash-head">
-    <div class="brand small">
-      <span class="brand-logo" aria-hidden="true">✈️</span>
-      <span class="brand-name">{{ t('web.title') }}</span>
-      <span class="muted">· {{ t('web.dash.title') }}</span>
-    </div>
+    {{ m.brand(t, '/chat', t('web.dash.title')) }}
     <div class="dash-actions">
       <label class="opt">{{ t('web.dash.period') }}
         <select id="days">
@@ -17,10 +16,8 @@
           <option value="90">90</option>
         </select>
       </label>
-      <a class="btn ghost small" href="/chat">← {{ t('web.chat.title') }}</a>
-      <nav class="lang-switch">
-        {% for l in langs %}<a href="?lang={{ l }}" class="{% if l == lang %}active{% endif %}">{{ l|upper }}</a>{% endfor %}
-      </nav>
+      <a class="btn ghost small" href="/chat">{{ m.icon("arrow-left") }} {{ t('web.chat.title') }}</a>
+      {{ m.lang_switch(t, langs, lang) }}
     </div>
   </header>
 
@@ -46,7 +43,7 @@
     </div>
     <div class="card">
       <h3>{{ t('web.dash.chart_ratings') }}</h3>
-      <div class="legend"><span><i class="sw good"></i>👍</span><span><i class="sw bad"></i>👎</span></div>
+      <div class="legend"><span><i class="sw good"></i>{{ m.icon("thumbs-up") }}</span><span><i class="sw bad"></i>{{ m.icon("thumbs-down") }}</span></div>
       <div class="chart" id="chart-ratings"></div>
     </div>
     <div class="card">
@@ -127,5 +124,6 @@
     </div>
   </section>
 </div>
+</div>
 {% endblock %}
-{% block scripts %}<script src="/static/dashboard.js"></script><script src="/static/alerts.js"></script>{% endblock %}
+{% block scripts %}{{ super() }}<script src="{{ asset('dashboard.js') }}"></script><script src="{{ asset('alerts.js') }}"></script>{% endblock %}
