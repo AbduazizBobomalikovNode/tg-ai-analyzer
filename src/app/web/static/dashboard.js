@@ -82,14 +82,16 @@
       rows.map((r) => `<tr>${cols.map((c) => `<td class="${c.num ? "num" : ""}">${esc(c.fmt ? c.fmt(r[c.key], r) : r[c.key] ?? "—")}</td>`).join("")}</tr>`).join("");
   }
 
-  const stars = (v) => v == null ? "—" : "★".repeat(Math.round(v)) + "☆".repeat(5 - Math.round(v)) + ` ${Number(v).toFixed(1)}`;
+  // Reyting: emoji/yulduzcha o'rniga son + sprite (ekran o'quvchi emojini
+  // ism deb o'qiydi va platformalarda har xil ko'rinadi — `docs/ui-v2.md` § 7).
+  const stars = (v) => v == null ? "—" : `${Number(v).toFixed(1)} / 5`;
 
   let last = null;
   function drawCharts(ov) {
     const c1 = cssVar("--series-1"), c2 = cssVar("--series-2"), good = cssVar("--good"), bad = cssVar("--bad");
     barChart($("chart-requests"), ov.daily, [{ key: "requests", color: c1, label: t("web.dash.requests") }]);
     barChart($("chart-tokens"), ov.daily, [{ key: "tokens_in", color: c1, label: t("web.dash.tokens_in") }, { key: "tokens_out", color: c2, label: t("web.dash.tokens_out") }], { stacked: true });
-    barChart($("chart-ratings"), ov.daily, [{ key: "up", color: good, label: "👍" }, { key: "down", color: bad, label: "👎" }], { stacked: false });
+    barChart($("chart-ratings"), ov.daily, [{ key: "up", color: good, label: t("web.chat.rate_up") }, { key: "down", color: bad, label: t("web.chat.rate_down") }], { stacked: false });
   }
   async function load() {
     const days = +$("days").value;
@@ -117,7 +119,7 @@
     set("latency", ms(T.latency_p50_ms));
     set("latency_sub", `${t("web.dash.avg")} ${ms(T.latency_avg_ms)}`);
     set("satisfaction", T.satisfaction == null ? "—" : T.satisfaction + "%");
-    set("satisfaction_sub", `👍 ${T.up} · 👎 ${T.down} · ${t("web.dash.rated", { n: T.rated, total: T.requests })}`);
+    set("satisfaction_sub", `${t("web.chat.rate_up")} ${T.up} · ${t("web.chat.rate_down")} ${T.down} · ${t("web.dash.rated", { n: T.rated, total: T.requests })}`);
     set("auto", T.auto_relevance == null ? "—" : `${T.auto_relevance.toFixed(1)} / 5`);
     set("auto_sub", T.auto_relevance == null ? t("web.dash.auto_none") : `${t("web.dash.usefulness")} ${T.auto_usefulness?.toFixed(1)} · ${t("web.dash.ungrounded")} ${T.ungrounded}/${T.auto_evaluated}`);
 
@@ -160,7 +162,7 @@
     ], ov.top_chats);
 
     $("review").innerHTML = ov.review.length ? ov.review.map((r) => `
-      <li><a href="/chat#c${r.conversation_id}"><b>${r.rating === -1 ? "👎" : ""}${r.auto_relevance != null ? ` ★${r.auto_relevance}` : ""}</b> ${esc(r.excerpt)}</a>
+      <li><a href="/ask#c${r.conversation_id}"><b>${r.rating === -1 ? ico("thumbs-down") : ""}${r.auto_relevance != null ? ` ${esc(String(r.auto_relevance))}/5` : ""}</b> ${esc(r.excerpt)}</a>
       <div class="muted small">${esc(r.model || "")} · ${esc((r.created_at || "").slice(0, 16).replace("T", " "))}${r.comment ? ` · “${esc(r.comment)}”` : ""}${r.auto_note ? ` · ${esc(r.auto_note)}` : ""}</div></li>`).join("")
       : `<li class="muted">${esc(t("web.dash.review_empty"))}</li>`;
   }

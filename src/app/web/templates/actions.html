@@ -1,0 +1,68 @@
+{% extends "_shell.html" %}
+{% import "_macros.html" as m %}
+{% set nav_current = "actions" %}
+{% block title %}{{ t('web.actions.title') }} · {{ t('web.title') }}{% endblock %}
+{% block body_class %}page-actions{% endblock %}
+
+{% block head %}{{ super() }}
+  <link rel="stylesheet" href="{{ asset('css/pages/actions.css') }}">
+{% endblock %}
+
+{% block topbar %}
+<header class="topbar-v2">
+  <span class="topbar-h1">{{ t('web.actions.title') }}</span>
+  <span class="spacer"></span>
+  <button type="button" class="icon-btn-v2" id="act-refresh" aria-label="{{ t('web.actions.refresh') }}">{{ m.icon("refresh-cw") }}</button>
+  <button type="button" class="icon-btn-v2" data-theme-toggle aria-label="{{ t('web.theme.title') }}">{{ m.icon("monitor") }}</button>
+</header>
+{% endblock %}
+
+{% block pane_content %}
+<div class="pane-content scrolls">
+<div class="pane-inner page">
+
+  <div class="page-head">
+    <div>
+      <h1 class="page-title">{{ t('web.actions.title') }}</h1>
+      <p class="page-sub">{{ t('web.actions.subtitle') }}</p>
+    </div>
+  </div>
+
+  <div class="card-v2">
+    <div class="invariant-note">
+      {{ m.icon("shield-check") }}
+      <span>{{ t('web.actions.invariant') }}</span>
+    </div>
+  </div>
+
+  <section aria-labelledby="act-pending-h">
+    <div class="card-head">
+      <h2 id="act-pending-h">{{ t('web.actions.pending') }}</h2>
+      <span class="spacer"></span>
+      <span class="pill accent" id="act-count" data-actions-badge-mirror hidden>0</span>
+    </div>
+    <div class="actions-list" id="act-pending" aria-live="polite">{{ m.skeleton_rows(2, False) }}</div>
+  </section>
+
+  <section aria-labelledby="act-history-h">
+    <div class="card-head">
+      <h2 id="act-history-h">{{ t('web.actions.history') }}</h2>
+      <span class="spacer"></span>
+      <div class="segment actions-filters" id="act-filters" role="tablist" aria-label="{{ t('web.actions.history') }}">
+        <button type="button" role="tab" data-status="" aria-selected="true">{{ t('web.actions.filter_all') }}</button>
+        <button type="button" role="tab" data-status="executed" aria-selected="false">{{ t('web.act.status_executed') }}</button>
+        <button type="button" role="tab" data-status="rejected" aria-selected="false">{{ t('web.act.status_rejected') }}</button>
+        <button type="button" role="tab" data-status="failed" aria-selected="false">{{ t('web.act.status_failed') }}</button>
+        <button type="button" role="tab" data-status="blocked" aria-selected="false">{{ t('web.act.status_blocked') }}</button>
+      </div>
+    </div>
+    <div class="actions-list" id="act-history" aria-live="polite"></div>
+  </section>
+
+</div>
+</div>
+{% endblock %}
+
+{% block scripts %}{{ super() }}
+<script type="module" src="{{ asset('pages/actions.js') }}"></script>
+{% endblock %}

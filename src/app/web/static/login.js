@@ -7,7 +7,11 @@
     return v;
   };
   const $ = (id) => document.getElementById(id);
-  const steps = { phone: $("step-phone"), qr: $("step-qr"), code: $("step-code"), password: $("step-password"), done: $("step-done") };
+  // QR — asosiy yo'l (`CLAUDE.md`: "QR login — asosiy yo'l"). Telefon formasi
+  // QR kartasi ichidagi disclosure'da, shuning uchun u alohida qadam emas:
+  // qadam mashinasida faqat qr · code · password · done bor.
+  const steps = { qr: $("step-qr"), code: $("step-code"), password: $("step-password"), done: $("step-done") };
+  const openPhone = () => { const d = $("phone-fallback"); if (d) d.open = true; };
   const alertBox = $("alert");
   let flowId = null;
   let retryTimer = null;
@@ -88,11 +92,11 @@
     }
     if (err.code === "auth.err.flow_expired" || err.code === "auth.err.too_many_attempts" ||
         err.code === "auth.err.code_expired" || err.code === "auth.err.wrong_step") {
-      flowId = null; show("phone");
+      flowId = null; show("qr"); startQr();
     }
   }
 
-  steps.phone.addEventListener("submit", async (e) => {
+  $("step-phone").addEventListener("submit", async (e) => {
     e.preventDefault(); clearError();
     const btn = $("btn-phone"); busy(btn, true);
     try {
@@ -141,7 +145,7 @@
   document.querySelectorAll("[data-back]").forEach((b) => b.addEventListener("click", async () => {
     clearError(); stopQrPoll();
     if (flowId) { try { await api("/api/auth/cancel", { flow_id: flowId }); } catch (_) { /* ignore */ } }
-    flowId = null; show("phone");
+    flowId = null; show("qr"); startQr();
   }));
 
   // ── QR login ─────────────────────────────────────────────────────────────
@@ -152,7 +156,8 @@
 
   function stopQrPoll() { clearInterval(qrPoll); qrPoll = null; }
 
-  $("btn-qr").addEventListener("click", async () => {
+  /** QR oqimini boshlaydi (yoki yangilaydi). Xato bo'lsa telefon yo'li ochiladi. */
+  async function startQr() {
     clearError();
     const btn = $("btn-qr"); busy(btn, true);
     try {
@@ -161,9 +166,13 @@
       if (data.qr) $("qr-img").src = data.qr;
       show("qr");
       startQrPoll();
-    } catch (err) { handleError(err, btn); }
-    finally { busy(btn, false); }
-  });
+    } catch (err) {
+      handleError(err, btn);
+      openPhone();   // QR ishlamasa — telefon zaxira yo'li ko'rinib tursin
+    } finally { busy(btn, false); }
+  }
+
+  $("btn-qr").addEventListener("click", () => startQr());
 
   function startQrPoll() {
     stopQrPoll();
@@ -173,7 +182,7 @@
       try {
         data = await api("/api/auth/qr/poll", { flow_id: flowId });
       } catch (err) {
-        stopQrPoll(); handleError(err, null); show("phone"); return;
+        stopQrPoll(); handleError(err, null); show("qr"); return;
       }
       if (data.qr) $("qr-img").src = data.qr;       // token yangilangan bo'lsa
       if (data.error) $("qr-hint").textContent = t("auth.err.telegram");
@@ -188,6 +197,11 @@
   function finish() {
     show("done");
     $("password").value = ""; $("code").value = "";
-    setTimeout(() => { window.location.href = "/chat"; }, 700);
+    // `/` o'zi hal qiladi: onboarding tugamagan bo'lsa `/onboarding`, aks holda `/today`.
+    setTimeout(() => { window.location.href = "/"; }, 700);
   }
+
+  // QR-first: sahifa ochilishi bilan QR chiziladi, foydalanuvchi hech nima
+  // bosmaydi. Telefon formasi disclosure ichida yopiq turadi.
+  startQr();
 })();

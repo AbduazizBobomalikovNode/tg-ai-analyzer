@@ -19,19 +19,8 @@
 
     <div id="alert" class="alert" hidden></div>
 
-    <!-- 1. telefon -->
-    <form id="step-phone" class="step" autocomplete="on">
-      <label for="phone">{{ t('web.login.phone') }}</label>
-      <input id="phone" name="phone" type="tel" inputmode="tel" autocomplete="tel"
-             placeholder="+998 90 123 45 67" required autofocus>
-      <small class="hint">{{ t('web.login.phone_hint') }}</small>
-      <button type="submit" class="btn primary" id="btn-phone">{{ t('web.login.send_code') }}</button>
-      <div class="or"><span>{{ t('web.login.or') }}</span></div>
-      <button type="button" class="btn full" id="btn-qr">{{ t('web.login.qr_start') }}</button>
-    </form>
-
-    <!-- 1b. QR — telefon ham, kod ham kerak emas -->
-    <div id="step-qr" class="step" hidden>
+    <!-- 1. QR — asosiy yo'l: telefon ham, kod ham kerak emas -->
+    <div id="step-qr" class="step">
       <div class="qr-box"><img id="qr-img" alt="{{ t('web.login.qr_alt') }}" width="220" height="220"></div>
       <ol class="qr-steps">
         <li>{{ t('web.login.qr_step1') }}</li>
@@ -39,7 +28,19 @@
         <li>{{ t('web.login.qr_step3') }}</li>
       </ol>
       <small class="hint" id="qr-hint">{{ t('web.login.qr_waiting') }}</small>
-      <button type="button" class="btn link" data-back>{{ t('web.login.back') }}</button>
+      <button type="button" class="btn full" id="btn-qr">{{ m.icon("refresh-cw") }} {{ t('web.login.qr_refresh') }}</button>
+
+      <!-- Telefon zaxira yo'li — yopiq disclosure ichida -->
+      <details class="login-fallback" id="phone-fallback">
+        <summary>{{ t('web.login.phone_fallback') }}</summary>
+        <form id="step-phone" class="step" autocomplete="on">
+          <label for="phone">{{ t('web.login.phone') }}</label>
+          <input id="phone" name="phone" type="tel" inputmode="tel" autocomplete="tel"
+                 placeholder="+998 90 123 45 67" required>
+          <small class="hint">{{ t('web.login.phone_hint') }}</small>
+          <button type="submit" class="btn primary" id="btn-phone">{{ t('web.login.send_code') }}</button>
+        </form>
+      </details>
     </div>
 
     <!-- 2. kod -->
@@ -67,7 +68,7 @@
     <footer class="fineprint">
       <p>{{ m.icon("lock") }} {{ t('web.login.security_note') }}</p>
       <p>{{ m.icon("alert-triangle") }} {{ t('web.login.tos_note') }}</p>
-      {% if logged_in %}<p><a href="/chat">{{ m.icon("arrow-right") }} {{ t('web.chat.title') }}</a></p>{% endif %}
+      {% if logged_in %}<p><a href="/">{{ m.icon("arrow-right") }} {{ t('web.today.title') }}</a></p>{% endif %}
     </footer>
   </div>
 </main>

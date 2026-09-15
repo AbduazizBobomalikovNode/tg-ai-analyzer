@@ -1,0 +1,86 @@
+{% extends "_shell.html" %}
+{% import "_macros.html" as m %}
+{% set nav_current = "today" %}
+{% block title %}{{ t('web.today.title') }} · {{ t('web.title') }}{% endblock %}
+{% block body_class %}page-today{% endblock %}
+
+{% block head %}{{ super() }}
+  <link rel="stylesheet" href="{{ asset('css/pages/today.css') }}">
+{% endblock %}
+
+{% block topbar %}
+<header class="topbar-v2">
+  <span class="topbar-h1">{{ t('web.today.title') }}</span>
+  <span class="spacer"></span>
+  <button type="button" class="icon-btn-v2" data-cmdk-open aria-label="{{ t('web.cmd.open') }}">{{ m.icon("search") }}</button>
+  <button type="button" class="icon-btn-v2" data-theme-toggle aria-label="{{ t('web.theme.title') }}">{{ m.icon("monitor") }}</button>
+</header>
+{% endblock %}
+
+{% block pane_content %}
+<div class="pane-content scrolls">
+<div class="pane-inner page">
+
+  {# Salomlashish — matnni JS soatga qarab qo'yadi (server keshlanadi). #}
+  <div class="today-greet">
+    <h1 class="page-title" id="today-greeting">{{ t('web.today.title') }}</h1>
+    <span class="today-date" id="today-date"></span>
+  </div>
+
+  {# Sync holati / uzilgan akkaunt bandi — JS to'ldiradi, bo'sh bo'lsa yashirin #}
+  <div id="today-sync" hidden></div>
+
+  <div class="today-grid">
+    <div class="today-col">
+
+      {# ── Briefing ── #}
+      <section class="card-v2" aria-labelledby="brief-h">
+        <div class="card-head">
+          {{ m.icon("inbox") }}
+          <h2 id="brief-h">{{ t('web.today.briefing') }}</h2>
+          <span class="spacer"></span>
+          <span class="pill" id="brief-badge" hidden></span>
+        </div>
+        <div id="brief-card" aria-live="polite">{{ m.skeleton_rows(2, False) }}</div>
+      </section>
+
+      {# ── So'rang ── #}
+      <section class="card-v2" aria-labelledby="ask-h">
+        <div class="card-head">
+          {{ m.icon("sparkles") }}
+          <h2 id="ask-h">{{ t('web.today.ask') }}</h2>
+        </div>
+        <form class="ask-box" id="today-ask" autocomplete="off">
+          <input type="text" id="today-q" maxlength="500"
+                 placeholder="{{ t('web.today.ask_placeholder') }}"
+                 aria-label="{{ t('web.today.ask_placeholder') }}">
+          <button type="submit" class="btn primary">{{ m.icon("arrow-right") }}<span class="sr-only">{{ t('web.chat.send') }}</span></button>
+        </form>
+        <div class="chips" id="today-suggests" style="margin-block-start: var(--s-3)"></div>
+      </section>
+
+      {# ── Tez plitalar ── #}
+      <div class="tiles-v2" id="today-tiles" aria-live="polite"></div>
+    </div>
+
+    <div class="today-col">
+      {# ── Alert lentasi ── #}
+      <section class="card-v2" aria-labelledby="feed-h">
+        <div class="card-head">
+          {{ m.icon("bell") }}
+          <h2 id="feed-h">{{ t('web.today.alerts') }}</h2>
+          <span class="spacer"></span>
+          <a class="btn ghost small" href="/alerts">{{ t('web.today.alerts_manage') }}</a>
+        </div>
+        <div id="today-feed" aria-live="polite">{{ m.skeleton_rows(4) }}</div>
+      </section>
+    </div>
+  </div>
+
+</div>
+</div>
+{% endblock %}
+
+{% block scripts %}{{ super() }}
+<script type="module" src="{{ asset('pages/today.js') }}"></script>
+{% endblock %}

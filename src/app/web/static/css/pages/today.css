@@ -1,0 +1,50 @@
+/* pages/today.css — `/today` (uy ekrani).
+ *
+ * Mobilda kartalar bitta ustunda, desktopda ikki ustun: chapda briefing va
+ * "so'rang", o'ngda alert lentasi (`docs/ui-v2.md` § 3.5).
+ */
+
+.today-grid { display: grid; gap: var(--s-4); align-items: start; }
+
+@media (min-width: 861px) {
+  .today-grid { grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); }
+  .today-col { display: grid; gap: var(--s-4); align-content: start; min-inline-size: 0; }
+}
+
+.today-greet { display: grid; gap: var(--s-1); }
+.today-date { font-size: var(--fs-sm); color: var(--muted); }
+
+/* ── Briefing kartasi ────────────────────────────────────────────────── */
+.brief-tldr { font-size: var(--fs-md); line-height: var(--lh-answer); }
+.brief-tldr > :first-child { margin-block-start: 0; }
+.brief-tldr > :last-child { margin-block-end: 0; }
+.brief-sections { display: grid; gap: var(--s-2); margin-block-start: var(--s-3); }
+.brief-sections details {
+  border: 1px solid var(--border-soft); border-radius: var(--r-md, 12px);
+  background: var(--panel-2); padding: var(--s-2) var(--s-3);
+}
+.brief-sections summary {
+  cursor: pointer; font-weight: 600; font-size: var(--fs-sm);
+  min-block-size: 28px; display: flex; align-items: center; gap: var(--s-2);
+}
+.brief-sections .brief-body { margin-block-start: var(--s-2); font-size: var(--fs-sm); line-height: var(--lh-body); }
+.brief-foot { display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap; margin-block-start: var(--s-3); }
+
+/* ── Alert lentasi ───────────────────────────────────────────────────── */
+.feed { display: grid; gap: var(--s-1); }
+.feed-item { align-items: flex-start; }
+.feed-item .row-body { gap: var(--s-1); }
+.feed-snippet {
+  font-size: var(--fs-sm); color: var(--text); line-height: var(--lh-body);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  white-space: normal;
+}
+
+/* ── "So'rang" maydoni ───────────────────────────────────────────────── */
+.ask-box { display: flex; gap: var(--s-2); align-items: stretch; }
+.ask-box input { flex: 1 1 auto; min-inline-size: 0; }
+.ask-box .btn { flex: none; }
+
+/* ── Sync holati ─────────────────────────────────────────────────────── */
+.sync-strip { display: grid; gap: var(--s-2); }
+.sync-strip .sync-line { display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap; font-size: var(--fs-sm); }
