@@ -1441,3 +1441,76 @@ async def test_hydrate_filters_deleted_and_other_accounts() -> None:
     sql = seen[0]
     assert "deleted_at IS NULL" in sql
     assert "chats.account_id" in sql
+
+
+# ─── F3/M4: sitata naqshi — zararsizlantirish ↔ ajratish ────────────────────
+#
+# Naqsh ikki joyda ishlatiladi: `untrusted.neutralize` uni **o'ldiradi**,
+# `deep_search` esa javobdan **ajratadi**. Ikkita nusxa bo'lganda ular bir
+# xil emasdi (biri `\b` bilan, ikkinchisi usiz) va begona matndagi `#c1m42x`
+# konvertdan o'tib, ajratuvchiga `c1m42` bo'lib ko'rinardi.
+
+
+def test_citation_pattern_has_a_single_definition() -> None:
+    from app.services import untrusted as U
+
+    assert DS._CITE_RE is U.CITE_TOKEN_RE
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["#c1m42x", "#x7q", "foo#c1m2", "#c1m42", "#x7", "salom #c12m345 dedi"],
+)
+def test_neutralize_kills_every_token_the_extractor_would_see(raw: str) -> None:
+    from app.services.untrusted import neutralize
+
+    assert DS._CITE_RE.findall(neutralize(raw)) == []
+
+
+def test_extraction_still_finds_clean_tokens() -> None:
+    """Zararsizlantirilmagan (model yozgan) javobdan token normal ajraladi."""
+    assert DS._CITE_RE.findall("javob #c1m42 va #x7 haqida") == ["c1m42", "x7"]
+
+
+# ─── F3/M6: usage-flush vazifasi — havola saqlanadi, xato log'ga tushadi ────
+
+
+async def test_usage_flush_failure_is_logged_and_does_not_raise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hisob yozilmasa ham so'rov yiqilmaydi, lekin **jimgina** ham qolmaydi.
+
+    Ilgari bu yo'l `contextlib.suppress(Exception)` edi: kunlik byudjet
+    jimgina kam ko'rsatardi va sababi loglarda ko'rinmasdi.
+    """
+    import asyncio
+
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    class _Log:
+        def warning(self, event: str, **kw: Any) -> None:
+            events.append((event, kw))
+
+        def __getattr__(self, _name: str) -> Any:
+            return lambda *a, **kw: None
+
+    async def _boom(*a: Any, **kw: Any) -> None:
+        raise RuntimeError("DB yo'q")
+
+    async def _pipeline(*a: Any, **kw: Any) -> Any:
+        state = kw["state"]
+        state["user_id"] = 5
+        kw["meter"].tokens_in = 100
+        raise DS.DeepSearchError("boom")
+
+    monkeypatch.setattr(DS, "log", _Log())
+    monkeypatch.setattr(DS, "_persist_usage", _boom)
+    monkeypatch.setattr(DS, "_run_pipeline", _pipeline)
+
+    with pytest.raises(DS.DeepSearchError):
+        await DS.run_deep_search(None, 1, 2, "savol", llm=object())  # type: ignore[arg-type]
+
+    assert [e for e, _ in events] == ["deep.usage_flush_failed"]
+    # Vazifa to'plamdan done-callback bilan chiqarilgan (sizib qolmaydi).
+    await asyncio.sleep(0)
+    assert DS._USAGE_FLUSHES == set()

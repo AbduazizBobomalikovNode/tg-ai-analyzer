@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -115,12 +115,25 @@ async def get_conversation(
     return conv
 
 
+#: Uzilgan deep yugurishning **hisob qatori**: `context={"aborted": true}`
+#: (`deep_search._persist_usage`). U suhbat emas — sarflangan tokenni kunlik
+#: byudjetga kiritish uchun yozilgan `assistant` qatori, matni bo'sh yoki
+#: yarim. M7: filtr **serverda** — ilgari faqat `web/static/chat.js` da edi,
+#: ya'ni API uni baribir berardi va LLM tarixi (`send_message`) uni model
+#: kontekstiga qo'shardi (yarim javob → "o'zimni takrorlayapman" effekti).
+#: `limits.daily_usage` bu qatorni **baribir sanaydi** — u
+#: `conversation_messages` ni to'g'ridan-to'g'ri yig'adi, `list_messages` dan
+#: o'tmaydi (`services/limits.py::daily_usage`).
+_NOT_ABORTED = func.coalesce(ConversationMessage.context["aborted"].astext, "") != "true"
+
+
 async def list_messages(
     session: AsyncSession, conversation_id: int, *, limit: int = 200
 ) -> list[ConversationMessage]:
+    """Suhbat qatorlari (eskidan yangiga). Uzilgan hisob qatorlari chiqmaydi."""
     rows = await session.execute(
         select(ConversationMessage)
-        .where(ConversationMessage.conversation_id == conversation_id)
+        .where(ConversationMessage.conversation_id == conversation_id, _NOT_ABORTED)
         .order_by(ConversationMessage.id.desc())
         .limit(limit)
     )

@@ -21,6 +21,8 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.sql.expression import Insert
 
 from app.db.models import Chat, ChatDigest, RetrievalNode
 from app.llm import Task, Usage
@@ -72,6 +74,21 @@ class _Result:
         return list(self._rows)
 
 
+def _insert_rows(stmt: Any, key: str) -> list[tuple[Any, str]]:
+    """Ko'p qatorli INSERT'dan `(id, model)` juftliklarini ajratadi.
+
+    SQLAlchemy `values([...])` parametrlarini `<ustun>_m<i>` deb nomlaydi —
+    bitta qatorli INSERT'da ham.
+    """
+    params = stmt.compile().params
+    out: list[tuple[Any, str]] = []
+    i = 0
+    while f"{key}_m{i}" in params:
+        out.append((params[f"{key}_m{i}"], params[f"model_m{i}"]))
+        i += 1
+    return out
+
+
 class _FakeSession:
     """Navbatdagi natijalarni qaytaradi, bajarilgan SQL matnini saqlaydi."""
 
@@ -80,11 +97,20 @@ class _FakeSession:
         self.sql: list[str] = []
         self.chat = chat
         self.added: list[Any] = []
+        #: `(id, model)` juftliklari — `on_conflict_do_nothing` bilan yozilgan.
+        self.inserted: list[tuple[Any, str]] = []
 
     async def get(self, _model: Any, _pk: int) -> Any:
         return self.chat
 
     async def execute(self, stmt: Any) -> _Result:
+        # F3/H1: vektorlar endi `pg_insert(...).on_conflict_do_nothing()` bilan
+        # yoziladi (PK `(node_id, model)`), `add_all()` bilan emas. `ON CONFLICT`
+        # faqat postgresql dialektida renderlanadi.
+        if isinstance(stmt, Insert):
+            self.sql.append(str(stmt.compile(dialect=postgresql.dialect())))
+            self.inserted.extend(_insert_rows(stmt, "node_id"))
+            return _Result([])
         self.sql.append(str(stmt))
         return _Result(self.queue.pop(0) if self.queue else [])
 
@@ -143,10 +169,10 @@ async def test_embed_nodes_uses_document_task_type() -> None:
     rep = await N.embed_nodes(session, llm)  # type: ignore[arg-type]
     assert llm.task_types == ["RETRIEVAL_DOCUMENT"]
     assert rep.embedded == 2 and rep.pending == 0
-    assert [type(o).__name__ for o in session.added] == [
-        "RetrievalNodeEmbedding",
-        "RetrievalNodeEmbedding",
-    ]
+    # F3/H1: `(node_id, model)` juftligi bilan yoziladi — model kalitning bir
+    # qismi, shuning uchun boshqa modeldagi qator ustidan yozilmaydi.
+    assert session.inserted == [(101, "gemini-embedding-001"), (102, "gemini-embedding-001")]
+    assert "ON CONFLICT (node_id, model) DO NOTHING" in session.sql[-1]
     assert llm.batches[0][0].startswith("[chat: Ish guruhi")
 
 
@@ -154,14 +180,16 @@ async def test_embed_nodes_drops_misaligned_batch() -> None:
     """Vektorlar soni mos kelmasa — hech narsa yozilmaydi (0-bosqich qoidasi)."""
     session = _FakeSession([_node(1), _node(2)])
     rep = await N.embed_nodes(session, _FakeLLM(vectors=1))  # type: ignore[arg-type]
-    assert rep.embedded == 0 and not session.added
+    assert rep.embedded == 0 and not session.added and not session.inserted
 
 
 async def test_embed_nodes_stops_on_model_mismatch() -> None:
     """Boshqa model nomi qaytsa — to'xtaydi, aks holda cheksiz qayta embed."""
     session = _FakeSession([_node(1)])
     rep = await N.embed_nodes(session, _FakeLLM(model="gemini-embedding-2"))  # type: ignore[arg-type]
-    assert rep.embedded == 0 and "mismatch" in rep.error and not session.added
+    assert (
+        rep.embedded == 0 and "mismatch" in rep.error and not session.added and not session.inserted
+    )
 
 
 async def test_embed_nodes_filters_by_current_model() -> None:

@@ -228,9 +228,21 @@ def embed_model_name() -> str:
     `message_embeddings.model` / `retrieval_node_embeddings.model` filtrlari
     uchun **yagona manba**: model o'zgarsa eski qatorlar joyida qoladi, yangi
     fazoga tegishli qatorlar esa alohida yoziladi — ikki fazo aralashmaydi.
+
+    Ustuvorlik `resolve(Task.EMBED)` bilan **bir xil** bo'lishi shart (M5):
+
+      1. `LLM_TASK_EMBED` ning model qismi (`provider:model`) — u `resolve`
+         da eng ustuvor, shuning uchun bu yerda ham;
+      2. `LLM_MODEL_EMBED`;
+      3. `EMBED_MODEL` (config defaulti).
+
+    Ilgari 1-band yo'q edi: `LLM_TASK_EMBED=gemini:gemini-embedding-2` bilan
+    router bir model bilan embed qilar, filtr esa boshqasini qidirardi — yangi
+    qatorlar yozilaverib, qidiruv esa **bo'sh** qaytarardi.
     """
     s = get_settings()
-    return (s.llm_model_embed or "").strip() or s.embed_model
+    _, _, spec_model = _spec_for(Task.EMBED).partition(":")
+    return spec_model.strip() or (s.llm_model_embed or "").strip() or s.embed_model
 
 
 def _model_override(task: Task) -> str:

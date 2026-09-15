@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -50,7 +50,16 @@ from app.db.models import (
     RetrievalNode,
     RetrievalNodeEmbedding,
 )
-from app.llm import EMBED_DOCUMENT, BatchState, Capability, LLMError, Task, resolve
+from app.llm import (
+    EMBED_DOCUMENT,
+    BaseProvider,
+    BatchState,
+    Capability,
+    LLMError,
+    Task,
+    embed_model_name,
+    resolve,
+)
 from app.llm.pricing import estimate_cost
 from app.logging import get_logger
 from app.services.nodes import embed_payload
@@ -98,7 +107,7 @@ class PollReport:
 # ─── provider ────────────────────────────────────────────────────────────────
 
 
-def _provider_for_batch() -> tuple[Any, str]:
+def _provider_for_batch() -> tuple[BaseProvider, str]:
     """`Task.EMBED` provideri, agar u batch ham qila olsa.
 
     Qila olmasa `LLMError` — chaqiruvchi sinxron yo'lga tushadi. Jimgina
@@ -209,19 +218,40 @@ async def _submit(
 
 
 async def submit_messages(
-    session: AsyncSession, *, limit: int | None = None, account_id: int | None = None
+    session: AsyncSession,
+    *,
+    limit: int | None = None,
+    account_id: int | None = None,
+    skip_accounts: set[int] | None = None,
 ) -> SubmitReport:
-    """Vektori yo'q xabarlarni bitta batch jobga yuboradi."""
+    """Vektori yo'q xabarlarni bitta batch jobga yuboradi.
+
+    Tanlov sharti `worker/tasks.embed_messages` bilan **bir xil**: "**joriy
+    model** bo'yicha vektori yo'q". Ilgari bu yerda "umuman vektori yo'q" edi
+    — `EMBED_MODEL` almashtirilganda batch yo'li hech narsa topmasdi, sinxron
+    yo'l esa topardi, ya'ni ikkala rejim boshqa javob berardi (F3/H1).
+
+    `skip_accounts` — kunlik byudjeti tugagan egalarning akkauntlari (M3).
+    """
     s = get_settings()
+    want_model = embed_model_name()
+    skip = sorted(skip_accounts or ())
     q = (
         select(Message.id, Message.text)
         .join(Chat, Chat.id == Message.chat_id)
-        .outerjoin(MessageEmbedding, MessageEmbedding.message_id == Message.id)
+        .outerjoin(
+            MessageEmbedding,
+            and_(
+                MessageEmbedding.message_id == Message.id,
+                MessageEmbedding.model == want_model,
+            ),
+        )
         .where(
             MessageEmbedding.message_id.is_(None),
             Chat.synced_total > 0,
             func.length(Message.text) >= EMBED_MIN_CHARS,
             ~_inflight(KIND_MESSAGES, Message.id),
+            *([Chat.account_id.not_in(skip)] if skip else []),
         )
         .order_by(Message.id.desc())
         .limit(limit or s.embed_batch_max_items)
@@ -238,10 +268,18 @@ async def submit_messages(
     return await _submit(session, kind=KIND_MESSAGES, items=items, account_id=account_id)
 
 
-async def submit_nodes(session: AsyncSession, *, limit: int | None = None) -> SubmitReport:
-    """Vektori yo'q retrieval tugunlarini bitta batch jobga yuboradi."""
+async def submit_nodes(
+    session: AsyncSession, *, limit: int | None = None, skip_accounts: set[int] | None = None
+) -> SubmitReport:
+    """Vektori yo'q retrieval tugunlarini bitta batch jobga yuboradi.
+
+    `embed_model_name()` — `nodes.embed_nodes` bilan **bitta** manba
+    (`s.embed_model` `LLM_TASK_EMBED` / `LLM_MODEL_EMBED` override'ini
+    ko'rmasdi). `skip_accounts` — byudjeti tugagan egalar (M3).
+    """
     s = get_settings()
-    want_model = s.embed_model
+    want_model = embed_model_name()
+    skip = sorted(skip_accounts or ())
     missing = (
         ~select(RetrievalNodeEmbedding.node_id)
         .where(
@@ -258,6 +296,7 @@ async def submit_nodes(session: AsyncSession, *, limit: int | None = None) -> Su
                     missing,
                     func.length(RetrievalNode.text) > 0,
                     ~_inflight(KIND_NODES, RetrievalNode.id),
+                    *([RetrievalNode.account_id.not_in(skip)] if skip else []),
                 )
                 .order_by(RetrievalNode.id.desc())
                 .limit(limit or s.embed_batch_max_items)
@@ -300,81 +339,130 @@ async def poll_batches(session: AsyncSession, *, limit: int | None = None) -> Po
 
     for row in rows:
         rep.checked += 1
+        # L11: har job **o'z savepoint'ida**. Bittasida kutilmagan istisno
+        # bo'lsa (DB xatosi, SDK shakli o'zgargan) faqat o'sha jobning
+        # o'zgarishlari qaytariladi — qolganlari yozilgan holicha qoladi.
+        # Ilgari bitta istisno butun tranzaksiyani (va boshqa joblarning
+        # yozilgan vektorlarini) uchirib yuborardi.
         try:
-            status = await provider.embed_batch_poll(row.job_name)
-        except LLMError as exc:
-            log.warning("embed_batch.poll_failed", job=row.job_name, error=str(exc)[:200])
-            continue
-
-        if not status.done:
-            # PENDING → RUNNING o'tishi ham yoziladi: dashboardda job
-            # qotib qolganini ko'rish uchun.
-            if status.state is BatchState.RUNNING and row.status != EmbedBatchStatus.RUNNING:
-                row.status = EmbedBatchStatus.RUNNING
-            rep.still_running += 1
-            continue
-
-        if status.state is not BatchState.SUCCEEDED:
-            _fail(
-                row,
-                status.state.value,
-                status.error or status.raw_state,
-                s.embed_batch_max_attempts,
-            )
-            rep.failed += 1
-            rep.permanent += int(row.status == EmbedBatchStatus.FAILED_PERMANENT)
-            continue
-
-        try:
-            result = await provider.embed_batch_fetch(row.job_name)
-        except LLMError as exc:
-            _fail(row, EmbedBatchStatus.FAILED, str(exc)[:200], s.embed_batch_max_attempts)
-            rep.failed += 1
-            rep.permanent += int(row.status == EmbedBatchStatus.FAILED_PERMANENT)
-            continue
-
-        item_ids = list(row.item_ids or [])
-        if len(result.vectors) != len(item_ids):
-            # Qat'iy: yarim yozish vektorni boshqa elementga tushirardi.
-            log.error(
-                "embed_batch.misaligned",
+            async with session.begin_nested():
+                await _poll_one(
+                    session, provider, row, rep, max_attempts=s.embed_batch_max_attempts
+                )
+        except Exception as exc:  # bitta job qolganini to'xtatmasin
+            log.warning(
+                "embed_batch.poll_job_failed",
                 job=row.job_name,
-                expected=len(item_ids),
-                got=len(result.vectors),
-                model=result.model,
+                kind=row.kind,
+                error=str(exc)[:200],
             )
-            _fail(
-                row,
-                EmbedBatchStatus.FAILED,
-                f"misaligned: {len(item_ids)} != {len(result.vectors)}",
-                s.embed_batch_max_attempts,
-            )
-            rep.failed += 1
-            rep.permanent += int(row.status == EmbedBatchStatus.FAILED_PERMANENT)
-            continue
-
-        written = await _write_vectors(session, row.kind, item_ids, result.vectors, result.model)
-        row.status = EmbedBatchStatus.SUCCEEDED
-        row.completed_at = datetime.now(UTC)
-        # Narx qoidasi: API **qaytargan** model nomi.
-        row.model = result.model or row.model
-        row.cost_usd = (
-            estimate_cost(result.provider, row.model, result.usage.tokens_in, 0, batch=True) or 0.0
-        )
-        row.error = None
-        rep.succeeded += 1
-        rep.written += written
-        log.info(
-            "embed_batch.written",
-            job=row.job_name,
-            kind=row.kind,
-            items=written,
-            model=row.model,
-            cost_usd=row.cost_usd,
-        )
 
     await session.flush()
     return rep
+
+
+def _base_name(model: str) -> str:
+    """`models/gemini-embedding-001` → `gemini-embedding-001` (taqqoslash uchun)."""
+    return model.split("/")[-1].strip().lower()
+
+
+async def _poll_one(
+    session: AsyncSession,
+    provider: BaseProvider,
+    row: EmbedBatch,
+    rep: PollReport,
+    *,
+    max_attempts: int,
+) -> None:
+    """Bitta jobning holatini o'qiydi va tugagan bo'lsa vektorlarini yozadi."""
+    try:
+        status = await provider.embed_batch_poll(row.job_name)
+    except LLMError as exc:
+        log.warning("embed_batch.poll_failed", job=row.job_name, error=str(exc)[:200])
+        return
+
+    if not status.done:
+        # PENDING → RUNNING o'tishi ham yoziladi: dashboardda job
+        # qotib qolganini ko'rish uchun.
+        if status.state is BatchState.RUNNING and row.status != EmbedBatchStatus.RUNNING:
+            row.status = EmbedBatchStatus.RUNNING
+        rep.still_running += 1
+        return
+
+    if status.state is not BatchState.SUCCEEDED:
+        _fail(row, status.state.value, status.error or status.raw_state, max_attempts)
+        rep.failed += 1
+        rep.permanent += int(row.status == EmbedBatchStatus.FAILED_PERMANENT)
+        return
+
+    try:
+        # H2: **so'ralgan** model provider'ga uzatiladi — javobda model nomi
+        # bo'lmasa u shu nomga qaytadi (aks holda `normalize_vectors("")`
+        # normallashtirishni jimgina o'tkazib yuborardi).
+        result = await provider.embed_batch_fetch(row.job_name, model=row.model)
+    except LLMError as exc:
+        _fail(row, EmbedBatchStatus.FAILED, str(exc)[:200], max_attempts)
+        rep.failed += 1
+        rep.permanent += int(row.status == EmbedBatchStatus.FAILED_PERMANENT)
+        return
+
+    # H2: model **bir marta** hal qilinadi. Bo'sh javob → yuborilgan model
+    # (qator hech qachon `model=''` bilan yozilmaydi: bunday qator qidiruv
+    # filtridan hech qachon o'tmaydi va abadiy "yetishmayotgan" bo'lib qolardi).
+    model = result.model or row.model
+    if result.model and _base_name(result.model) != _base_name(row.model):
+        # Boshqa model = boshqa vektor fazasi. Yozish o'rniga xato: aralash
+        # faza cosine ostonalarini jimgina buzardi.
+        log.error("embed_batch.model_mismatch", job=row.job_name, want=row.model, got=result.model)
+        _fail(
+            row,
+            EmbedBatchStatus.FAILED,
+            f"model mismatch: want {row.model}, got {result.model}",
+            max_attempts,
+        )
+        rep.failed += 1
+        rep.permanent += int(row.status == EmbedBatchStatus.FAILED_PERMANENT)
+        return
+
+    item_ids = list(row.item_ids or [])
+    if len(result.vectors) != len(item_ids):
+        # Qat'iy: yarim yozish vektorni boshqa elementga tushirardi.
+        log.error(
+            "embed_batch.misaligned",
+            job=row.job_name,
+            expected=len(item_ids),
+            got=len(result.vectors),
+            model=model,
+        )
+        _fail(
+            row,
+            EmbedBatchStatus.FAILED,
+            f"misaligned: {len(item_ids)} != {len(result.vectors)}",
+            max_attempts,
+        )
+        rep.failed += 1
+        rep.permanent += int(row.status == EmbedBatchStatus.FAILED_PERMANENT)
+        return
+
+    written = await _write_vectors(session, row.kind, item_ids, result.vectors, model)
+    row.status = EmbedBatchStatus.SUCCEEDED
+    row.completed_at = datetime.now(UTC)
+    # Narx qoidasi: API **qaytargan** model nomi (bo'sh bo'lsa yuborilgani).
+    row.model = model
+    row.cost_usd = (
+        estimate_cost(result.provider, row.model, result.usage.tokens_in, 0, batch=True) or 0.0
+    )
+    row.error = None
+    rep.succeeded += 1
+    rep.written += written
+    log.info(
+        "embed_batch.written",
+        job=row.job_name,
+        kind=row.kind,
+        items=written,
+        model=row.model,
+        cost_usd=row.cost_usd,
+    )
 
 
 def _fail(row: EmbedBatch, state: str, error: str, max_attempts: int) -> None:
@@ -409,6 +497,11 @@ async def _write_vectors(
     Batch uchayotganda o'sha element sinxron yo'l bilan ham embed qilinishi
     mumkin edi (rejim `sync` ga qaytarilgan bo'lsa). `ON CONFLICT DO NOTHING`
     — birinchi yozilgani qoladi, ikkinchisi jimgina tushadi.
+
+    Konflikt kaliti `(id, model)` — PK bilan bir xil (migratsiya 0016).
+    Faqat `id` bo'lganda boshqa modeldagi mavjud qator bu batchni jimgina
+    yeb qo'yardi: vektor **hech qachon** yozilmasdi va job baribir
+    `SUCCEEDED` bo'lardi.
     """
     if not item_ids:
         return 0
@@ -424,5 +517,5 @@ async def _write_vectors(
             for item_id, vec in zip(item_ids, vectors, strict=True)
         ]
     )
-    await session.execute(stmt.on_conflict_do_nothing(index_elements=[key]))
+    await session.execute(stmt.on_conflict_do_nothing(index_elements=[key, "model"]))
     return len(item_ids)

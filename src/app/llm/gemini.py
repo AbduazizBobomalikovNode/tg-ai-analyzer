@@ -293,7 +293,7 @@ class GeminiProvider(BaseProvider):
         resp = await self._batch_get(job, "embed_batch_poll")
         return _batch_status(resp, job)
 
-    async def embed_batch_fetch(self, job: str) -> EmbedResult:
+    async def embed_batch_fetch(self, job: str, *, model: str = "") -> EmbedResult:
         resp = await self._batch_get(job, "embed_batch_fetch")
         status = _batch_status(resp, job)
         if status.state is not BatchState.SUCCEEDED:
@@ -335,9 +335,15 @@ class GeminiProvider(BaseProvider):
         # `normalize_vectors`) — aks holda bitta modelning batch va jonli
         # qatorlari `message_embeddings` da ikki xil masshtabda aralashardi
         # va cosine ostonalari (alert `threshold`, rerank) buzilardi.
+        #
+        # H2: javobda `model` maydoni bo'lmasligi mumkin (API uni har doim
+        # qaytarmaydi). Unda **so'ralgan** nom ishlatiladi — `status.model`
+        # bo'sh bo'lganda `normalize_vectors("")` normallashtirishni jimgina
+        # o'tkazib yuborardi va chaqiruvchi `model=''` qatorini yozardi.
+        effective = status.model or _base_model(model)
         return EmbedResult(
-            vectors=normalize_vectors(status.model, vectors),
-            model=status.model,
+            vectors=normalize_vectors(effective, vectors),
+            model=effective,
             provider=self.name,
             usage=Usage(tokens_in=tokens),
         )
@@ -480,6 +486,21 @@ _BATCH_STATES: dict[str, BatchState] = {
 }
 
 
+def _batch_model(resp: Any) -> str:
+    """Javobdagi `model` maydoni — **faqat** satr bo'lsa qabul qilinadi.
+
+    SDK bu maydonni umuman bermasligi yoki obyekt berishi mumkin. `str(...)`
+    bilan majburlash `<google.genai.types.Model object at 0x…>` kabi axlatni
+    `message_embeddings.model` ga yozib qo'yardi — bunday qator qidiruv
+    filtridan hech qachon o'tmaydi (H2). Shubhali qiymat = bo'sh satr, ya'ni
+    chaqiruvchi so'ralgan model nomiga qaytadi.
+    """
+    value = getattr(resp, "model", None)
+    if not isinstance(value, str):
+        return ""
+    return _base_model(value)
+
+
 def _batch_status(resp: Any, job: str) -> BatchStatus:
     raw = getattr(resp, "state", None)
     raw_name = str(getattr(raw, "value", None) or getattr(raw, "name", None) or raw or "")
@@ -491,7 +512,7 @@ def _batch_status(resp: Any, job: str) -> BatchStatus:
         state=_BATCH_STATES.get(raw_name.upper(), BatchState.RUNNING),
         raw_state=raw_name,
         # Narx qoidasi: API **qaytargan** nom ("models/…" prefiksisiz).
-        model=_base_model(str(getattr(resp, "model", "") or "")),
+        model=_batch_model(resp),
         error=str(getattr(err, "message", "") or "") if err is not None else "",
     )
 

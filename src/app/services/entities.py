@@ -102,6 +102,10 @@ _CASHTAG_RE = re.compile(r"(?<![\w$])\$([A-Z]{1,8})(?![\w])")
 #: `t.me` oilasi — bu hostlar `url_domain` emas, `tme_link` beradi.
 _TME_HOSTS: frozenset[str] = frozenset({"t.me", "telegram.me", "telegram.dog", "telesco.pe"})
 
+#: `t.me/+<raqam>` — telefon raqami, taklif havolasi emas (L9). Taklif hash'ida
+#: har doim harf/`_`/`-` bo'ladi, shuning uchun "faqat raqam" mezoni yetarli.
+_PHONE_PATH_RE = re.compile(r"\+?\d{7,15}")
+
 #: Ikki bo'g'inli public suffix'lar (PSL'siz minimal ro'yxat). Bularda
 #: ro'yxatga olinadigan domen **uch** yorliqdan iborat: `shop.uz` emas,
 #: `foo.com.uz`.
@@ -188,6 +192,14 @@ def _url_entity(url: str) -> Entity | None:
     if bare in _TME_HOSTS:
         if not path:
             return None
+        if _PHONE_PATH_RE.fullmatch(path):
+            # L9: `t.me/+998901234567` — bu taklif havolasi emas, **telefon
+            # raqami** (Telegram raqam bo'yicha chatni shu ko'rinishda ochadi).
+            # Indeksga tushsa raqam qidiriladigan bo'lardi va `list_members` /
+            # `get_user_info` dagi "raqam hech qachon qaytarilmaydi" qoidasi
+            # yon eshikdan buzilardi. Harfli taklif havolalari (`t.me/+AbC…`)
+            # qoladi — ularda raqamdan boshqa belgi bor.
+            return None
         raw = f"{bare}/{path}"
         return Entity(KIND_TME_LINK, _norm(KIND_TME_LINK, path), raw)
     domain = registrable_domain(host)
@@ -229,7 +241,14 @@ def extract_entities(text: str, tg_entities: Sequence[Any] | None = None) -> lis
     """Matn (+ ixtiyoriy Telegram entity'lari) → identifikatorlar ro'yxati.
 
     Sof funksiya: I/O yo'q, LLM yo'q, natija bir xil kirishda har doim bir xil.
-    Takrorlar `(kind, value)` bo'yicha yig'iladi, tartib — matndagi tartib.
+    Takrorlar `(kind, value)` bo'yicha yig'iladi.
+
+    Tartib — **tur bo'yicha**, matndagi tartib bo'yicha emas (L8; ilgari
+    docstring shunday deb yozilgan edi va bu yolg'on edi). Skaner ketma-ketligi:
+    URL/`t.me` → `@username` → `#hashtag` → `$cashtag` → `mention_name`; har
+    bosqich ichida matndagi tartib saqlanadi. Sabab kodda: URL'lar topilgach
+    matndan **olib tashlanadi**, aks holda `?a=#x` fragmenti hashtag,
+    `t.me/@user` esa username bo'lib ko'rinardi.
 
     Args:
         text: xabar matni (`strip_invisible` dan o'tgan bo'lishi kutiladi).
@@ -237,11 +256,11 @@ def extract_entities(text: str, tg_entities: Sequence[Any] | None = None) -> lis
 
     Returns:
         `MAX_ENTITIES_PER_MESSAGE` tagacha `Entity`. Telefon raqami va email
-        **hech qachon** qaytarilmaydi.
+        **hech qachon** qaytarilmaydi (`t.me/+<raqam>` ham — L9).
 
     Examples:
         >>> [e.value for e in extract_entities("@nurbek #Deploy https://www.example.com/a")]
-        ['@nurbek', '#deploy', 'example.com']
+        ['example.com', '@nurbek', '#deploy']
         >>> extract_entities("aloqa: ali@example.com, +998 90 123 45 67")
         []
     """

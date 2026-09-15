@@ -287,9 +287,11 @@ def test_batch_price_falls_back_to_live_for_unknown_model() -> None:
 async def test_fetch_normalizes_vectors_like_the_sync_path() -> None:
     """F1: batch yo'li ham `normalize_vectors` dan o'tadi (aralash masshtab yo'q).
 
-    Sinxron va batch qatorlari bitta `message_embeddings` jadvalida yonma-yon
-    turadi — biri normallashtirilmagan bo'lsa cosine ostonalari (alert
-    `threshold`, rerank) jimgina siljib ketardi.
+    Sinxron va batch qatorlari bitta `message_embeddings` jadvalida
+    **bir xil `(message_id, model)` kaliti** ostida raqobatlashadi (PK
+    migratsiya 0016 dan beri ikki ustunli, ya'ni har model o'z qatoriga ega) —
+    biri normallashtirilmagan bo'lsa cosine ostonalari (alert `threshold`,
+    rerank) jimgina siljib ketardi.
     """
     raw = [[3.0, 4.0]]  # uzunligi 5 — normallashtirilgach 1 bo'lishi kerak
     fake = FakeBatches({"batches/j": succeeded("batches/j", raw)})
@@ -300,3 +302,230 @@ async def test_fetch_normalizes_vectors_like_the_sync_path() -> None:
     got = res.vectors[0]
     assert sum(x * x for x in got) == pytest.approx(1.0)
     assert got[0] == pytest.approx(0.6) and got[1] == pytest.approx(0.8)
+
+
+# ─── F3/H2: javobda model nomi bo'lmasa `model=""` yozilmasin ────────────────
+
+
+def test_batch_status_ignores_a_non_string_model_field() -> None:
+    """H2: SDK `model` o'rniga obyekt bersa — bo'sh satr, `str(obj)` axlati emas.
+
+    `str(...)` bilan majburlash `<google.genai.types.Model object …>` ni
+    `message_embeddings.model` ga yozib qo'yardi; bunday qator qidiruv
+    filtridan **hech qachon** o'tmaydi.
+    """
+    job = FakeJob(name="batches/j", state="JOB_STATE_SUCCEEDED")
+    job.model = object()  # type: ignore[assignment]
+    assert _batch_status(job, "batches/j").model == ""
+
+
+def test_batch_status_reports_no_model_when_the_field_is_missing() -> None:
+    job = FakeJob(name="batches/j", state="JOB_STATE_SUCCEEDED", model="")
+    assert _batch_status(job, "batches/j").model == ""
+
+
+async def test_fetch_falls_back_to_the_requested_model() -> None:
+    """H2: javobda model yo'q → so'ralgan nom (va normallashtirish **baribir**).
+
+    Ilgari `model=""` qaytardi: `normalize_vectors("")` normallashtirishni
+    o'tkazib yuborardi va `poll_batches` qatorni `model=''` bilan yozardi.
+    """
+    job = succeeded("batches/j", [[3.0, 4.0]])
+    job.model = ""
+    p, _ = make_provider(FakeBatches({"batches/j": job}))
+
+    res = await p.embed_batch_fetch("batches/j", model=f"models/{EMBED_MODEL}")
+
+    assert res.model == EMBED_MODEL
+    assert sum(x * x for x in res.vectors[0]) == pytest.approx(1.0)
+
+
+# ─── F3: `poll_batches` — model, izolyatsiya, konflikt kaliti ────────────────
+
+
+class _Rows:
+    def __init__(self, rows: list[Any]) -> None:
+        self._rows = rows
+
+    def scalars(self) -> list[Any]:
+        return self._rows
+
+
+class _FakeSession:
+    """`AsyncSession` ning `poll_batches` ishlatadigan qismi.
+
+    `fail_on_write` — shu `job_name` uchun vektor yozishda istisno (L11:
+    bitta jobning qulashi qolganlarini olib ketmasligi kerak).
+    """
+
+    def __init__(self, rows: list[Any], *, fail_on_write: str = "") -> None:
+        self.rows = rows
+        self.fail_on_write = fail_on_write
+        self.writes: list[Any] = []
+        self.nested = 0
+        self.rolled_back: list[str] = []
+        self._selected = False
+        self.current_job = ""
+
+    async def execute(self, stmt: Any) -> Any:
+        if not self._selected:
+            self._selected = True
+            return _Rows(self.rows)
+        if self.current_job and self.current_job == self.fail_on_write:
+            raise RuntimeError("savepoint ichidagi DB xatosi")
+        self.writes.append(stmt)
+        return None
+
+    async def flush(self) -> None:
+        return None
+
+    def begin_nested(self) -> Any:
+        session = self
+
+        class _Nested:
+            async def __aenter__(self) -> Any:
+                session.nested += 1
+                return self
+
+            async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+                return False  # istisnoni yutmaydi — chaqiruvchi tutadi
+
+        return _Nested()
+
+
+def _batch_row(job: str, *, model: str = EMBED_MODEL, item_ids: tuple[int, ...] = (1, 2)) -> Any:
+    from app.db.models import EmbedBatch, EmbedBatchStatus
+
+    return EmbedBatch(
+        provider="gemini",
+        job_name=job,
+        kind="messages",
+        account_id=None,
+        item_ids=list(item_ids),
+        model=model,
+        task_type="RETRIEVAL_DOCUMENT",
+        status=EmbedBatchStatus.PENDING,
+        attempts=1,
+    )
+
+
+class _StubProvider:
+    """`BaseProvider` o'rnini bosadi; har job uchun oldindan berilgan natija."""
+
+    name = "gemini"
+
+    def __init__(self, results: dict[str, Any]) -> None:
+        self.results = results
+        self.fetched: list[tuple[str, str]] = []
+
+    async def embed_batch_poll(self, job: str) -> Any:
+        from app.llm.base import BatchState, BatchStatus
+
+        return BatchStatus(job=job, state=BatchState.SUCCEEDED, raw_state="JOB_STATE_SUCCEEDED")
+
+    async def embed_batch_fetch(self, job: str, *, model: str = "") -> Any:
+        self.fetched.append((job, model))
+        return self.results[job]
+
+
+def _result(model: str, n: int = 2) -> Any:
+    from app.llm.base import EmbedResult, Usage
+
+    return EmbedResult(
+        vectors=[[0.1] * 4 for _ in range(n)],
+        model=model,
+        provider="gemini",
+        usage=Usage(tokens_in=10),
+    )
+
+
+async def _poll(session: Any, provider: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
+    from app.services import embed_batches as EB
+
+    monkeypatch.setattr(EB, "_provider_for_batch", lambda: (provider, EMBED_MODEL))
+    # Har job qaysi savepoint ichida yozayotganini soxta sessiya bilishi uchun.
+    original = EB._poll_one
+
+    async def _wrapped(sess: Any, prov: Any, row: Any, rep: Any, **kw: Any) -> None:
+        sess.current_job = row.job_name
+        await original(sess, prov, row, rep, **kw)
+
+    monkeypatch.setattr(EB, "_poll_one", _wrapped)
+    return await EB.poll_batches(session)
+
+
+async def test_poll_uses_the_requested_model_when_the_api_omits_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """H2: `model=''` hech qachon yozilmaydi — qator qidiruvdan yo'qolardi."""
+    from app.db.models import EmbedBatchStatus
+
+    row = _batch_row("batches/a")
+    provider = _StubProvider({"batches/a": _result("")})
+
+    rep = await _poll(_FakeSession([row]), provider, monkeypatch)
+
+    assert provider.fetched == [("batches/a", EMBED_MODEL)]  # so'ralgan model uzatildi
+    assert row.model == EMBED_MODEL
+    assert row.status == EmbedBatchStatus.SUCCEEDED
+    assert rep.written == 2
+
+
+async def test_poll_fails_the_job_when_the_api_returns_another_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """H2: boshqa model = boshqa vektor fazasi → yozilmaydi, job xato bo'ladi."""
+    from app.db.models import EmbedBatchStatus
+
+    row = _batch_row("batches/a")
+    session = _FakeSession([row])
+    provider = _StubProvider({"batches/a": _result("gemini-embedding-2")})
+
+    rep = await _poll(session, provider, monkeypatch)
+
+    assert rep.written == 0 and rep.failed == 1
+    assert session.writes == []
+    assert row.status == EmbedBatchStatus.FAILED
+    assert row.error is not None and "mismatch" in row.error
+    assert row.model == EMBED_MODEL  # eski nom o'zgarmaydi
+
+
+async def test_poll_isolates_one_failing_job_from_the_others(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """L11: har job o'z savepoint'ida — ikkinchisi qulasa 1 va 3 yozilgan qoladi."""
+    from app.db.models import EmbedBatchStatus
+
+    rows = [_batch_row(f"batches/{n}") for n in ("a", "b", "c")]
+    session = _FakeSession(rows, fail_on_write="batches/b")
+    provider = _StubProvider({r.job_name: _result(EMBED_MODEL) for r in rows})
+
+    rep = await _poll(session, provider, monkeypatch)
+
+    assert session.nested == 3  # har job uchun bitta savepoint
+    assert rep.checked == 3
+    assert rep.succeeded == 2 and rep.written == 4
+    assert [r.status for r in rows] == [
+        EmbedBatchStatus.SUCCEEDED,
+        EmbedBatchStatus.PENDING,  # qulagani — o'zgarishlari savepoint bilan qaytadi
+        EmbedBatchStatus.SUCCEEDED,
+    ]
+
+
+async def test_write_vectors_conflicts_on_id_and_model() -> None:
+    """H1: konflikt kaliti `(message_id, model)` — PK bilan bir xil.
+
+    Faqat `message_id` bo'lganda boshqa modeldagi mavjud qator bu INSERT'ni
+    jimgina yeb qo'yardi: vektor yozilmasdi, job esa `SUCCEEDED` bo'lardi.
+    """
+    from sqlalchemy.dialects import postgresql
+
+    from app.services import embed_batches as EB
+
+    session = _FakeSession([])
+    session._selected = True  # birinchi `execute` ham yozuv bo'lsin
+    await EB._write_vectors(session, EB.KIND_MESSAGES, [1], [[0.1] * 4], EMBED_MODEL)
+
+    (stmt,) = session.writes
+    sql = str(stmt.compile(dialect=postgresql.dialect()))
+    assert "ON CONFLICT (message_id, model) DO NOTHING" in sql

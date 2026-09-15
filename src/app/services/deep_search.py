@@ -134,8 +134,15 @@ _JSON_RE = re.compile(r"\{.*\}", re.S)
 # chatlararo yugurishda ikki xil chatning bir xil raqamli xabari bir-biriga
 # aralashib ketardi (va begona matndagi `#123` sitatani boshqarardi).
 # Tashqi (lokal chats'da yo'q) topilma — `#x<n>`, u faqat `t.me` havolasiga bog'lanadi.
-_CITE_RE = re.compile(r"#(c\d{1,12}m\d{1,12}|x\d{1,12})")
+# M4: naqsh **bitta joyda** — `untrusted.CITE_TOKEN_RE`. Ajratish va
+# zararsizlantirish bir xil naqshdan o'qiydi, aks holda begona matndagi
+# `#c1m42x` konvertdan o'tib, bu yerda `c1m42` bo'lib ajralib qolardi.
+_CITE_RE = U.CITE_TOKEN_RE
 _TAINT_MIN_CHARS = 24  # qo'riqchi shundan qisqa matnni tekshirmaydi (tasodifiy mos kelish)
+
+#: M6: uchayotgan usage-flush vazifalari. `asyncio` faqat **zaif** havola
+#: saqlaydi, shuning uchun havolasiz vazifa tugamasdan yig'ilib ketishi mumkin.
+_USAGE_FLUSHES: set[asyncio.Task[None]] = set()
 
 
 class DeepSearchError(Exception):
@@ -342,7 +349,10 @@ class _Taint:
         shuning uchun 2-raund `reflect` promptini ham tekshiradi.
         """
         for h in hits:
-            body = (getattr(h, "text", "") or "").strip()
+            # `S.Hit.text` — e'lon qilingan maydon (`str`, default ""), shuning
+            # uchun `getattr` bilan "bor-yo'qligini" tekshirish yolg'on edi:
+            # maydon nomi o'zgarsa qo'riqchi **jimgina** bo'shab qolardi.
+            body = (h.text or "").strip()
             if len(body) >= _TAINT_MIN_CHARS:
                 self._texts.add(body[:_TAINT_MIN_CHARS])
 
@@ -1644,10 +1654,27 @@ async def run_deep_search(
                     partial=str(state["answer"] or ""),
                 )
             )
+            # M6: vazifaga **kuchli havola** — aks holda GC uni tugagunicha
+            # yig'ib yuborishi mumkin ("Task was destroyed but it is pending").
+            _USAGE_FLUSHES.add(flush)
+            flush.add_done_callback(_USAGE_FLUSHES.discard)
             # Bekor qilish paytida ham oxirigacha yoziladi — `shield` ichkarini
             # himoya qiladi, tashqi `await` uzilsa ham vazifa tugaydi.
-            with contextlib.suppress(asyncio.CancelledError, Exception):
+            try:
                 await asyncio.shield(flush)
+            except asyncio.CancelledError:
+                # Tashqi `await` uzildi; `flush` o'zi `shield` ostida davom etadi.
+                pass
+            except Exception as exc:
+                # M6: ilgari bu `suppress(Exception)` edi — byudjet hisobi
+                # jimgina yo'qolardi va kunlik limit kam ko'rsatardi.
+                log.warning(
+                    "deep.usage_flush_failed",
+                    conversation_id=conversation_id,
+                    status=str(state.get("status")),
+                    tokens=meter.tokens,
+                    error=str(exc)[:200],
+                )
 
 
 async def _run_pipeline(

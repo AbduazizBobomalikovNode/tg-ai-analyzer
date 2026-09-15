@@ -66,6 +66,17 @@ qoldiradi:
 | `EMBED_MODEL` | embedding modeli (eski nom: `GEMINI_MODEL_EMBED`) |
 | `EMBED_DIMS` | Gemini `output_dimensionality`; DB ustuni bilan bir xil bo'lishi shart |
 
+`EMBED_MODEL` filtri uchun joriy model nomi — `llm.embed_model_name()`,
+ustuvorlik `resolve(Task.EMBED)` bilan **bir xil**: `LLM_TASK_EMBED` ning
+model qismi → `LLM_MODEL_EMBED` → `EMBED_MODEL`.
+
+`EMBED_DIMS` ni o'zgartirish yolg'iz o'zi hech narsani ko'chirmaydi: DB ustuni
+`Vector(embed_dim)` / `HALFVEC(embed_dim)` bilan migratsiya vaqtida qurilgan,
+mos kelmasa **har** embedding INSERT'i yiqiladi. Shuning uchun
+`python -m app.main check` buni tekshiradi (api/worker startupda esa
+ogohlantirish). Haqiqiy o'zgartirish = ustun turini almashtiradigan migratsiya
++ to'liq qayta embed.
+
 Model provider imkoniyatiga mos kelmasa (`LLM_MODEL_TOOLS` ga tool'siz model)
 router **aniq xato** tashlaydi — jimgina eski modelga qaytmaydi. `gemini-2.5-flash-lite`
 2026-10-16 da eskiradi: 45 kun qolganda startupda `llm.model_retiring`
@@ -87,3 +98,14 @@ yangi model qatorlari eskilari bilan yonma-yon yoziladi va qidiruv joriy
 modelni filtrlaydi, shuning uchun to'xtatib qo'yilgan re-embed ham indeksni
 buzmaydi; orqaga qaytish — `EMBED_MODEL` ni eski qiymatga qaytarish.
 Jarayon loglarda: `worker.reembed.progress` / `worker.reembed.done`.
+
+"Yonma-yon" **sxema darajasida** (migratsiya `0016`):
+`message_embeddings` PK = `(message_id, model)`, `retrieval_node_embeddings`
+PK = `(node_id, model)`. Ilgari kalit bir ustunli edi, ya'ni bu va'da bajarib
+bo'lmas edi: yozuvchilar "joriy model bo'yicha yetishmayapti" deb tanlab,
+o'sha `message_id` ustida `UniqueViolation` bilan qulardi, qidiruv esa yangi
+modelni filtrlab bo'sh qaytarardi. Barcha yozuvchilar
+(`worker.embed_messages`, `worker.reembed_all`, `nodes.embed_nodes`,
+`embed_batches._write_vectors`) `ON CONFLICT (id, model) DO NOTHING` bilan
+yozadi. Downgrade (`0016` → `0015`) har id uchun **eng yangi** qatorni
+qoldirib qolganini o'chiradi — teskari yo'lda ma'lumot yo'qoladi.

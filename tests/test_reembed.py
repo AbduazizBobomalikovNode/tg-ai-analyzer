@@ -83,13 +83,34 @@ def test_reembed_cli_rejects_unknown_argument(queue: _Queue) -> None:
     assert queue.calls == []
 
 
-def test_reembed_task_is_registered_and_deletes_nothing() -> None:
+def test_reembed_task_is_registered() -> None:
     assert T.reembed_all in WS.WorkerSettings.functions
-    # Kafolat: bu ish hech qachon o'chirmaydi (eski vektorlar joyida qoladi).
-    import inspect
 
-    src = inspect.getsource(T.reembed_all)
-    assert "delete" not in src.lower()
+
+async def test_reembed_writes_a_new_model_row_without_touching_the_old_one() -> None:
+    """Kafolat: qayta embed **qo'shadi**, o'chirmaydi/almashtirmaydi.
+
+    Ilgari bu yerda `"delete" not in inspect.getsource(...)` turardi — u
+    noto'g'ri narsani o'lchardi: matnda "delete" yo'qligi ustidan yozish
+    (`UPDATE`/`ON CONFLICT DO UPDATE`) yoki `UniqueViolation` bilan qulashdan
+    **himoya qilmaydi**. Endi haqiqiy SQL tekshiriladi.
+    """
+    from sqlalchemy.dialects import postgresql
+
+    captured: list[Any] = []
+
+    class _Session:
+        async def execute(self, stmt: Any) -> None:
+            captured.append(stmt)
+
+    await T._upsert_message_vectors(_Session(), [(7, [0.1, 0.2])], "gemini-embedding-2")
+
+    (stmt,) = captured
+    sql = str(stmt.compile(dialect=postgresql.dialect())).upper()
+    assert sql.startswith("INSERT INTO MESSAGE_EMBEDDINGS")
+    # Kalit `(message_id, model)` — eski model qatori boshqa kalitda, tegilmaydi.
+    assert "ON CONFLICT (MESSAGE_ID, MODEL) DO NOTHING" in sql
+    assert "DELETE" not in sql and "DO UPDATE" not in sql
 
 
 def test_reembed_skips_when_embedding_disabled(monkeypatch: pytest.MonkeyPatch) -> None:

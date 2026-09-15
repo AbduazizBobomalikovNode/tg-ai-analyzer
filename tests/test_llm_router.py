@@ -392,3 +392,38 @@ def test_resolve_route_marks_retiring_model(monkeypatch: pytest.MonkeyPatch) -> 
 
 def test_every_task_with_override_has_env_name() -> None:
     assert set(R.MODEL_OVERRIDE_ENV) == set(R.Task) - {R.Task.IMAGE}
+
+
+# ─── F3/M5: `embed_model_name()` ↔ `resolve(Task.EMBED)` ustuvorligi ────────
+
+
+def test_embed_model_name_honours_the_task_spec(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`LLM_TASK_EMBED` ning model qismi eng ustuvor — `resolve` bilan bir xil.
+
+    Ilgari u e'tiborga olinmasdi: router bir model bilan embed qilar,
+    `message_embeddings.model` filtri esa boshqasini qidirardi — yangi
+    qatorlar yozilaverib, vektor qidiruv **bo'sh** qaytarardi.
+    """
+    use(monkeypatch, LLM_TASK_EMBED="gemini:gemini-embedding-2")
+    assert R.embed_model_name() == "gemini-embedding-2"
+    assert R.resolve(R.Task.EMBED)[1] == "gemini-embedding-2"
+
+
+def test_embed_model_name_falls_back_to_model_override_then_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    use(monkeypatch, LLM_TASK_EMBED="gemini", LLM_MODEL_EMBED="gemini-embedding-2")
+    assert R.embed_model_name() == "gemini-embedding-2"
+
+    use(monkeypatch, LLM_TASK_EMBED="", LLM_MODEL_EMBED="", EMBED_MODEL="custom-embed-9")
+    assert R.embed_model_name() == "custom-embed-9"
+
+
+def test_embed_model_name_ignores_the_provider_half_of_the_spec(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Faqat provider berilgan `LLM_TASK_EMBED` model nomini o'zgartirmaydi."""
+    use(
+        monkeypatch, LLM_TASK_EMBED="gemini", LLM_MODEL_EMBED="", EMBED_MODEL="gemini-embedding-001"
+    )
+    assert R.embed_model_name() == "gemini-embedding-001"

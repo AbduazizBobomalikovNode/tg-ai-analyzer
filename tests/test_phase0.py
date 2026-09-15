@@ -353,15 +353,32 @@ async def test_confirm_action_second_call_does_not_execute(
 
 
 class _EmbedDb:
+    """`session_scope()` o'rnini bosadi; yozilgan vektorlarni ushlab qoladi.
+
+    F3/H1: `embed_messages` endi `pg_insert(...).on_conflict_do_nothing(
+    index_elements=["message_id", "model"])` bilan yozadi (`add_all()` emas) —
+    PK ikki ustunli, bitta xabarda bir nechta model qatori normal.
+    """
+
     def __init__(self, rows: list[Any]) -> None:
         self.rows = rows
-        self.added: list[Any] = []
+        #: yozilgan `(message_id, model)` juftliklari
+        self.added: list[tuple[Any, str]] = []
+        self.sql: list[str] = []
 
-    async def execute(self, *a: Any, **k: Any) -> Any:
+    async def execute(self, stmt: Any = None, *a: Any, **k: Any) -> Any:
+        from sqlalchemy.dialects import postgresql
+        from sqlalchemy.sql.expression import Insert
+
+        if isinstance(stmt, Insert):
+            self.sql.append(str(stmt.compile(dialect=postgresql.dialect())))
+            params = stmt.compile().params
+            i = 0
+            while f"message_id_m{i}" in params:
+                self.added.append((params[f"message_id_m{i}"], params[f"model_m{i}"]))
+                i += 1
+            return None
         return SimpleNamespace(all=lambda: self.rows)
-
-    def add_all(self, objs: list[Any]) -> None:
-        self.added.extend(objs)
 
 
 async def test_embed_skips_misaligned_batch(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -402,7 +419,9 @@ async def test_embed_writes_aligned_batch(monkeypatch: pytest.MonkeyPatch) -> No
 
     out = await WT.embed_messages({})
     assert out == {"embedded": 2}
-    assert [e.message_id for e in db.added] == [1, 2]
+    assert db.added == [(1, "emb"), (2, "emb")]
+    # Model — konflikt kalitining bir qismi: eski model qatori ustidan yozilmaydi.
+    assert "ON CONFLICT (message_id, model) DO NOTHING" in db.sql[-1]
 
 
 async def _noop_heartbeat(name: str, **kw: Any) -> None: ...

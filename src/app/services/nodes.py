@@ -32,6 +32,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -197,12 +198,17 @@ async def embed_nodes(
             report.error = f"model mismatch: want {want_model}, got {res.model}"
             log.error("nodes.embed_model_mismatch", want=want_model, got=res.model)
             break
-        session.add_all(
+        # PK `(node_id, model)` (migratsiya 0016): bitta tugunda bir nechta
+        # model qatori normal, shuning uchun `add_all` emas — `ON CONFLICT DO
+        # NOTHING`. Oraliqda batch yo'li o'sha `(node_id, model)` ni yozib
+        # qo'ygan bo'lsa birinchisi qoladi.
+        stmt = pg_insert(RetrievalNodeEmbedding).values(
             [
-                RetrievalNodeEmbedding(node_id=n.id, model=res.model, vector=vec)
+                {"node_id": int(n.id), "model": res.model, "vector": vec}
                 for n, vec in zip(chunk, res.vectors, strict=True)
             ]
         )
+        await session.execute(stmt.on_conflict_do_nothing(index_elements=["node_id", "model"]))
         await session.flush()
         report.embedded += len(chunk)
     report.pending -= report.embedded

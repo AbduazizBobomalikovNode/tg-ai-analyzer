@@ -239,11 +239,16 @@ class BaseProvider(ABC):
     async def embed_batch_poll(self, job: str) -> BatchStatus:
         raise CapabilityError(self.name, "batch embedding qo'llab-quvvatlanmaydi")
 
-    async def embed_batch_fetch(self, job: str) -> EmbedResult:
+    async def embed_batch_fetch(self, job: str, *, model: str = "") -> EmbedResult:
         """Tugagan jobning vektorlari — **kirish tartibida**.
 
         `list[list[float]]` emas, `EmbedResult`: chaqiruvchiga API qaytargan
         model nomi ham kerak (narx qoidasi, `pricing.py`).
+
+        `model` — job yuborilganda **so'ralgan** model. API javobida model
+        maydoni bo'lmasa (Gemini buni qiladi) normallashtirish va
+        `message_embeddings.model` shu nomga tayanadi; usiz qator `model=''`
+        bilan yozilib, qidiruv filtridan hech qachon o'tmasdi.
         """
         raise CapabilityError(self.name, "batch embedding qo'llab-quvvatlanmaydi")
 

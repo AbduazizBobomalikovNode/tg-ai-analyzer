@@ -289,3 +289,42 @@ async def test_empty_batch_touches_no_sql() -> None:
     session = _FakeSession()
     assert await E.index_messages_entities(session, []) == 0  # type: ignore[arg-type]
     assert session.sql == []
+
+
+# ─── F3/L9: `t.me/+<raqam>` — telefon raqami, taklif havolasi emas ───────────
+
+
+def test_phone_shaped_tme_link_is_dropped() -> None:
+    """Raqamli `t.me/+…` indeksga tushmaydi — bu telefon raqami.
+
+    Telegram raqam bo'yicha chatni aynan shu ko'rinishda ochadi. Indeksda
+    qolsa raqam qidiriladigan bo'lardi va "telefon raqami hech qachon
+    qaytarilmaydi" qoidasi yon eshikdan buzilardi.
+    """
+    for raw in (
+        "https://t.me/+998901234567",
+        "t.me/998901234567",
+        "https://telegram.me/+12025550143",
+    ):
+        assert [e for e in E.extract_entities(raw) if e.kind == E.KIND_TME_LINK] == []
+        assert E.parse_entity_query(raw) is None
+
+
+def test_invite_links_with_letters_are_kept() -> None:
+    """Harfli taklif hash'i — bu haqiqiy havola, indeksda qoladi."""
+    (ent,) = [
+        e for e in E.extract_entities("https://t.me/+AbC12dEf34") if e.kind == E.KIND_TME_LINK
+    ]
+    assert ent.value == "+abc12def34"
+    assert E.parse_entity_query("t.me/joinchat/AbC12dEf34") is not None
+
+
+def test_normal_tme_username_link_still_works() -> None:
+    (ent,) = [e for e in E.extract_entities("https://t.me/nurbek") if e.kind == E.KIND_TME_LINK]
+    assert ent.value == "nurbek"
+
+
+def test_extract_entities_order_matches_the_docstring() -> None:
+    """L8: tartib — **tur bo'yicha** (URL → username → hashtag), matn bo'yicha emas."""
+    values = [e.value for e in E.extract_entities("@nurbek #Deploy https://www.example.com/a")]
+    assert values == ["example.com", "@nurbek", "#deploy"]

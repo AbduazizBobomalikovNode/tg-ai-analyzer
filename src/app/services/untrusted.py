@@ -31,7 +31,20 @@ _INVISIBLE_RE = re.compile("[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff\x00-\
 # Deep search sitata tokeni (`#c<chat>m<msg>` / `#x<n>`) \u2014 begona matn ichida
 # uchrasa u **token bo'lmasligi** kerak: aks holda begona odam o'z xabarida
 # `#c1m42` yozib javobdagi sitatani boshqa xabarga yo'naltira olardi (H3/L3).
-_CITE_LOOKALIKE_RE = re.compile(r"#(?=(?:c\d{1,12}m\d{1,12}|x\d{1,12})\b)", re.IGNORECASE)
+#
+# **Yagona ta'rif** (M4): `deep_search` aynan shu naqsh bilan sitata
+# **ajratadi** (`CITE_TOKEN_RE`), bu yerda esa u **o'ldiriladi**. Ilgari ikkita
+# nusxa bor edi va ular bir xil emasdi \u2014 zararsizlantirish lookahead'ida `\b`
+# turardi, ajratishda esa yo'q: `#c1m42x` zararsizlantirishdan **o'tib**
+# ketardi (`\b` `2`\u2194`x` orasida yo'q), ajratuvchi esa undan `c1m42` ni olardi.
+# Shuning uchun bu yerda ham `\b` yo'q: prefiksi mos kelgan hamma narsa
+# o'ldiriladi (ortiqcha o'ldirish xavfsiz tomonga xato).
+_CITE_TOKEN_BODY = r"c\d{1,12}m\d{1,12}|x\d{1,12}"  # noqa: S105 — parol emas, regex
+
+#: Sitata tokeni \u2014 `deep_search._extract_citations` shu bilan ajratadi.
+CITE_TOKEN_RE = re.compile(rf"#({_CITE_TOKEN_BODY})")
+
+_CITE_LOOKALIKE_RE = re.compile(rf"#(?=(?:{_CITE_TOKEN_BODY}))", re.IGNORECASE)
 _ZWSP = "\u200b"  # `#` dan keyin qo'yiladi \u2014 ko'rinishi bir xil, token emas
 
 _FAKE_LT = "\u2039"  # teg ochmaydigan "<" o'rnini bosuvchi
