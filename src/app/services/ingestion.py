@@ -395,6 +395,28 @@ def message_to_row(chat_id: int, m: Any) -> dict[str, Any] | None:
     }
 
 
+def raw_peer_id(peer: Any) -> int | None:
+    """Telethon `Peer*` / `InputPeer*` → **xom** (musbat) id.
+
+    `chats.tg_peer_id` shu fazoda saqlanadi, shuning uchun real-time updates
+    listener (`worker/updates.py`) peer'ni chat qatoriga shu orqali bog'laydi.
+    """
+    return _peer_id(peer)
+
+
+async def upsert_message_from_update(chat_id: int, m: Any) -> int:
+    """Bitta xabarni (update oqimidan kelgan) upsert qiladi.
+
+    `sync_chat` bilan aynan bir xil yo'l — `message_to_row` + `upsert_messages`,
+    ya'ni `edited_at` `m.edit_date` dan, matn esa `strip_invisible` dan o'tadi.
+    Service/bo'sh xabar → 0.
+    """
+    row = message_to_row(chat_id, m)
+    if row is None:
+        return 0
+    return await upsert_messages([row])
+
+
 async def upsert_messages(rows: list[dict[str, Any]]) -> int:
     if not rows:
         return 0

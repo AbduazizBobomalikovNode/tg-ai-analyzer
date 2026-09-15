@@ -29,7 +29,24 @@ async def startup(ctx: dict[str, Any]) -> None:
 
     init_sentry("worker")
     await _reset_stuck_syncs()
+    await _start_updates_listener()
     log.info("worker.start", max_jobs=WorkerSettings.max_jobs)
+
+
+async def _start_updates_listener() -> None:
+    """Real-time updates listener — **faqat shu jarayonda** (api'da hech qachon).
+
+    `TG_UPDATES_LISTENER` o'chiq bo'lsa hech narsa qilmaydi. Xato bo'lsa ham
+    worker ko'tariladi: 10 daqiqalik `incremental_sync_all` zaxira yo'l.
+    """
+    try:
+        from app.worker.updates import start_listeners
+
+        started = await start_listeners()
+        if started:
+            log.info("worker.updates_listener", accounts=started)
+    except Exception as exc:
+        log.warning("worker.updates_listener_failed", error=str(exc)[:200])
 
 
 async def _reset_stuck_syncs() -> None:
@@ -56,7 +73,10 @@ async def _reset_stuck_syncs() -> None:
 async def shutdown(ctx: dict[str, Any]) -> None:
     from app.mtproto.pool import pool
     from app.worker.queue import close_queue
+    from app.worker.updates import stop_listeners
 
+    # Handler'lar klient uzilishidan OLDIN olib tashlanadi (task'lar bekor qilinadi).
+    await stop_listeners()
     await pool.close_all()
     await close_queue()
     log.info("worker.stop")
@@ -77,8 +97,10 @@ class WorkerSettings:
         tasks.embed_messages,
         tasks.build_daily_digests,
         tasks.process_autoreplies,
+        *tasks.PHASE2_FUNCTIONS,  # phase2/A: epizod/tugun indeksi
     ]
     cron_jobs: ClassVar[list[Any]] = [
+        *tasks.PHASE2_CRONS,  # phase2/A: embed_nodes (15 daq), week_nodes (du 03:30)
         cron(heartbeat, minute={0, 30}, run_at_startup=False),
         # ⚠️ Snapshot cron'ini o'chirmang — views/reactions vaqt qatori shu yerdan (4.6)
         cron(tasks.snapshot_metrics, minute={5}, run_at_startup=False, timeout=3000),
