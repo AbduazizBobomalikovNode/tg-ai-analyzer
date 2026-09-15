@@ -43,10 +43,10 @@ jobs:
         run: pip install -e ".[dev]"
       - name: Ruff (lint + format)
         run: |
-          ruff check src tests
-          ruff format --check src tests
+          ruff check src tests evals
+          ruff format --check src tests evals
       - name: mypy
-        run: mypy src
+        run: mypy src evals
       - name: pytest
         env:
           PYTHONPATH: src

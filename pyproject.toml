@@ -79,7 +79,9 @@ ignore = ["S101"]  # assert allowed in tests
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-pythonpath = ["src"]
+# "src" birinchi (ilova paketi), "." — repo ildizi: `evals/` paketi
+# `tests/test_evals.py` uchun oddiy `pytest` da ham import bo'lsin.
+pythonpath = ["src", "."]
 
 [tool.mypy]
 python_version = "3.12"

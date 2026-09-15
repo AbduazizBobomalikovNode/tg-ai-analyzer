@@ -16,3 +16,9 @@ build/
 data/
 logs/
 docker-compose.override.yml
+
+# evals — real chat kontenti bilan quriladi, repoga tushmasligi shart
+# (docs/architecture-v2.md, 10-bo'lim; evals/hard.jsonl bundan mustasno —
+# u qo'lda yozilgan, sun'iy misollar bilan git'da saqlanadi)
+evals/golden.jsonl
+evals/runs/
