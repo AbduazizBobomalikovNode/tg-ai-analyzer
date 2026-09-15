@@ -5,22 +5,27 @@
     POST /api/auth/password  {flow_id, password}  → {status: done}
     POST /api/auth/cancel    {flow_id}
     POST /api/auth/logout                          — web cookie o'chadi (session saqlanadi)
-    GET  /api/me                                   — user + akkauntlar
+    POST /api/auth/telegram  {init_data}           — Mini App: initData HMAC → cookie
+    GET  /api/me                                   — user (+prefs) + akkauntlar
 
 `done` bo'lganda javob cookie o'rnatadi. Xatolar: 400 {"code": "auth.err.<x>"}.
 """
 
 from __future__ import annotations
 
+import json
+import time
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 
 from app.config import get_settings
 from app.db.base import session_scope
-from app.db.models import User
+from app.db.models import Chat, User
 from app.logging import get_logger
+from app.services import prefs as P
 from app.services.accounts import link_account, list_accounts
 from app.services.auth_flow import AuthError, AuthFlowStore, FlowStatus
 from app.web.security import (
@@ -267,6 +272,29 @@ async def auth_logout(request: Request, response: Response) -> dict[str, str]:
     return {"status": "ok", "revoked": "true" if revoked else "false"}
 
 
+async def _chat_counts(db: Any, account_ids: list[int]) -> dict[int, tuple[int, int]]:
+    """`{account_id: (chats_total, chats_synced)}` — bitta agregat so'rov.
+
+    "synced" = `synced_total > 0`, ya'ni chatdan hech bo'lmasa bir xabar
+    olingan. `sync_state = done` emas: tarix boshiga yetmagan chat ham
+    qidiruv uchun foydali va UI'da "bo'sh" ko'rinmasligi kerak.
+    """
+    if not account_ids:
+        return {}
+    from sqlalchemy import case, func, select
+
+    rows = await db.execute(
+        select(
+            Chat.account_id,
+            func.count(Chat.id),
+            func.sum(case((Chat.synced_total > 0, 1), else_=0)),
+        )
+        .where(Chat.account_id.in_(account_ids))
+        .group_by(Chat.account_id)
+    )
+    return {int(aid): (int(total or 0), int(synced or 0)) for aid, total, synced in rows.all()}
+
+
 @router.get("/me")
 async def me(ident: Annotated[WebIdentity, Depends(require_identity)]) -> dict[str, Any]:
     async with session_scope() as db:
@@ -274,8 +302,21 @@ async def me(ident: Annotated[WebIdentity, Depends(require_identity)]) -> dict[s
         if user is None:
             raise HTTPException(status_code=401, detail={"code": "unauthorized"})
         accounts = await list_accounts(db, user.id)
+        counts = await _chat_counts(db, [a.id for a in accounts])
+        # ui/R1b: `display_name` ustuni bo'lsa (keyingi migratsiya) — u,
+        # aks holda username. Avatar hozircha yo'q: `null` qaytadi va UI
+        # bosh harflarga tushadi (endpoint qo'shilganda faqat shu qiymat
+        # to'ladi, shartnoma o'zgarmaydi).
+        display = (getattr(user, "display_name", "") or user.username or "").strip()
         return {
-            "user": {"id": user.id, "tg_user_id": user.tg_user_id, "username": user.username},
+            "user": {
+                "id": user.id,
+                "tg_user_id": user.tg_user_id,
+                "username": user.username,
+                "display_name": display or f"id{user.tg_user_id}",
+                "avatar_url": None,
+                "prefs": P.normalize(user.prefs),
+            },
             "accounts": [
                 {
                     "id": a.id,
@@ -283,8 +324,111 @@ async def me(ident: Annotated[WebIdentity, Depends(require_identity)]) -> dict[s
                     "status": a.status,
                     "tg_account_id": a.tg_account_id,
                     "last_seen_at": a.last_seen_at.isoformat() if a.last_seen_at else None,
+                    "chats_total": counts.get(a.id, (0, 0))[0],
+                    "chats_synced": counts.get(a.id, (0, 0))[1],
                 }
                 for a in accounts
             ],
             "max_accounts": get_settings().max_accounts,
         }
+
+
+# ─── Telegram Mini App (initData) ────────────────────────────────────────────
+
+
+class InitDataIn(BaseModel):
+    # Telegram `initData` — URL-kodlangan query satr. 4096 — Telegram'ning
+    # o'z chegarasidan (`tgWebAppData`) ancha keng zaxira bilan.
+    init_data: str = Field(min_length=1, max_length=4096)
+
+
+def verify_init_data(init_data: str, bot_token: str, *, max_age: int = 86_400) -> dict[str, Any]:
+    """Mini App `initData` imzosini tekshiradi.
+
+    https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app
+
+    Kalit = `HMAC_SHA256("WebAppData", <bot token>)`, imzo = shu kalit bilan
+    `data_check_string` (kalitlar alifbo tartibida, `k=v`, `\\n` bilan) ustidan
+    HMAC-SHA256. Taqqoslash **doimiy vaqtli**: oddiy `!=` imzoni belgima-belgi
+    tiklash uchun vaqt kanalini ochadi.
+
+    Bot token **hech qachon** log'ga yoki xato matniga tushmaydi — bu yerda u
+    faqat HMAC kaliti sifatida ishlatiladi.
+
+    Returns:
+        Tekshirilgan maydonlar (`user` JSON bo'lib ochilgan).
+
+    Raises:
+        AuthError("init_data"): imzo/format noto'g'ri.
+        AuthError("init_data_expired"): `auth_date` juda eski.
+    """
+    import hashlib
+    import hmac as _hmac
+    from urllib.parse import parse_qsl
+
+    try:
+        pairs = parse_qsl(init_data, keep_blank_values=True, strict_parsing=True)
+    except ValueError as exc:
+        raise AuthError("init_data") from exc
+    fields = dict(pairs)
+    got = fields.pop("hash", "")
+    if not got or not fields:
+        raise AuthError("init_data")
+
+    check = "\n".join(f"{k}={fields[k]}" for k in sorted(fields))
+    secret = _hmac.new(b"WebAppData", bot_token.encode(), hashlib.sha256).digest()
+    want = _hmac.new(secret, check.encode(), hashlib.sha256).hexdigest()
+    if not _hmac.compare_digest(want, got.lower()):
+        raise AuthError("init_data")
+
+    try:
+        auth_date = int(fields.get("auth_date", "0"))
+    except ValueError as exc:
+        raise AuthError("init_data") from exc
+    # Kelajakdagi sana ham rad etiladi (soat siljishi uchun kichik zaxira).
+    age = time.time() - auth_date
+    if auth_date <= 0 or age > max_age or age < -300:
+        raise AuthError("init_data_expired")
+
+    out: dict[str, Any] = dict(fields)
+    if fields.get("user"):
+        try:
+            out["user"] = json.loads(fields["user"])
+        except ValueError as exc:
+            raise AuthError("init_data") from exc
+    return out
+
+
+@router.post("/auth/telegram", dependencies=[Depends(require_csrf)])
+async def auth_telegram(body: InitDataIn, request: Request, response: Response) -> dict[str, Any]:
+    """Mini App ichida avtomatik kirish: `initData` → o'sha web cookie.
+
+    **Akkaunt yaratmaydi.** `initData` faqat "bu brauzerni shu Telegram
+    foydalanuvchisi ochdi" deyishga yetadi; MTProto sessiyasi esa QR login'da
+    tug'iladi. Shuning uchun `tg_user_id` bazadagi userga mos kelmasa — 403,
+    UI QR login'ga yuboradi.
+    """
+    if not limiter(request).check(client_ip(request)):
+        raise HTTPException(status_code=429, detail={"code": "auth.err.rate_limited"})
+    s = get_settings()
+    try:
+        data = verify_init_data(body.init_data, s.bot_token, max_age=s.miniapp_init_data_max_age)
+    except AuthError as exc:
+        raise _auth_http(exc) from exc
+
+    tg_user = data.get("user")
+    tg_user_id = int(tg_user["id"]) if isinstance(tg_user, dict) and tg_user.get("id") else 0
+    if not tg_user_id:
+        raise HTTPException(status_code=400, detail={"code": "auth.err.init_data"})
+
+    async with session_scope() as db:
+        user = (
+            await db.execute(select(User).where(User.tg_user_id == tg_user_id))
+        ).scalar_one_or_none()
+        if user is None:
+            log.info("auth.miniapp_unlinked", tg_user_id=tg_user_id)
+            raise HTTPException(status_code=403, detail={"code": "auth.err.not_linked"})
+        user_id = int(user.id)
+    set_session_cookie(request, response, user_id)
+    log.info("auth.miniapp_ok", user_id=user_id)
+    return {"status": "done", "user_id": user_id}

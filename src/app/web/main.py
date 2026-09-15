@@ -19,6 +19,7 @@ import hmac
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
@@ -36,6 +37,7 @@ from app.web.routers import chat as chat_router
 from app.web.routers import content as content_router
 from app.web.routers import deep as deep_router
 from app.web.routers import pages as pages_router
+from app.web.routers import settings as settings_router
 from app.web.routers import stats as stats_router
 from app.web.routers import tg as tg_router
 from app.web.security import RateLimiter
@@ -56,6 +58,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     dims_error = embed_dims_mismatch(s)
     if dims_error:
         log.warning("web.embed_dims_mismatch", error=dims_error)
+    # ui/R1b: static fayllar fingerprintini bir marta hisoblaymiz (dev'da
+    # `asset()` baribir har chaqiruvda qayta o'qiydi).
+    log.info("web.assets_primed", files=pages_router.prime_assets())
     log.info("web.start", env=s.env, secure_cookies=s.web_secure_cookies, version=s.app_version)
     try:
         yield
@@ -68,6 +73,30 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await close_all()
 
 
+class CachedStatic(StaticFiles):
+    """Static fayllar uchun kesh sarlavhalari (ui/R1b).
+
+    `?v=<fingerprint>` bo'lsa javob **bir yil, `immutable`**: fayl mazmuni
+    o'zgarsa URL ham o'zgaradi (`pages.asset()`), ya'ni eski javob hech qachon
+    noto'g'ri bo'lib qolmaydi va brauzer qayta so'ramaydi ham.
+
+    Versiyasiz so'rov (`/static/app.css`, qo'lda yozilgan havola yoki eski
+    sahifa) — `no-cache`: brauzer keshlaydi, lekin har safar ETag bilan
+    tekshiradi. "Keshlamang" degan `no-store` emas.
+    """
+
+    def file_response(self, *args: Any, **kwargs: Any) -> Response:
+        response = super().file_response(*args, **kwargs)
+        # `scope` — pozitsion 3-argument (starlette), nomlangan bo'lishi ham mumkin.
+        scope = kwargs.get("scope") or (args[2] if len(args) > 2 else {})
+        query = scope.get("query_string", b"") if isinstance(scope, dict) else b""
+        versioned = b"v=" in query
+        response.headers["Cache-Control"] = (
+            "public, max-age=31536000, immutable" if versioned else "no-cache"
+        )
+        return response
+
+
 def create_app() -> FastAPI:
     app = FastAPI(
         title="tg-ai-analyzer",
@@ -77,7 +106,7 @@ def create_app() -> FastAPI:
     )
 
     static_dir = Path(__file__).resolve().parent / "static"
-    app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+    app.mount("/static", CachedStatic(directory=str(static_dir)), name="static")
     app.middleware("http")(http_middleware())
 
     app.include_router(auth_router.router)
@@ -89,6 +118,7 @@ def create_app() -> FastAPI:
     app.include_router(deep_router.router)
     app.include_router(alerts_router.router)  # phase3/C
     app.include_router(briefings_router.router)  # phase3/B
+    app.include_router(settings_router.router)  # ui/R1b
     app.include_router(pages_router.router)
 
     @app.get("/health")

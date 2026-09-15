@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import time
 from collections import Counter
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -69,6 +70,18 @@ async def _mark_failed(
     await session.flush()
 
 
+async def _notify_tool(
+    on_event: Callable[[str, dict[str, Any]], Awaitable[None]] | None, tool: str
+) -> None:
+    """UI hodisasi — hech qachon javobni yiqitmaydi (oqim uzilgan bo'lishi mumkin)."""
+    if on_event is None:
+        return
+    try:
+        await on_event("status", {"stage": "tool", "tool": tool})
+    except Exception as exc:  # klient ketdi / navbat yopildi
+        log.debug("agent.event_failed", tool=tool, error=str(exc)[:200])
+
+
 async def run_agent(
     session: AsyncSession,
     *,
@@ -80,7 +93,16 @@ async def run_agent(
     locale: str,
     llm: LLM | None = None,
     max_iterations: int | None = None,
+    on_event: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
 ) -> AgentOutcome:
+    """`on_event` — UI oqimi uchun ixtiyoriy kuzatuvchi (`chat_service.EventSink`).
+
+    Har **bajariladigan** tool oldidan `("status", {"stage": "tool", "tool": nom})`
+    beriladi. To'silgan chaqiruv (takror/limit) hodisa bermaydi: u bajarilmaydi,
+    ya'ni foydalanuvchiga "hozir shu tool ishlayapti" deyish yolg'on bo'lardi
+    (`calls_log` esa uni baribir yozadi — CLAUDE.md, "To'silgan chaqiruv").
+    Kuzatuvchidagi xato javobni **buzmaydi**: u faqat ko'rsatish uchun.
+    """
     s = get_settings()
     client = llm or LLM()
     max_iter = max_iterations or s.agent_max_iterations
@@ -184,6 +206,7 @@ async def run_agent(
                 # cheksiz taklif yasay olardi (har biri DB qatori + tasdiq
                 # so'rovi). `seen_calls` faqat aynan bir xil argumentni to'sadi.
                 per_tool[call.name] += 1
+                await _notify_tool(on_event, call.name)
                 if not write_enabled:
                     result = T.ToolResult("error: writing is disabled for this account", ok=False)
                 else:
@@ -194,6 +217,7 @@ async def run_agent(
                     action_ids.append(int(result.meta["action_id"]))
             else:
                 per_tool[call.name] += 1
+                await _notify_tool(on_event, call.name)
                 result = await T.run_tool(call.name, ctx, call.arguments)
             seen_calls.add(sig)
             text = result.text

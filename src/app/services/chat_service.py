@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import re
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -44,6 +45,55 @@ LIVE_CONTEXT_MAX = 200  # bundan ko'pi faqat DB'dan (ingestion) — jonli GetHis
 STRATEGIES = ("auto", "recent", "search", "window")
 
 SYSTEM_PROMPT = CHAT_SYSTEM_PROMPT  # markaziy prompt (services/prompts.py)
+
+
+# ─── oqim hodisalari (ui/R1b) ────────────────────────────────────────────────
+#
+# `send_message` ixtiyoriy `events` callback'i bilan chaqirilsa, javob
+# tayyorlanayotgan paytda holat hodisalarini beradi. Yetkazish usuli (SSE
+# ramkasi) **routerda** — bu qatlam transportni bilmaydi.
+#
+#   status {stage: "tool", tool: "<nom>"} — agent tool chaqirmoqda
+#   status {stage: "writing"}             — javob yozilmoqda
+#   token  {text: "<bo'lak>"}             — javob matni bo'laklari
+#
+# `status {stage: "thinking"}` — **transport** hodisasi (oqim ochilishi bilan
+# `routers/chat.py` beradi): u "ish boshlandi" degani va bu qatlamning ishi
+# boshlanishidan oldin ham chiqishi kerak (byudjet/shift tekshiruvi paytida).
+#
+# LLM fasadida hozircha oqim yo'q (`llm/base.py` da `stream` yo'q), shuning
+# uchun `token` bo'laklari tayyor javobdan kesiladi — frontend shartnomasi
+# esa rost oqim qo'shilganda ham o'zgarmaydi.
+EventSink = Callable[[str, dict[str, Any]], Awaitable[None]]
+
+#: Bitta `token` ramkasining taxminiy uzunligi. Kichikroq bo'lsa SSE
+#: ramkalari (har biri ~30 bayt ortiqcha) matnning o'zidan qimmatga tushadi.
+TOKEN_CHUNK_CHARS = 400
+
+
+async def emit(events: EventSink | None, kind: str, data: dict[str, Any]) -> None:
+    if events is not None:
+        await events(kind, data)
+
+
+def chunk_answer(text: str, size: int = TOKEN_CHUNK_CHARS) -> list[str]:
+    """Javobni ~`size` belgili bo'laklarga bo'ladi (bo'sh matn → bo'sh ro'yxat).
+
+    Bo'lish **satr chegarasida** emas, belgi bo'yicha: markdown bloklari
+    (jadval, kod) yarmida uzilsa ham frontend bo'laklarni qo'shib boradi va
+    to'liq matnni bir marta render qiladi.
+    """
+    if not text:
+        return []
+    return [text[i : i + size] for i in range(0, len(text), size)]
+
+
+async def _stream_answer(events: EventSink | None, text: str) -> None:
+    if events is None:
+        return
+    await events("status", {"stage": "writing"})
+    for part in chunk_answer(text):
+        await events("token", {"text": part})
 
 
 class ChatError(Exception):
@@ -95,15 +145,41 @@ async def create_conversation(
 
 
 async def list_conversations(
-    session: AsyncSession, user_id: int, *, limit: int = 50
+    session: AsyncSession,
+    user_id: int,
+    *,
+    limit: int = 50,
+    before: datetime | None = None,
 ) -> list[Conversation]:
+    """Suhbatlar, yangisidan eskisiga. `before` — kursor (`updated_at`).
+
+    Kursor OFFSET emas: ro'yxat ochiq turganda yangi suhbat qo'shilsa OFFSET
+    sahifalarni siljitadi va bitta yozuv ikki marta (yoki umuman) ko'rinmaydi.
+    `updated_at` qat'iy `<` bilan olinadi; bir xil vaqtli yozuvlarni ajratish
+    uchun tartibga `id` qo'shilgan (ikkinchi kalit).
+    """
+    stmt = select(Conversation).where(Conversation.user_id == user_id)
+    if before is not None:
+        stmt = stmt.where(Conversation.updated_at < before)
     rows = await session.execute(
-        select(Conversation)
-        .where(Conversation.user_id == user_id)
-        .order_by(Conversation.updated_at.desc())
-        .limit(limit)
+        stmt.order_by(Conversation.updated_at.desc(), Conversation.id.desc()).limit(limit)
     )
     return list(rows.scalars().all())
+
+
+async def rename_conversation(
+    session: AsyncSession, user_id: int, conversation_id: int, title: str
+) -> Conversation:
+    """Sarlavhani o'zgartiradi. Matn `untrusted.attr` dan o'tadi (≤120 belgi).
+
+    Nega zararsizlantirish: sarlavha ba'zan chat kontentidan (birinchi savol)
+    keladi va keyin promptga ham, sahifaga ham tushadi — teg o'xshash yozuv,
+    ko'rinmas/bidi belgilar va yangi satrlar shu yerda olib tashlanadi.
+    """
+    conv = await get_conversation(session, user_id, conversation_id)
+    conv.title = U.attr(title, max_chars=120)
+    await session.flush()
+    return conv
 
 
 async def get_conversation(
@@ -128,16 +204,105 @@ _NOT_ABORTED = func.coalesce(ConversationMessage.context["aborted"].astext, "") 
 
 
 async def list_messages(
-    session: AsyncSession, conversation_id: int, *, limit: int = 200
+    session: AsyncSession,
+    conversation_id: int,
+    *,
+    limit: int = 200,
+    before_id: int | None = None,
 ) -> list[ConversationMessage]:
-    """Suhbat qatorlari (eskidan yangiga). Uzilgan hisob qatorlari chiqmaydi."""
-    rows = await session.execute(
-        select(ConversationMessage)
-        .where(ConversationMessage.conversation_id == conversation_id, _NOT_ABORTED)
-        .order_by(ConversationMessage.id.desc())
-        .limit(limit)
+    """Suhbat qatorlari (eskidan yangiga). Uzilgan hisob qatorlari chiqmaydi.
+
+    `before_id` — kursor: shu `id` dan **eski** qatorlar olinadi ("yuqoriga
+    aylantirish"). Tanlov baribir `id desc` bo'yicha ketadi va oxirida
+    teskarilanadi, ya'ni javobda eng yangi qator **oxirida** turadi.
+    """
+    stmt = select(ConversationMessage).where(
+        ConversationMessage.conversation_id == conversation_id, _NOT_ABORTED
     )
+    if before_id is not None:
+        stmt = stmt.where(ConversationMessage.id < before_id)
+    rows = await session.execute(stmt.order_by(ConversationMessage.id.desc()).limit(limit))
     return list(reversed(rows.scalars().all()))
+
+
+async def take_for_regenerate(
+    session: AsyncSession, user_id: int, conversation_id: int, message_id: int
+) -> tuple[Conversation, str, dict[str, Any] | None]:
+    """Oxirgi user turn'ini qayta yugurtirishga tayyorlaydi.
+
+    `message_id` user qatori ham, uning javobi (assistant) ham bo'lishi mumkin
+    — ikkala holatda ham **o'sha user turn'i** olinadi. Turn'dan keyingi
+    qatorlar (eski javob) o'chiriladi va user qatorining o'zi ham o'chadi:
+    `send_message` uni qaytadan yozadi, ya'ni saqlash yo'li aynan oddiy
+    yuborish bilan bir xil qoladi (yagona yozuvchi).
+
+    Faqat **oxirgi** user turn'i qayta yugurtiriladi: suhbat o'rtasidagi
+    savolni qayta yugurtirish undan keyingi butun tarixni o'chirishni
+    anglatardi — bu kutilmagan ma'lumot yo'qotish.
+
+    Returns:
+        (suhbat, savol matni, user qatorining `context` maydoni)
+
+    Raises:
+        ChatError("not_found"): suhbat yoki xabar yo'q / begona.
+        ChatError("not_last"): bu oxirgi user turn'i emas.
+    """
+    conv = await get_conversation(session, user_id, conversation_id)
+    row = await session.get(ConversationMessage, message_id)
+    if row is None or row.conversation_id != conv.id:
+        raise ChatError("not_found")
+
+    if row.role == "user":
+        user_row = row
+    else:
+        prev = (
+            await session.execute(
+                select(ConversationMessage)
+                .where(
+                    ConversationMessage.conversation_id == conv.id,
+                    ConversationMessage.role == "user",
+                    ConversationMessage.id < row.id,
+                )
+                .order_by(ConversationMessage.id.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if prev is None:
+            raise ChatError("not_found")
+        user_row = prev
+
+    later_user = (
+        await session.execute(
+            select(ConversationMessage.id)
+            .where(
+                ConversationMessage.conversation_id == conv.id,
+                ConversationMessage.role == "user",
+                ConversationMessage.id > user_row.id,
+            )
+            .limit(1)
+        )
+    ).first()
+    if later_user is not None:
+        raise ChatError("not_last")
+
+    text = user_row.content
+    ctx = user_row.context
+    tail = (
+        (
+            await session.execute(
+                select(ConversationMessage).where(
+                    ConversationMessage.conversation_id == conv.id,
+                    ConversationMessage.id >= user_row.id,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for item in tail:
+        await session.delete(item)
+    await session.flush()
+    return conv, text, ctx
 
 
 async def delete_conversation(session: AsyncSession, user_id: int, conversation_id: int) -> None:
@@ -209,6 +374,7 @@ async def send_message(
     mode: str = "auto",
     account_id: int | None = None,
     locale: str = "uz",
+    events: EventSink | None = None,
 ) -> Reply:
     text = text.strip()
     if not text:
@@ -238,6 +404,7 @@ async def send_message(
             deep=deep,
             started=started,
             llm=llm,
+            events=events,
         )
 
     # User turn'i **bir marta** yoziladi: agent yo'li uzilsa ham (LLMError →
@@ -260,6 +427,7 @@ async def send_message(
                 locale=locale,
                 started=started,
                 llm=llm,
+                events=events,
             )
         except LLMError as exc:
             # tool'li provider yo'q (masalan claude_code) — direct rejimga tushamiz
@@ -358,6 +526,7 @@ async def send_message(
         ctx_tokens=context_used.get("est_tokens") if context_used else None,
     )
 
+    await _stream_answer(events, answer)
     return Reply(
         conversation_id=conversation.id,
         user_message_id=user_row.id,
@@ -404,6 +573,7 @@ async def _send_via_deep(
     deep: bool,
     started: float,
     llm: LLM | None = None,
+    events: EventSink | None = None,
 ) -> Reply:
     """`mode="deep"` → `services/deep_search.run_deep_search` (oqimsiz variant).
 
@@ -440,6 +610,7 @@ async def _send_via_deep(
         "candidates": result.candidates,
         "run_id": result.run_id,
     }
+    await _stream_answer(events, result.answer)
     return Reply(
         conversation_id=conversation.id,
         user_message_id=result.user_message_id or 0,
@@ -468,6 +639,7 @@ async def _send_via_agent(
     locale: str,
     started: float,
     llm: LLM | None,
+    events: EventSink | None = None,
 ) -> Reply:
     from app.services.agent import run_agent
 
@@ -487,6 +659,7 @@ async def _send_via_agent(
         pinned_chat=pinned,
         locale=locale,
         llm=llm,
+        on_event=events,
     )
     answer = outcome.text or _empty_answer(outcome.finish_reason)
     cost = estimate_cost(outcome.provider, outcome.model, outcome.tokens_in, outcome.tokens_out)
@@ -535,6 +708,7 @@ async def _send_via_agent(
         strategy="agent",
         tools=len(outcome.tool_calls),
     )
+    await _stream_answer(events, answer)
     return Reply(
         conversation_id=conversation.id,
         user_message_id=user_row.id,
