@@ -172,6 +172,38 @@ class Settings(BaseSettings):
     tg_rate_discover_per_min: int = Field(default=3, ge=0, le=600)
     tg_rate_discover_per_day: int = Field(default=30, ge=0, le=100_000)
 
+    # --- phase2/C ---
+    # Real-time updates listener (`app/worker/updates.py`, arxitektura v2 §8.3).
+    # FAQAT worker jarayonida ishlaydi — api'da hech qachon (bitta MTProto
+    # sessiya = update oqimining bitta iste'molchisi).
+    tg_updates_listener: bool = False
+    # catch_up (`updates.GetDifference`) davri, daqiqa; ±20% jitter bilan.
+    tg_updates_catchup_minutes: int = Field(default=30, ge=1, le=1440)
+    # Listener'ning `{peer → chats.id}` keshi (soniya). Noma'lum peer bu
+    # muddat ichida qayta so'ralmaydi — listener dialog tortmaydi.
+    tg_updates_chat_cache_s: int = Field(default=60, ge=5, le=3600)
+
+    # --- phase2/B ---
+    # Deep search (`services/deep_search.py`). Byudjetlar **kodda** turadi
+    # (`MAX_ROUNDS`, `MAX_CANDIDATES`, `DEEP_RESULT_TOKENS`) — bu yerda faqat
+    # operatsion tugmalar: rejimni o'chirish, devor vaqtini uzaytirish va
+    # foydalanuvchi bo'yicha shift (bitta deep so'rov ≈ 10x oddiy so'rov narxi).
+    deep_search_enabled: bool = True
+    deep_soft_wall_s: float = Field(default=0, ge=0, le=600)  # 0 = deep_search.SOFT_WALL_S
+    deep_hard_wall_s: float = Field(default=0, ge=0, le=900)  # 0 = deep_search.HARD_WALL_S
+    deep_rate_per_minute: int = Field(default=3, ge=0, le=60)
+
+    # --- phase2/A ---
+    # Ierarxik retrieval indeksi (`retrieval_nodes`): epizod → kun → hafta.
+    # Segmentatsiya qopqoqlari **kodda** (`services/episodes.py`: 45 daqiqa,
+    # 40 xabar, 6000 belgi) — ular o'lchov bilan qo'yilgan, env bilan emas.
+    # Bu yerda faqat operatsion tugmalar.
+    node_index_enabled: bool = True
+    # Bir cron yugurishida embed qilinadigan tugunlar (0 = `embed_batch_per_run`).
+    node_embed_batch_per_run: int = Field(default=0, ge=0, le=5000)
+    # Hafta tugunlari (level 3) — bitta `Task.ROUTE` chaqiruvi, chat bo'yicha.
+    week_nodes_enabled: bool = True
+
     @field_validator("master_key_b64")
     @classmethod
     def _check_master_key(cls, v: str) -> str:

@@ -19,7 +19,12 @@ def upgrade() -> None:
     op.create_table(
         "generated_images",
         sa.Column("id", sa.String(36), primary_key=True),
-        sa.Column("user_id", sa.Integer, sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+        sa.Column(
+            "user_id",
+            sa.Integer,
+            sa.ForeignKey("users.id", ondelete="CASCADE"),
+            nullable=False,
+        ),
         sa.Column("account_id", sa.Integer, sa.ForeignKey("accounts.id", ondelete="SET NULL")),
         sa.Column("prompt", sa.Text, nullable=False, server_default=""),
         sa.Column("model", sa.String(64), nullable=False, server_default=""),
@@ -32,8 +37,18 @@ def upgrade() -> None:
     op.create_table(
         "auto_reply_rules",
         sa.Column("id", sa.Integer, primary_key=True),
-        sa.Column("account_id", sa.Integer, sa.ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False),
-        sa.Column("chat_id", sa.Integer, sa.ForeignKey("chats.id", ondelete="CASCADE"), nullable=False),
+        sa.Column(
+            "account_id",
+            sa.Integer,
+            sa.ForeignKey("accounts.id", ondelete="CASCADE"),
+            nullable=False,
+        ),
+        sa.Column(
+            "chat_id",
+            sa.Integer,
+            sa.ForeignKey("chats.id", ondelete="CASCADE"),
+            nullable=False,
+        ),
         sa.Column("enabled", sa.Boolean, nullable=False, server_default=sa.false()),
         sa.Column("trigger", sa.String(16), nullable=False, server_default="questions"),
         sa.Column("keywords", sa.Text, nullable=False, server_default=""),

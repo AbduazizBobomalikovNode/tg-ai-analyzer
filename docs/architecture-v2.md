@@ -537,6 +537,33 @@ Kesimlar: `uz-lat`, `uz-cyr`, `ru-cyr`, `ru-translit`, `en`.
 Real akkaunt ulangunicha: unit testlar + docker compose Postgres (CI'da service
 sifatida) — `uz_fold` pariteti, RRF determinizmi, dedup, qamrov hisoboti.
 
+### 10.1 Aniq buyruqlar
+
+```bash
+# 1) Golden to'plam qurish (real akkaunt + LLM kerak — DB'ga va providerga ulanadi)
+python -m evals.build_golden --account-id 1 --n 400 --out evals/golden.jsonl --seed 1
+# qo'lda yozilgan ko'p-bosqichli savollarni birlashtirish:
+python -m evals.build_golden --account-id 1 --n 400 --out evals/golden.jsonl --hard evals/hard.jsonl
+
+# 2) Baholash — bitta konfiguratsiya, kamida 3 yugurish (CLAUDE.md qoidasi)
+python -m evals.run_eval --golden evals/golden.jsonl --config baseline --runs 3 \
+    --out evals/runs/2026-09-15.json
+
+# hammasini bitta chaqiruvda taqqoslash (baseline / expand / expand+rerank / deep)
+python -m evals.run_eval --golden evals/golden.jsonl \
+    --config baseline expand expand+rerank deep --runs 3
+
+# yoki Makefile orqali:
+make eval-golden account=1 args="--n 400 --seed 1"
+make eval-run args="--golden evals/golden.jsonl --config baseline expand --runs 3"
+```
+
+`--config deep` `services/deep_search.py` mavjud bo'lmasa (2-bosqich hali
+tugallanmagan bo'lsa) xatosiz o'tkazib yuboriladi — natijada shu
+konfiguratsiya uchun `"skipped": true` + izoh. `evals/golden.jsonl` va
+`evals/runs/` `.gitignore`'da — bu buyruqlarning natijasi hech qachon
+commit qilinmaydi.
+
 ## 11. Narx
 
 | Nima | Taxmin |
@@ -558,8 +585,16 @@ jimgina ishlamay qoladi.
 |---|---|---|
 | **0 — joriy** | 5 ta HIGH xato: envelope escape, `input_peer` access_hash, duplicate row, confirm race, strict `zip` | `test_phase0.py`, `test_write_actions.py` |
 | **1 — Retrieval poydevori** (akkauntsiz testlanadi) | migratsiya (ustunlar, generated columns, GIN, `lang`, fwd, `top_msg_id`, `deleted_at`/`edited_at`, `link_prefix`, `chat_digests` kengaytmasi); `services/textnorm.py` + SQL `uz_fold`; sanitizatsiya `ingestion.py` da; `services/stopwords.py`; trigram fix + `task_type` (`search.py`); so'rov kengaytirish + og'irlikli RRF; `services/rerank.py`; `services/cluster.py`; Telethon 1.44; `allowlist.py` +12; token bucket'lar (`tools.py`); `search_telegram` parametrlari + 4 yangi tool + `prompts.py` | `test_textnorm.py` (SQL/Python paritet), `test_search_quality.py`, `test_allowlist.py`, `test_tg_search.py`, CI'ga Postgres service + append-only trigger testi |
-| **2 — Ierarxik indeks + deep search** | `retrieval_nodes` / epizodlar / `halfvec`; kontekstli embedding; digest embedding + L2/L3; `services/deep_search.py`; SSE `/api/deep/stream` + UI (klaster yorliqlari, qamrov paneli); updates listener (`worker/tasks.py`); bench | `test_episodes.py`, `test_deep_search.py` (taint chegarasi), `test_coverage_report.py` |
-| **3 — Qamrov + mahsulot** | `discover_channels` / `SearchPosts` / forum tool'lar; digest push + quiet hours; alertlar; `node_entities`; golden set + eval harness (real akkaunt); Batch API; `gemini-embedding-2` re-embed | `evals/` harness, `test_digest_push.py` |
+| **2 — Ierarxik indeks + deep search** ✅ *(qolgani pastda)* | ✅ `retrieval_nodes` / epizodlar / `halfvec` (migratsiya `0009`); ✅ kontekstli embedding; ✅ digest embedding + L2/L3 (`services/nodes.py`); ✅ `services/deep_search.py` (plan → fan-out → cluster → rerank → reflect → synth); ✅ SSE `/api/deep/stream` + UI (klaster yorliqlari, qamrov paneli); ✅ updates listener (`worker/updates.py`, `TG_UPDATES_LISTENER`); ✅ eval harness (`evals/`, `test_evals.py`) | ✅ `test_episodes.py`, `test_nodes.py`, `test_deep_search.py` (taint chegarasi), `test_updates.py`, `test_evals.py` |
+| **3 — Qamrov + mahsulot** | ⬜ `discover_channels` / `SearchPosts` / forum tool'lar; ⬜ digest push + quiet hours; ⬜ alertlar; ⬜ `node_entities`; ⬜ golden set (real akkaunt bilan to'ldirish); ⬜ Batch API; ⬜ `gemini-embedding-2` re-embed | `evals/` harness, `test_digest_push.py` |
+
+**2-bosqichdan qolgani** (3-bosqichga o'tdi, chunki server burchaklariga
+bog'liq): deep search ichida **server pog'onalari** — `search_telegram` /
+`search_global` ni fan-out'ga qo'shish hali yo'q (hozir faqat lokal DB
+kanallari: `hybrid_search_multi` + `node_search`). Qamrov hisobotida
+"sinxronlanmagan tarix" `gaps` bo'lib ko'rinadi, lekin avtomatik
+to'ldirilmaydi. `test_coverage_report.py` alohida fayl sifatida yozilmadi —
+qamrov matematikasi `test_deep_search.py` ichida qo'riqlanadi.
 
 Har bosqich o'z testlari bilan tugaydi; CI invariant qadami
 (`test_allowlist.py`, `test_peer_guard.py`, `test_write_actions.py`,

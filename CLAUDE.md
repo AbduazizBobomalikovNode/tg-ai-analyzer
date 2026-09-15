@@ -74,6 +74,70 @@ bu testlarni o'chirish/yumshatish taqiqlanadi.
   bahosi bilan yonma-yon.
 - `llm/pricing.py` — taxmin; yangi model qo'shsangiz jadvalni yangilang.
 
+## Deep search (v2, 2-bosqich)
+
+`services/deep_search.py` — `services/agent.py` dan **boshqa narsa**: model
+tool tanlamaydi, bosqichlar kodda qattiq turadi:
+PLAN → fan-out → dedup/cluster → rerank → (≤1 qo'shimcha raund) reflect →
+synth → qamrov. Web: `POST /api/conversations/{id}/messages` `mode="deep"`
+(oqimsiz,
+`chat_service.send_message`) yoki `POST /api/deep/stream` (SSE,
+`web/routers/deep.py`).
+
+- **Dual-LLM taint guard.** `plan` va `reflect` prompt'lariga xabar matni
+  **hech qachon** tushmaydi — `_Taint.assert_clean()` har chaqiruvdan oldin
+  tekshiradi, buzilsa `DeepSearchError("taint")`. Yangi bosqich qo'shsangiz
+  uni ham shu qo'riqchidan o'tkazing.
+- **Bitta konvert.** Dalillar faqat bitta `<untrusted_data kind="evidence">`
+  ichida, har satr `untrusted.neutralize` dan o'tgan. Ikkinchi konvert
+  qo'shmang.
+- **Qamrov (`Coverage`) kodda hisoblanadi**, modelga yozdirilmaydi. `gaps` =
+  `synced_min_id != 1` chatlar; `server_rungs_used` hozircha har doim `False`
+  (server pog'onalari 3-bosqichda). "Hamma xabarlarni ko'rdim" degan gap
+  chiqmasin.
+- **Yagona yozuvchi — `deep_search._persist`.** User turn + assistant turn +
+  `agent_runs` bitta joyda yoziladi; boshqa joydan `conversation_messages`
+  ga deep natijasini yozmang. Rejim `context.mode = "deep"` da.
+- **Byudjetlar konstanta** (`MAX_ROUNDS=2`, `MAX_CANDIDATES=400`,
+  `PER_SUBQUERY_LIMIT=40`, `DEEP_RESULT_TOKENS=20_000`, `SOFT_WALL_S=60`,
+  `HARD_WALL_S=120`) — `MAX_CALLS_PER_TOOL` bilan bir mantiq: xavfsizlik
+  qopqog'i. Wall clock'ni `.env` (`DEEP_SOFT_WALL_S`/`DEEP_HARD_WALL_S`)
+  bekor qiladi, qolganini emas.
+- `DEEP_RATE_PER_MINUTE` (default 3, 0 = deep butunlay o'chiq) —
+  `limits.check_deep_rate`, foydalanuvchi bo'yicha. Kunlik byudjet
+  tekshiruvi har doim **birinchi** LLM chaqirig'idan oldin.
+- Fan-out'da har subquery **o'z sessiyasi** bilan ishlaydi (bitta
+  `AsyncSession` parallelga xavfsiz emas). Reja oynasi (`since`/`until`)
+  `hybrid_search_multi` ga ham, `node_search` ga ham uzatiladi.
+
+### `retrieval_nodes` (`services/nodes.py`, `services/episodes.py`)
+
+- Darajalar: **0** xom xabar · **1** epizod · **2** kun · **3** hafta.
+  Sitata **har doim level 0** ga tushadi: `NodeHit` da `message_id` yo'q,
+  shuning uchun tugun topilmalari `search.node_hits_to_messages` orqali
+  xabarlarga qaytariladi va shundan keyingina `rrf` ga kiradi.
+- **Hafta tuguni faqat kun tugunlaridan** quriladi (`build_week_nodes`) —
+  xom xabardan emas. Bu yagona LLM ko'radigan joy va u begona matnni
+  `<untrusted_data>` konvertida oladi.
+- **Epizod segmentatsiyasi deterministik** — LLM'siz (gap/limit chegaralari +
+  reply-zanjir union-find). Bir xil kirish → bir xil natija; bu yerga model
+  qo'shmang.
+- `TG_UPDATES_LISTENER` (`worker/updates.py`) — **faqat worker**, default
+  `false`. `api` da yoqilmasin: bitta akkauntga ikkita listener = ortiqcha
+  MTProto oqimi.
+
+### `evals/` — o'lchov
+
+```bash
+make eval-golden account=1 args="--n 400 --seed 1"
+make eval-run args="--golden evals/golden.jsonl --config baseline expand deep --runs 3"
+```
+
+Real DB/LLM'ga ulanadi, `pytest`/`ci` ularni yugurtirmaydi (`tests/test_evals.py`
+faqat sof funksiyalarni tekshiradi). **Kamida 3 yugurish** — LLM tebranadi,
+bitta yugurish hech narsani isbotlamaydi (narx qopqoqlari bilan bir qoida).
+`evals/golden.jsonl` va `evals/runs/` commit qilinmaydi.
+
 ## Frontend
 
 - `web/static/md.js` — AI javoblari uchun **yagona** Markdown renderer. Xavfsizlik
