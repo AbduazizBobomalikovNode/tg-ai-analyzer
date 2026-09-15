@@ -63,6 +63,9 @@ class Settings(BaseSettings):
     # Yozish amallari (6-bosqich): taklif muddati va akkaunt bo'yicha soatlik limit
     write_proposal_ttl_hours: int = Field(default=24, ge=1, le=168)
     write_rate_per_hour: int = Field(default=20, ge=1, le=500)
+    # Telegram server-side qidiruv (agent tool'lari). Har chaqiruv real MTProto
+    # so'rovi — akkaunt bo'yicha daqiqalik shift. 0 = tool'lar o'chiq.
+    tg_search_rate_per_minute: int = Field(default=10, ge=0, le=120)
     # Embedding indeksi (vektor qidiruv). Gemini embed — arzon, lekin o'chirsa bo'ladi
     embed_enabled: bool = True
     embed_batch_per_run: int = Field(default=500, ge=50, le=5000)
@@ -146,6 +149,28 @@ class Settings(BaseSettings):
     default_locale: str = "uz"
     max_accounts: int = Field(default=3, ge=1, le=10)
     default_write_mode: WriteMode = WriteMode.WRITE_WITH_CONFIRM
+
+    # --- phase1/A2 ---
+    # So'rov kengaytirish: bitta Task.ROUTE chaqiruvi + Redis kesh (arxitektura v2, 6-bo'lim).
+    search_expand_enabled: bool = True
+    search_expand_ttl_s: int = Field(default=24 * 3600, ge=60)
+    # Rerank: "llm" (listwise, Task.ROUTE) yoki "none" (kirish tartibi saqlanadi).
+    # Tashqi provider (vertex/cohere) — 13-bo'limdagi ochiq savol, hozircha yo'q.
+    rerank_provider: str = "llm"
+    rerank_top_n: int = Field(default=40, ge=1, le=200)
+
+    # --- phase1/B ---
+    # MTProto metod sinflari bo'yicha shift (`app/mtproto/ratelimit.py`).
+    # Bitta umumiy kvota o'rniga to'rtta: arzon tarix o'qish qimmat global
+    # qidiruv bilan bir xil chegarada turmasin. `TG_SEARCH_RATE_PER_MINUTE`
+    # eskirgan alias bo'lib qoladi: sukutdan farq qilsa `search` ni boshqaradi,
+    # 0 esa serverga boradigan barcha tool'larni o'chiradi.
+    tg_rate_history_per_min: int = Field(default=40, ge=0, le=600)
+    tg_rate_search_per_min: int = Field(default=12, ge=0, le=600)
+    tg_rate_resolve_per_min: int = Field(default=4, ge=0, le=600)
+    tg_rate_resolve_per_day: int = Field(default=60, ge=0, le=100_000)
+    tg_rate_discover_per_min: int = Field(default=3, ge=0, le=600)
+    tg_rate_discover_per_day: int = Field(default=30, ge=0, le=100_000)
 
     @field_validator("master_key_b64")
     @classmethod

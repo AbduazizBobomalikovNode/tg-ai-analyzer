@@ -68,9 +68,10 @@ async def test_run_tool_unknown_and_exception_are_text() -> None:
 
 
 class _Session:
-    def __init__(self, writable: bool = False) -> None:
+    def __init__(self, writable: bool = False, chats: list[Any] | None = None) -> None:
         self.added: list[Any] = []
         self.writable = writable
+        self.chats = chats or []  # runtime_note ichidagi chat indeksi uchun
 
     def add(self, obj: Any) -> None:
         self.added.append(obj)
@@ -79,8 +80,12 @@ class _Session:
 
     async def flush(self) -> None: ...
 
-    async def execute(self, *a: Any, **k: Any) -> Any:  # writable_chats_exist uchun
-        return SimpleNamespace(first=lambda: (1,) if self.writable else None)
+    async def execute(self, *a: Any, **k: Any) -> Any:
+        # `writable_chats_exist` → .first(); `chat_index` → .scalars().all()
+        return SimpleNamespace(
+            first=lambda: (1,) if self.writable else None,
+            scalars=lambda: SimpleNamespace(all=lambda: list(self.chats)),
+        )
 
 
 class _LLM:
@@ -188,7 +193,9 @@ async def test_agent_caps_calls_per_turn_and_result_budget(
     monkeypatch.setenv("AGENT_TOOL_RESULT_TOKENS", "1500")
     get_settings.cache_clear()
     try:
-        calls = [ToolCall(f"c{i}", "get_recent_messages", {"limit": 10}) for i in range(6)]
+        # Har biri boshqa argument bilan — aks holda takror-qopqog'i (`seen_calls`)
+        # ularni bajarilishidan oldin to'sadi va bu test qopqoqni o'lchamaydi.
+        calls = [ToolCall(f"c{i}", "get_recent_messages", {"limit": 10 + i}) for i in range(6)]
         llm = _LLM([_res(calls=calls), _res("done")])
         out = await A.run_agent(
             _Session(),  # type: ignore[arg-type]
@@ -202,13 +209,41 @@ async def test_agent_caps_calls_per_turn_and_result_budget(
         )
     finally:
         get_settings.cache_clear()
-    assert len(fake_tool) == A.MAX_CALLS_PER_TURN  # 6 so'raldi, 4 bajarildi
+    # Ikkita qopqoq birga ishlaydi: turnda ≤4, bitta tool uchun ≤3 → 3 bajariladi
+    assert len(fake_tool) == A.MAX_CALLS_PER_TOOL
     msgs = llm.calls[1]["messages"]
     tool_msgs = [m for m in msgs if m.role.value == "tool"]
     assert len(tool_msgs) == 6  # bajarilmaganlarga ham javob (error) bor
     assert any("too many tool calls" in m.content for m in tool_msgs)
+    assert any("already called" in m.content for m in tool_msgs)  # tool qopqog'i
     assert any("result budget exhausted" in m.content for m in tool_msgs)
     assert out.result_tokens <= 1500 + 400
+
+
+async def test_agent_blocks_identical_repeat_calls(fake_tool: list[dict[str, Any]]) -> None:
+    """Aynan bir xil (tool, args) ikkinchi marta bajarilmaydi — natija o'zgarmaydi."""
+    same = {"chat": "C", "query": "narx"}
+    llm = _LLM(
+        [
+            _res(calls=[ToolCall("a", "search_messages", same)]),
+            _res(calls=[ToolCall("b", "search_messages", dict(same))]),  # aynan o'sha
+            _res("done"),
+        ]
+    )
+    out = await A.run_agent(
+        _Session(),  # type: ignore[arg-type]
+        user_id=1,
+        account_id=5,
+        question="q",
+        history=[],
+        pinned_chat=None,
+        locale="en",
+        llm=llm,  # type: ignore[arg-type]
+    )
+    assert len(fake_tool) == 1  # ikkinchisi DB'ga/MTProto'ga umuman bormadi
+    tool_msgs = [m for m in llm.calls[2]["messages"] if m.role.value == "tool"]
+    assert any("identical call already made" in m.content for m in tool_msgs)
+    assert out.text == "done"
 
 
 # ─── rejim tanlash ───────────────────────────────────────────────────────────

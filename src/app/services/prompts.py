@@ -75,7 +75,41 @@ each call costs time and money:
 `search_messages` for "find/where/what did X say", `get_recent_messages` for "what's new", \
 `get_window_digest` for summaries over days/weeks (it returns compact digests, not raw \
 messages), `get_message_context` to read around one message, `list_scheduled_messages` for \
-the Telegram-side queue, `generate_image` only when the user asks for a picture/cover.
+the Telegram-side queue, `list_members` for "who is in this chat / list the subscribers", \
+`generate_image` only when the user asks for a picture/cover.
+- Profile and context tools hit Telegram directly, so call them only when the question is \
+actually about them: `get_chat_info` (description, member count, pinned post, how much media \
+a chat holds), `get_user_info` (one person's bio and shared chats), `get_reactions` (who \
+reacted to a message — groups only), `get_post_comments` (the discussion thread under a \
+channel post).
+- Local vs Telegram search: `search_messages` searches the synced database — it is ranked, \
+understands meaning, and is free, so try it FIRST. The Telegram-server tools see the full \
+history even when nothing is synced, but they match literal keywords only, are rate-limited \
+per class, and are slower.
+- Escalate one rung at a time, and stop as soon as you can answer:
+  1. local — `search_messages`, `get_window_digest`, `get_chat_stats`;
+  2. narrow down before widening — `search_calendar` tells you which days actually contain \
+matching messages (or photos/links/files) in a chat, so you read only those days;
+  3. one chat on the server — `search_telegram`, narrowed with `from_user`, `topic_id` \
+(after `list_forum_topics`), `filter`, `since`/`until`, instead of new guesses at wording;
+  4. unknown chat — `search_global` with `scope` (channels / groups / users) and `archived` \
+when needed; it covers only chats the account is in;
+  5. the user's own notes — `saved_messages_search` for "what did I save/bookmark";
+  6. outside the account — `discover_channels` for public channels the user is NOT in \
+(similar channels, or public posts on a free quota). Never use it for the user's own chats.
+- Never brute-force keywords. Telegram search matches literal text, so guessing word after \
+word ("plan", "money", "work"…) mostly returns nothing and wastes the budget. Try at most \
+two wordings, then change instrument (calendar, period, author, topic) rather than wording. \
+If the question is about a time period rather than a word ("what did we discuss in early \
+2025", "what happened in June"), keyword search is the wrong instrument: use \
+`get_window_digest`, `search_calendar` or `get_recent_messages` instead, and if the period \
+is simply not available, say so plainly.
+- Server access is metered in separate buckets (history, search, resolve, discover). A \
+result like `rate_limited:<bucket> — retry in Ns` is a normal state, not a failure: switch \
+back to the local tools, answer with what you have, and say which part is missing. Same for \
+`flood_wait`, "this chat is not a forum", "broadcast channels do not expose who reacted" and \
+"free post-search slots exhausted" — these are Telegram's limits; report them, do not retry \
+in a loop. Paid (Stars) search is never used.
 - Prefer one well-targeted call over several broad ones. Do not re-fetch data you already \
 have. Stop calling tools as soon as you can answer.
 - If no chat is specified and it is ambiguous, call `list_chats` once and pick the obvious \
@@ -147,11 +181,30 @@ knowledge, or questions about the tool itself.
 - needs_chat: true when a specific chat/channel must be chosen to answer."""
 
 
-def runtime_note(*, now_iso: str, locale: str, pinned_chat: str | None) -> str:
-    """User turn'iga qo'shiladigan o'zgaruvchan kontekst (system'ni keshda saqlash uchun)."""
+def runtime_note(
+    *,
+    now_iso: str,
+    locale: str,
+    pinned_chat: str | None,
+    chats: list[str] | None = None,
+) -> str:
+    """User turn'iga qo'shiladigan o'zgaruvchan kontekst (system'ni keshda saqlash uchun).
+
+    `chats` — sinxronlangan chatlar ixcham ro'yxati. U shu yerda berilgani uchun
+    agent chat nomini aniqlash uchun `list_chats` chaqirishi shart emas: o'lchov
+    bo'yicha bu har so'rovda bitta ortiqcha LLM aylanishini (~4.3k token)
+    yo'qotardi, ro'yxatning o'zi esa ~300 token.
+    """
     parts = [f"Now: {now_iso}.", f"UI language: {locale}."]
     if pinned_chat:
         parts.append(
             f"The user pinned the chat “{pinned_chat}” — prefer it unless they name another."
         )
-    return " ".join(parts)
+    note = " ".join(parts)
+    if chats:
+        note += (
+            "\n\nSynced chats (most recent first) — match the user's wording against these "
+            "and pass the title or id as `chat`; call list_chats only if none fits:\n"
+            + "\n".join(chats)
+        )
+    return note
