@@ -14,10 +14,40 @@ PRICES: dict[str, tuple[float, float]] = {
     "claude-opus-4-8": (5.0, 25.0),
     "claude-sonnet-5": (3.0, 15.0),
     "claude-haiku-4-5": (1.0, 5.0),
-    # Google
+    # Google — 2.5 avlod (2026-09'dan yangi mijozlarga yopiq, lekin joriy
+    # deploy'lar/eski override'lar hali shu nomlarni ishlatishi mumkin —
+    # qator o'chirilmaydi, aks holda ularning xarajati kuzatilmay qoladi).
     "gemini-2.5-pro": (1.25, 10.0),
     "gemini-2.5-flash": (0.30, 2.50),
     "gemini-2.5-flash-lite": (0.10, 0.40),
+    # 3.x avlod — ai.google.dev/gemini-api/docs/pricing, 2026-09-16 tekshirilgan.
+    "gemini-3.5-flash-lite": (0.30, 2.50),
+    "gemini-3.5-flash": (1.50, 9.00),
+    # Narx 200k tokengacha bo'lgan bosqich uchun ($4.00/$18.00 — 200k dan
+    # yuqori). Bizning jadval bitta narx qabul qiladi — arzonroq (odatiy)
+    # bosqich olingan, kam baholashdan ko'ra son quyi chiqadi (qopqoq baribir
+    # katta kontekstda ham ishlaydi, faqat biroz kam baholaydi).
+    "gemini-3.1-pro-preview": (2.00, 12.00),
+    # `gemini-pro-latest` — hozircha `gemini-3.1-pro-preview`ga alias
+    # (2026-09-16 tekshirilgan, `model_version` shu nomni qaytaradi). Alias
+    # boshqa modelga o'tsa narx eskiradi — # taxmin 2026-09-16.
+    "gemini-pro-latest": (2.00, 12.00),
+    # `gemini-flash-latest` / `gemini-flash-lite-latest` — alias, hozir mos
+    # ravishda 3.8-flash / 3.5-flash-lite'ga ko'rsatadi. Google bularni
+    # muddatsiz "eng so'nggi" modelga almashtirib turadi — # taxmin 2026-09-16,
+    # narx alias siljiganda eskiradi.
+    "gemini-flash-latest": (0.75, 3.75),
+    "gemini-flash-lite-latest": (0.30, 2.50),
+    "gemini-3.1-flash-lite": (0.25, 1.50),
+    "gemini-3.6-flash": (0.75, 3.75),
+    "gemini-3.7-flash": (0.75, 3.75),
+    "gemini-3.8-flash": (0.75, 3.75),
+    # Rasm generatsiya — `gemini-2.5-flash-image` bilan bir xil konvensiya
+    # (pastdagi izohga qarang): 1K piksel rasm ≈ $0.067, `IMAGE_OUTPUT_TOKENS`
+    # (1290) ekvivalenti bilan $0.067/1290*1e6 ≈ $51.94/M output. Matn kiritish
+    # standart narxda ($0.25/M). # taxmin 2026-09-16 (rasmiy narx sahifasida
+    # to'g'ridan-to'g'ri token narxi yo'q, faqat rasm-boshiga narx e'lon qilingan).
+    "gemini-3.1-flash-image": (0.25, 51.94),
     "gemini-embedding-001": (0.15, 0.0),
     # Rasm generatsiya. Gemini narxni **rasm boshiga** e'lon qiladi, bizning
     # jadval esa token bo'yicha — shuning uchun output tokeni sifatida
@@ -56,6 +86,19 @@ BATCH_PRICES: dict[str, float] = {
     "gemini-embedding-001": 0.075,
     "gemini-embedding-2": 0.10,
     "gemini-embedding-2-preview": 0.10,
+    # Suhbat modellari (3.x, ai.google.dev/gemini-api/docs/pricing,
+    # 2026-09-16) — batch input ham jonli narxning yarmi. DIQQAT: bu jadval
+    # faqat **input**ni chegirmalaydi (`estimate_cost` output'ni doim jonli
+    # narxda hisoblaydi) — hozircha zarari yo'q, chunki bu loyihada chat
+    # vazifalari uchun batch yo'li yo'q (faqat embedding), lekin kelajakda
+    # chat batch qo'shilsa shu funksiya ham yangilanishi kerak.
+    "gemini-3.5-flash-lite": 0.15,
+    "gemini-3.5-flash": 0.75,
+    "gemini-3.1-pro-preview": 1.00,
+    "gemini-3.1-flash-lite": 0.125,
+    "gemini-3.6-flash": 0.375,
+    "gemini-3.7-flash": 0.375,
+    "gemini-3.8-flash": 0.375,
 }
 
 

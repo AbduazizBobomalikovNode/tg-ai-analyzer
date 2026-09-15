@@ -15,6 +15,7 @@ from app.llm.base import (
     ToolCall,
     ToolSpec,
     Usage,
+    estimate_tokens_heuristic,
     sanitize_json_schema,
 )
 from app.llm.router import (
@@ -60,6 +61,7 @@ __all__ = [
     "default_model",
     "effective_provider",
     "embed_model_name",
+    "estimate_tokens_heuristic",
     "get_provider",
     "reset",
     "resolve",

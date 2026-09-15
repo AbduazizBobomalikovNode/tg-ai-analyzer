@@ -306,11 +306,40 @@ def test_every_task_has_requirements() -> None:
 
 
 def test_model_override_replaces_model_but_not_provider(monkeypatch: pytest.MonkeyPatch) -> None:
-    use(monkeypatch, LLM_PROVIDER="gemini", LLM_MODEL_ROUTE="gemini-2.5-flash-lite-002")
+    use(monkeypatch, LLM_PROVIDER="gemini", LLM_MODEL_ROUTE="gemini-3.5-flash-lite-002")
     provider, model = R.resolve(R.Task.ROUTE)
-    assert (provider.name, model) == ("gemini", "gemini-2.5-flash-lite-002")
+    assert (provider.name, model) == ("gemini", "gemini-3.5-flash-lite-002")
     # boshqa vazifalar tegilmaydi
-    assert R.resolve(R.Task.SEARCH)[1] == "gemini-2.5-flash"
+    assert R.resolve(R.Task.SEARCH)[1] == "gemini-3.5-flash"
+
+
+def test_image_model_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """IMAGE ham endi override qilinadi (avval `MODEL_OVERRIDE_ENV`da yo'q edi)."""
+    use(monkeypatch, LLM_PROVIDER="gemini", LLM_MODEL_IMAGE="gemini-3.1-flash-image")
+    provider, model = R.resolve(R.Task.IMAGE)
+    assert (provider.name, model) == ("gemini", "gemini-3.1-flash-image")
+    # boshqa vazifalar tegilmaydi
+    assert R.resolve(R.Task.ROUTE)[1] == "gemini-3.5-flash-lite"
+
+
+def test_invalid_image_override_raises_clearly(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Rasm imkoniyati yo'q model IMAGE'ga qo'yilsa — aniq xato."""
+    use(monkeypatch, LLM_PROVIDER="gemini", LLM_MODEL_IMAGE="gemini-3.5-flash")
+    with pytest.raises(LLMError, match="LLM_MODEL_IMAGE"):
+        R.resolve(R.Task.IMAGE)
+
+
+def test_gemini_default_models_use_the_3x_generation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """2026-09: 2.5 suhbat modellari yangi mijozlarga yopiq — defaultlar 3.x."""
+    use(monkeypatch, LLM_PROVIDER="gemini")
+    assert R.resolve(R.Task.ROUTE)[1] == "gemini-3.5-flash-lite"
+    assert R.resolve(R.Task.SEARCH)[1] == "gemini-3.5-flash"
+    assert R.resolve(R.Task.TOOLS)[1] == "gemini-3.5-flash"
+    assert R.resolve(R.Task.DEEP)[1] == "gemini-3.1-pro-preview"
+    # Embedding va rasm o'zgarmagan — alohida o'tish yo'li (`EMBED_MODEL`,
+    # `LLM_MODEL_IMAGE`) talab qiladi.
+    assert R.resolve(R.Task.EMBED)[1] == "gemini-embedding-001"
+    assert R.resolve(R.Task.IMAGE)[1] == "gemini-2.5-flash-image"
 
 
 def test_model_override_is_provider_agnostic(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -360,17 +389,21 @@ def test_embed_dims_config(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_retiring_note_with_fixed_clock() -> None:
     from datetime import date
 
-    assert R.RETIRING["gemini-2.5-flash-lite"] == "2026-10-16"
+    # 2026-09: 2.5 avlod suhbat modellari (flash-lite/flash/pro) yangi
+    # mijozlarga yopiq — uchtasi ham RETIRING'da, bitta sana bilan.
+    assert R.RETIRING["gemini-2.5-flash-lite"] == "2026-09-01"
+    assert R.RETIRING["gemini-2.5-flash"] == "2026-09-01"
+    assert R.RETIRING["gemini-2.5-pro"] == "2026-09-01"
     # 45 kundan uzoq — jim
     assert R.retiring_note("gemini-2.5-flash-lite", today=date(2026, 1, 1)) is None
-    # oyna ichida — ogohlantirish ma'lumoti
+    # sana allaqachon o'tgan — baribir ogohlantiriladi (manfiy kun)
     note = R.retiring_note("models/gemini-2.5-flash-lite", today=date(2026, 9, 15))
-    assert note == {"model": "gemini-2.5-flash-lite", "retires": "2026-10-16", "days_left": 31}
-    # sana o'tib ketgan bo'lsa ham ogohlantiriladi (manfiy kun)
-    passed = R.retiring_note("gemini-2.5-flash-lite", today=date(2026, 11, 1))
-    assert passed is not None and passed["days_left"] < 0
+    assert note is not None
+    assert note["model"] == "gemini-2.5-flash-lite"
+    assert note["retires"] == "2026-09-01"
+    assert note["days_left"] < 0
     # ro'yxatda yo'q model
-    assert R.retiring_note("gemini-2.5-flash", today=date(2026, 9, 15)) is None
+    assert R.retiring_note("gemini-3.5-flash-lite", today=date(2026, 9, 15)) is None
 
 
 def test_retiring_warning_fires_once() -> None:
@@ -382,16 +415,46 @@ def test_retiring_warning_fires_once() -> None:
     assert R.warn_retiring_once("gemini-2.5-flash-lite", today=date(2026, 9, 15)) is not None
 
 
-def test_resolve_route_marks_retiring_model(monkeypatch: pytest.MonkeyPatch) -> None:
-    """ROUTE default eskirish ro'yxatida — resolve uni belgilab qo'yadi."""
-    use(monkeypatch, LLM_PROVIDER="gemini")
-    assert R.resolve(R.Task.ROUTE)[1] == "gemini-2.5-flash-lite"
-    # ogohlantirish bir marta yozilgan (ikkinchi chaqiruvda takrorlanmaydi)
-    assert "gemini-2.5-flash-lite" in R._retiring_warned
+def test_resolve_marks_retiring_model_for_any_task(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ilgari faqat ROUTE tekshirilardi — endi istalgan `Task` uchun.
+
+    Yangi default'lar (3.x) RETIRING'da emas, shuning uchun bu yerda
+    eskirgan 2.5 modelga **override** bilan tushiladi — SEARCH orqali,
+    ROUTE emas (regressiyani aynan shu farq ushlaydi).
+    """
+    use(monkeypatch, LLM_PROVIDER="gemini", LLM_MODEL_SEARCH="gemini-2.5-flash")
+    assert R.resolve(R.Task.SEARCH)[1] == "gemini-2.5-flash"
+    assert "gemini-2.5-flash" in R._retiring_warned
+    # ROUTE default'i (3.5-flash-lite) eskirish ro'yxatida emas — ogohlantirmaydi
+    assert R.resolve(R.Task.ROUTE)[1] == "gemini-3.5-flash-lite"
+    assert "gemini-3.5-flash-lite" not in R._retiring_warned
 
 
 def test_every_task_with_override_has_env_name() -> None:
-    assert set(R.MODEL_OVERRIDE_ENV) == set(R.Task) - {R.Task.IMAGE}
+    assert set(R.MODEL_OVERRIDE_ENV) == set(R.Task)
+
+
+# ─── F4: har bir default/RETIRING modelning narx qatori bo'lishi shart ──────
+
+
+def test_every_default_and_retiring_model_has_a_pricing_row() -> None:
+    """`pricing.PRICES` da qator yo'q model = `estimate_cost` jimgina `None`
+    qaytaradi va kunlik xarajat limiti (`llm_daily_cost_budget_usd`) o'sha
+    model uchun sirli ishlamay qoladi (CLAUDE.md — "pricing narx qoidasi").
+    Bu test har bir `default_model()` va `RETIRING` nomini `PRICES`ga
+    mexanik ravishda bog'laydi.
+    """
+    from app.llm.pricing import PRICES, _normalize
+
+    names: set[str] = set(R.RETIRING)
+    for provider in ("claude", "gemini", "deepseek"):
+        for task in R.Task:
+            model = R.default_model(provider, task)
+            if model:
+                names.add(model)
+
+    missing = sorted(n for n in names if _normalize(n) not in PRICES)
+    assert not missing, f"narx qatori yo'q: {missing}"
 
 
 # ─── F3/M5: `embed_model_name()` ↔ `resolve(Task.EMBED)` ustuvorligi ────────

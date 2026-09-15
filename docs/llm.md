@@ -19,12 +19,19 @@ xatti-harakat.
 
 | `Task` | Claude | Gemini | DeepSeek | Nimada ishlatiladi |
 |---|---|---|---|---|
-| ROUTE | haiku-4-5 | 2.5-flash-lite | deepseek-chat | intent, kunlik digest, judge |
-| SEARCH | sonnet-5 (config) | 2.5-flash | deepseek-chat | direct chat |
-| TOOLS | sonnet-5 (config) | 2.5-flash | deepseek-chat | agent sikli (`claude_code` da yo'q → fallback) |
-| DEEP | opus-5 | 2.5-pro | deepseek-reasoner (tool'siz) | "chuqur tahlil" tugmasi |
+| ROUTE | haiku-4-5 | 3.5-flash-lite | deepseek-chat | intent, kunlik digest, judge |
+| SEARCH | sonnet-5 (config) | 3.5-flash | deepseek-chat | direct chat |
+| TOOLS | sonnet-5 (config) | 3.5-flash | deepseek-chat | agent sikli (`claude_code` da yo'q → fallback) |
+| DEEP | opus-5 | 3.1-pro-preview | deepseek-reasoner (tool'siz) | "chuqur tahlil" tugmasi |
 | EMBED | — | gemini-embedding-001 | — | vektor indeks (`GEMINI_API_KEY` majburiy) |
 | IMAGE | — | 2.5-flash-image | — | 7-bosqich |
+
+2026-09: Gemini 2.5 avlod suhbat modellari (`flash-lite`/`flash`/`pro`) yangi
+API kalitlariga **yopiq** (404 "no longer available to new users") — defaultlar
+shuning uchun 3.x ga o'tkazilgan (`app.config.Settings.gemini_model_*`).
+Embedding va rasm modeli o'zgarmagan: ular alohida o'tish yo'liga ega
+(`EMBED_MODEL` / `reembed`, `LLM_MODEL_IMAGE`) va sifat/moslik o'lchovi talab
+qiladi — shuning uchun avtomatik ko'chirilmagan.
 
 Imkoniyat yetishmasa router `LLM_FALLBACK_PROVIDER` (gemini) ga o'tadi va log
 yozadi; hech kim jimgina ishlamay qolmaydi.
@@ -62,7 +69,7 @@ qoldiradi:
 
 | Env | Nima |
 |---|---|
-| `LLM_MODEL_ROUTE` / `_SEARCH` / `_TOOLS` / `_DEEP` / `_EMBED` | shu `Task` uchun model nomi |
+| `LLM_MODEL_ROUTE` / `_SEARCH` / `_TOOLS` / `_DEEP` / `_EMBED` / `_IMAGE` | shu `Task` uchun model nomi |
 | `EMBED_MODEL` | embedding modeli (eski nom: `GEMINI_MODEL_EMBED`) |
 | `EMBED_DIMS` | Gemini `output_dimensionality`; DB ustuni bilan bir xil bo'lishi shart |
 
@@ -78,10 +85,13 @@ ogohlantirish). Haqiqiy o'zgartirish = ustun turini almashtiradigan migratsiya
 + to'liq qayta embed.
 
 Model provider imkoniyatiga mos kelmasa (`LLM_MODEL_TOOLS` ga tool'siz model)
-router **aniq xato** tashlaydi — jimgina eski modelga qaytmaydi. `gemini-2.5-flash-lite`
-2026-10-16 da eskiradi: 45 kun qolganda startupda `llm.model_retiring`
-ogohlantirishi chiqadi, vorisga o'tish esa `LLM_MODEL_ROUTE` orqali (default
-o'zgarmaydi — model almashtirish sifatni tebratadi, avval o'lchang).
+router **aniq xato** tashlaydi — jimgina eski modelga qaytmaydi.
+`gemini-2.5-flash-lite`/`-flash`/`-pro` 2026-09'da yangi mijozlarga yopilgan
+(`app.llm.router.RETIRING`) — istalgan `Task` shu modelga tushsa (default
+orqali yoki `LLM_MODEL_*` override bilan) startupda `llm.model_retiring`
+ogohlantirishi chiqadi (bir marta, jarayon davomida). Voris modelga o'tish
+`LLM_MODEL_*` orqali (default endi 3.x — qayta o'zgartirilmaydi, keyingi
+almashtirish ham avval o'lchov, keyin override bilan).
 
 `gemini-embedding-001` da kesilgan (`output_dimensionality < 3072`) vektor
 birlik uzunlikda emas — adapter uni **mijoz tomonida** L2 normallashtiradi

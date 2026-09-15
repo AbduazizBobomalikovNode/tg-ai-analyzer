@@ -23,6 +23,23 @@ from app.logging import get_logger
 
 log = get_logger(__name__)
 
+#: 4 belgi ≈ 1 token — `services/images.py::_CHARS_PER_TOKEN` bilan bir xil
+#: taxmin. Ba'zi provider javoblari (Gemini `embed_content`, sinxron ham
+#: batch ham) usage/token hisoblagichini umuman bermaydi; shu holatda
+#: `tokens_in` 0 bo'lib qolsa `pricing.estimate_cost` ham 0 qaytaradi va
+#: kunlik xarajat limiti (`llm_daily_cost_budget_usd`) o'sha sarfni
+#: **umuman ko'rmaydi** — jimgina ishlamay qolish. Aniq son uchun alohida
+#: `count_tokens` RPC kerak bo'lardi (qo'shimcha kechikish/xarajat har
+#: chaqiruvda); o'rniga hujjatlashtirilgan taxmin — provider-agnostik,
+#: shuning uchun shu yerda (`app.llm.gemini` va `services.embed_batches`
+#: ikkalasi ham shu funksiyadan foydalanadi).
+_CHARS_PER_TOKEN = 4
+
+
+def estimate_tokens_heuristic(texts: list[str]) -> int:
+    """`ceil(len(text)/4)` — har matn uchun, yig'indi. Bo'sh matn → 0 token."""
+    return sum(-(-len(t) // _CHARS_PER_TOKEN) for t in texts if t)
+
 
 class Capability(StrEnum):
     CHAT = "chat"
@@ -249,6 +266,10 @@ class BaseProvider(ABC):
         maydoni bo'lmasa (Gemini buni qiladi) normallashtirish va
         `message_embeddings.model` shu nomga tayanadi; usiz qator `model=''`
         bilan yozilib, qidiruv filtridan hech qachon o'tmasdi.
+
+        `usage.tokens_in` javobda yo'q/0 bo'lishi mumkin (usage metadata
+        kelmasa) — narx taxminini tiklash chaqiruvchi tomonda
+        (`services/embed_batches.py::_poll_one`, `estimate_tokens_heuristic`).
         """
         raise CapabilityError(self.name, "batch embedding qo'llab-quvvatlanmaydi")
 

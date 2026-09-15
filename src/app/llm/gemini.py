@@ -38,6 +38,7 @@ from app.llm.base import (
     ToolCall,
     ToolSpec,
     Usage,
+    estimate_tokens_heuristic,
     sanitize_json_schema,
 )
 from app.logging import get_logger
@@ -188,11 +189,17 @@ class GeminiProvider(BaseProvider):
             raise LLMError(self.name, "embedding bo'sh qaytdi")
 
         meta = getattr(resp, "metadata", None)
+        tokens_in = int(getattr(meta, "billable_character_count", 0) or 0)
+        if not tokens_in:
+            # Javobda usage yo'q — narx 0 bo'lib byudjet qopqog'i jimgina
+            # ishlamay qolmasin (`base.estimate_tokens_heuristic` izohiga qarang:
+            # 2026-09-16 da tekshirilgan, `embed_content` metadata bermaydi).
+            tokens_in = estimate_tokens_heuristic(texts)
         return EmbedResult(
             vectors=vectors,
             model=model,
             provider=self.name,
-            usage=Usage(tokens_in=int(getattr(meta, "billable_character_count", 0) or 0)),
+            usage=Usage(tokens_in=tokens_in),
         )
 
     # ── rasm ─────────────────────────────────────────────────────────────────
@@ -330,6 +337,12 @@ class GeminiProvider(BaseProvider):
                 raise LLMError(self.name, f"batch {job}: #{i} elementda vektor bo'sh")
             vectors.append(values)
             tokens += int(getattr(single, "token_count", 0) or 0)
+        # `tokens` 0 bo'lib qolishi mumkin (javobda usage yo'q — 2026-09-16 da
+        # tekshirilgan). Bu yerda **taxmin qilinmaydi**: original matnlar bu
+        # funksiyada yo'q (faqat `job` nomi), soxta uzunlik ishlatish noto'g'ri
+        # taxminga olib kelardi. Chaqiruvchi (`services/embed_batches.py::_poll_one`)
+        # 0 ko'rsa `estimate_tokens_heuristic` bilan **jami** narxni tuzatadi —
+        # bu yerda faqat javobdagi haqiqiy son.
 
         # Sinxron yo'l bilan **bir xil** normallashtirish (phase4/B,
         # `normalize_vectors`) — aks holda bitta modelning batch va jonli

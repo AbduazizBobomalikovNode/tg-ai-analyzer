@@ -119,10 +119,14 @@ class Settings(BaseSettings):
     claude_code_timeout: int = Field(default=300, ge=10, le=3600)  # soniya, bitta so'rov
 
     # ─── Gemini ───
+    # 2026-09: 2.5 avlod suhbat modellari (`flash-lite`/`flash`/`pro`) yangi
+    # mijozlarga yopiq (404) — defaultlar 3.x avlodga o'tkazilgan
+    # (`app.llm.router.RETIRING`, `docs/llm.md`). Rasm/embedding modeli
+    # o'zgarmagan (o'lchov/moslik talab qiladi, avval mahsus o'tish yo'li bilan).
     gemini_api_key: str = ""
-    gemini_model_router: str = "gemini-2.5-flash-lite"
-    gemini_model_fast: str = "gemini-2.5-flash"
-    gemini_model_deep: str = "gemini-2.5-pro"
+    gemini_model_router: str = "gemini-3.5-flash-lite"
+    gemini_model_fast: str = "gemini-3.5-flash"
+    gemini_model_deep: str = "gemini-3.1-pro-preview"
     gemini_model_image: str = "gemini-2.5-flash-image"
     gemini_model_embed: str = "gemini-embedding-001"
     embed_dim: int = 768
@@ -257,13 +261,14 @@ class Settings(BaseSettings):
     # — provider o'sha-o'sha (router qaysi providerni tanlagan bo'lsa).
     # Model provider imkoniyatiga mos kelmasa router **aniq xato** tashlaydi
     # (jimgina boshqa modelga o'tmaydi): noto'g'ri nom deploy paytida ko'rinsin.
-    # Voris modelga o'tish yo'li ham shu (masalan `gemini-2.5-flash-lite`
-    # 2026-10-16 da eskiradi → `LLM_MODEL_ROUTE=<voris>`).
+    # Voris modelga o'tish yo'li ham shu (masalan `gemini-2.5-*` 2026-09'da
+    # yangi mijozlarga yopildi → `LLM_MODEL_ROUTE=<voris>`, `app.llm.router.RETIRING`).
     llm_model_route: str = ""
     llm_model_search: str = ""
     llm_model_tools: str = ""
     llm_model_deep: str = ""
     llm_model_embed: str = ""
+    llm_model_image: str = ""  # Gemini rasm modeli (avval override yo'q edi)
 
     # Embedding modeli/o'lchami uchun provider-neytral nomlar. Bo'sh/0 =
     # eski maydonlar (`gemini_model_embed`, `embed_dim`) — yagona haqiqat

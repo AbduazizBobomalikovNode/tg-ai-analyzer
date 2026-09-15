@@ -58,6 +58,7 @@ from app.llm import (
     LLMError,
     Task,
     embed_model_name,
+    estimate_tokens_heuristic,
     resolve,
 )
 from app.llm.pricing import estimate_cost
@@ -366,6 +367,34 @@ def _base_name(model: str) -> str:
     return model.split("/")[-1].strip().lower()
 
 
+async def _original_texts(session: AsyncSession, kind: str, item_ids: list[int]) -> list[str]:
+    """Job yuborilganda ishlatilgan matnlarni `item_ids` tartibida qayta tiklaydi.
+
+    Faqat `_poll_one` narx taxminini tiklashda chaqiradi — javobda
+    `usage.tokens_in` 0 bo'lib qolganda (batch javobi ko'pincha usage
+    bermaydi — H2/M). `submit_messages`/`submit_nodes` bilan **bir xil**
+    kesish (`EMBED_MAX_CHARS` / `embed_payload`) — aks holda taxmin haqiqiy
+    yuborilgan matndan farq qilib, noto'g'ri tomonga siljiydi.
+
+    Oraliqda o'chirilgan/topilmagan element — bo'sh satr (0 token; narx bir oz
+    kam baholanadi, lekin yozish/qat'iy moslikka ta'sir qilmaydi — bu funksiya
+    faqat narx uchun matn yig'adi, vektor yozishga aralashmaydi).
+    """
+    if not item_ids:
+        return []
+    if kind == KIND_MESSAGES:
+        rows = (
+            await session.execute(select(Message.id, Message.text).where(Message.id.in_(item_ids)))
+        ).all()
+        by_id = {int(mid): (txt or "")[:EMBED_MAX_CHARS] for mid, txt in rows}
+    else:
+        nodes = (
+            await session.execute(select(RetrievalNode).where(RetrievalNode.id.in_(item_ids)))
+        ).scalars()
+        by_id = {int(n.id): embed_payload(n) for n in nodes}
+    return [by_id.get(i, "") for i in item_ids]
+
+
 async def _poll_one(
     session: AsyncSession,
     provider: BaseProvider,
@@ -449,9 +478,16 @@ async def _poll_one(
     row.completed_at = datetime.now(UTC)
     # Narx qoidasi: API **qaytargan** model nomi (bo'sh bo'lsa yuborilgani).
     row.model = model
-    row.cost_usd = (
-        estimate_cost(result.provider, row.model, result.usage.tokens_in, 0, batch=True) or 0.0
-    )
+    tokens_in = result.usage.tokens_in
+    if not tokens_in:
+        # Gemini batch javobi ko'pincha usage/token_count bermaydi
+        # (2026-09-16 da tekshirilgan) — 0 qoldirilsa narx doim $0 bo'lib,
+        # kunlik xarajat limiti bu sarfni umuman ko'rmaydi. Original matnlar
+        # (`_original_texts`) faqat shu holatda — kerak bo'lmaganda qo'shimcha
+        # SELECT yo'q.
+        texts = await _original_texts(session, row.kind, item_ids)
+        tokens_in = estimate_tokens_heuristic(texts)
+    row.cost_usd = estimate_cost(result.provider, row.model, tokens_in, 0, batch=True) or 0.0
     row.error = None
     rep.succeeded += 1
     rep.written += written

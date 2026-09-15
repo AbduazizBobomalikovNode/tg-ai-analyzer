@@ -73,20 +73,35 @@ PROVIDERS = ("claude", "claude_code", "gemini", "deepseek")
 # `LLM_PROVIDER=auto` uchun maxsus qiymat
 AUTO = "auto"
 
-# Vazifa → model override env nomi (`IMAGE` da override yo'q — bitta model).
+# Vazifa → model override env nomi. `IMAGE` ham shu yerda (avval yo'q edi —
+# bitta model deb hisoblangan; endi Gemini rasm modeli ham almashtiriladi).
 MODEL_OVERRIDE_ENV: dict[Task, str] = {
     Task.ROUTE: "LLM_MODEL_ROUTE",
     Task.SEARCH: "LLM_MODEL_SEARCH",
     Task.TOOLS: "LLM_MODEL_TOOLS",
     Task.DEEP: "LLM_MODEL_DEEP",
     Task.EMBED: "LLM_MODEL_EMBED",
+    Task.IMAGE: "LLM_MODEL_IMAGE",
 }
 
-#: Provider e'lon qilgan eskirish sanalari (ISO). Model shu ro'yxatda bo'lsa
-#: va sanagacha `RETIRING_WARN_DAYS` dan kam qolsa — startupda bir marta
-#: ogohlantirish. Default **o'zgartirilmaydi**: vorisga o'tish `LLM_MODEL_*`
-#: override orqali, o'lchovdan keyin (model almashtirish sifatni tebratadi).
-RETIRING: dict[str, str] = {"gemini-2.5-flash-lite": "2026-10-16"}
+#: Provider e'lon qilgan / kuzatilgan eskirish (yopilish) sanalari (ISO).
+#: Model shu ro'yxatda bo'lsa va sanagacha `RETIRING_WARN_DAYS` dan kam
+#: qolsa (yoki sana allaqachon o'tgan bo'lsa) — jarayon davomida bir marta
+#: ogohlantirish (`resolve()` — istalgan `Task` uchun, faqat ROUTE emas).
+#: Default **o'zgartirilmaydi**: vorisga o'tish `LLM_MODEL_*` override
+#: orqali, o'lchovdan keyin (model almashtirish sifatni tebratadi).
+#:
+#: 2026-09-15 da loyiha kaliti bilan tekshirilgan: 2.5 avlod suhbat
+#: modellari (`flash-lite`, `flash`, `pro`) Gemini API'da yangi
+#: mijozlarga **404 "no longer available to new users"** qaytaradi —
+#: 2026-09 da yopilgan. Aniq kun e'lon qilinmagan, shuning uchun oy
+#: boshi ishlatiladi (sana allaqachon o'tgan bo'lsa ham ogohlantirish
+#: chiqaveradi — `retiring_note` buni qo'llab-quvvatlaydi).
+RETIRING: dict[str, str] = {
+    "gemini-2.5-flash-lite": "2026-09-01",  # yopiq yangi mijozlarga, 2026-09
+    "gemini-2.5-flash": "2026-09-01",  # yopiq yangi mijozlarga, 2026-09
+    "gemini-2.5-pro": "2026-09-01",  # yopiq yangi mijozlarga, 2026-09
+}
 RETIRING_WARN_DAYS = 45
 
 
@@ -253,6 +268,7 @@ def _model_override(task: Task) -> str:
         Task.TOOLS: s.llm_model_tools,
         Task.DEEP: s.llm_model_deep,
         Task.EMBED: s.llm_model_embed,
+        Task.IMAGE: s.llm_model_image,
     }.get(task, "").strip()
 
 
@@ -303,8 +319,10 @@ def resolve(task: Task) -> tuple[BaseProvider, str]:
     override = _model_override(task)
     if override:
         provider, model = _apply_override(task, override, provider)
-    if task is Task.ROUTE:
-        warn_retiring_once(model)
+    # Har qanday `Task` uchun hal qilingan model tekshiriladi — ilgari faqat
+    # ROUTE edi, lekin SEARCH/TOOLS/DEEP ham eskirayotgan modelga tushishi
+    # mumkin (masalan LLM_PROVIDER default'i yoki override orqali).
+    warn_retiring_once(model)
     return provider, model
 
 

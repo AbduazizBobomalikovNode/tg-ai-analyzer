@@ -350,17 +350,27 @@ class _Rows:
     def scalars(self) -> list[Any]:
         return self._rows
 
+    def all(self) -> list[Any]:
+        return self._rows
+
 
 class _FakeSession:
     """`AsyncSession` ning `poll_batches` ishlatadigan qismi.
 
     `fail_on_write` — shu `job_name` uchun vektor yozishda istisno (L11:
     bitta jobning qulashi qolganlarini olib ketmasligi kerak).
+
+    `text_rows` — `_original_texts` SELECT'i qaytaradigan qatorlar (faqat
+    `_poll_one` narx taxminini tiklashda, ya'ni `usage.tokens_in == 0`
+    bo'lganda chaqiriladi — boshqa testlarda bu yo'l umuman bosilmaydi).
     """
 
-    def __init__(self, rows: list[Any], *, fail_on_write: str = "") -> None:
+    def __init__(
+        self, rows: list[Any], *, fail_on_write: str = "", text_rows: list[Any] | None = None
+    ) -> None:
         self.rows = rows
         self.fail_on_write = fail_on_write
+        self.text_rows = text_rows or []
         self.writes: list[Any] = []
         self.nested = 0
         self.rolled_back: list[str] = []
@@ -368,9 +378,13 @@ class _FakeSession:
         self.current_job = ""
 
     async def execute(self, stmt: Any) -> Any:
+        from sqlalchemy import Select
+
         if not self._selected:
             self._selected = True
             return _Rows(self.rows)
+        if isinstance(stmt, Select):
+            return _Rows(self.text_rows)
         if self.current_job and self.current_job == self.fail_on_write:
             raise RuntimeError("savepoint ichidagi DB xatosi")
         self.writes.append(stmt)
@@ -428,14 +442,14 @@ class _StubProvider:
         return self.results[job]
 
 
-def _result(model: str, n: int = 2) -> Any:
+def _result(model: str, n: int = 2, *, tokens_in: int = 10) -> Any:
     from app.llm.base import EmbedResult, Usage
 
     return EmbedResult(
         vectors=[[0.1] * 4 for _ in range(n)],
         model=model,
         provider="gemini",
-        usage=Usage(tokens_in=10),
+        usage=Usage(tokens_in=tokens_in),
     )
 
 
@@ -469,6 +483,31 @@ async def test_poll_uses_the_requested_model_when_the_api_omits_it(
     assert row.model == EMBED_MODEL
     assert row.status == EmbedBatchStatus.SUCCEEDED
     assert rep.written == 2
+
+
+async def test_poll_estimates_tokens_when_usage_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """2026-09-16: Gemini batch javobi ko'pincha `token_count` bermaydi.
+
+    `_poll_one` `usage.tokens_in == 0` ko'rsa original matnlarni DB'dan
+    o'qib (`_original_texts`) `estimate_tokens_heuristic` bilan narxni
+    tiklaydi — aks holda kunlik xarajat limiti bu sarfni umuman ko'rmasdi.
+    """
+    from app.db.models import EmbedBatchStatus
+
+    row = _batch_row("batches/a")  # item_ids=(1, 2), kind="messages"
+    provider = _StubProvider({"batches/a": _result(EMBED_MODEL, tokens_in=0)})
+    session = _FakeSession([row], text_rows=[(1, "a" * 40), (2, "b" * 8)])
+
+    rep = await _poll(session, provider, monkeypatch)
+
+    assert row.status == EmbedBatchStatus.SUCCEEDED
+    assert rep.written == 2
+    # ceil(40/4) + ceil(8/4) = 10 + 2 = 12 taxminiy token
+    expected = estimate_cost("gemini", EMBED_MODEL, 12, 0, batch=True)
+    assert row.cost_usd == expected
+    assert row.cost_usd is not None and row.cost_usd > 0
 
 
 async def test_poll_fails_the_job_when_the_api_returns_another_model(
