@@ -421,9 +421,9 @@ def _tg_guard(account_id: int, bucket: str) -> str | None:
         return "error: telegram server access is disabled (TG_SEARCH_RATE_PER_MINUTE=0)"
     if not _buckets.try_acquire(account_id, bucket):
         wait = _buckets.retry_after(account_id, bucket)
-        return (
-            f"error: rate_limited:{bucket} — retry in {wait}s; use search_messages (local) instead"
-        )
+        # `None` — sinf o'chirilgan, kutishning ma'nosi yo'q (M4).
+        when = f"retry in {wait}s" if wait is not None else "this method class is disabled"
+        return f"error: rate_limited:{bucket} — {when}; use search_messages (local) instead"
     return None
 
 

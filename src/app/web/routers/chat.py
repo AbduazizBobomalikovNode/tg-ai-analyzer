@@ -61,6 +61,10 @@ def _chat_http(exc: cs.ChatError) -> HTTPException:
         "context": 502,
         "llm": 502,
         "budget": 429,
+        # H1: deep rejim qopqoqlari `chat_service.assert_deep_allowed` dan
+        # keladi — `routers/deep.py::_http` bilan bir xil kodlar.
+        "rate_limited": 429,
+        "disabled": 403,
     }.get(exc.code, 400)
     return HTTPException(
         status_code=status, detail={"code": f"chat.err.{exc.code}", "detail": exc.detail}

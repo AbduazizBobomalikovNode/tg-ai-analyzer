@@ -388,7 +388,9 @@ async def test_persist_only_touches_known_chats(monkeypatch: pytest.MonkeyPatch)
 
     known = TS.hit_of(_msg(3, "ma'lum chat", channel_id=100), {})
     external = TS.hit_of(_msg(9, "begona kanal", channel_id=999), {})
-    session = _FakeSession(chats=[(5, 100, "Ish chat", "https://t.me/c/5/")], msgs=[(77, 5, 3)])
+    session = _FakeSession(
+        chats=[(5, 100, "Ish chat", "https://t.me/c/5/", "channel")], msgs=[(77, 5, 3)]
+    )
 
     n = await TS.persist_server_hits(session, 1, [known, external])  # type: ignore[arg-type]
 
@@ -438,3 +440,75 @@ async def test_no_phone_anywhere_in_a_server_hit(monkeypatch: pytest.MonkeyPatch
     assert not any(f.name == "phone" for f in hits[0].__dataclass_fields__.values())
     rendered = f"{hits[0].sender}|{hits[0].chat_title}|{hits[0].link}"
     assert PHONE not in rendered  # faqat `text` da (bu xabarning o'z mazmuni)
+
+
+# ─── F1: peer turi va Saved Messages ─────────────────────────────────────────
+
+
+def test_peer_kind_is_carried_on_every_hit() -> None:
+    """M6: raqamli id tur ichida unikal — tur hit bilan birga yuradi."""
+    assert TS.hit_of(_msg(1, channel_id=100), {}).peer_kind == "channel"
+    user_msg = SimpleNamespace(
+        id=2,
+        date=None,
+        message="salom",
+        media=None,
+        from_id=SimpleNamespace(user_id=5),
+        peer_id=SimpleNamespace(user_id=5),
+    )
+    assert TS.hit_of(user_msg, {}).peer_kind == "user"
+    group_msg = SimpleNamespace(
+        id=3,
+        date=None,
+        message="salom",
+        media=None,
+        from_id=SimpleNamespace(user_id=5),
+        peer_id=SimpleNamespace(chat_id=77),
+    )
+    assert TS.hit_of(group_msg, {}).peer_kind == "chat"
+
+
+def test_peer_kind_matches_maps_channel_to_supergroup_too() -> None:
+    assert TS.peer_kind_matches("channel", "channel")
+    assert TS.peer_kind_matches("channel", "supergroup")  # supergruh ham PeerChannel
+    assert TS.peer_kind_matches("chat", "group")
+    assert TS.peer_kind_matches("user", "private")
+    assert not TS.peer_kind_matches("user", "channel")
+    assert not TS.peer_kind_matches(None, "channel")
+
+
+async def test_persist_refuses_a_peer_of_the_wrong_kind(monkeypatch: pytest.MonkeyPatch) -> None:
+    """M6: `PeerChannel(100)` lokal `private` chat 100 ga **yozilmaydi**."""
+    from app.services import ingestion as ING
+
+    written: list[list[dict[str, Any]]] = []
+
+    async def upsert(rows: list[dict[str, Any]]) -> int:
+        written.append(rows)
+        return len(rows)
+
+    monkeypatch.setattr(ING, "upsert_messages", upsert)
+
+    hit = TS.hit_of(_msg(3, "kanal posti", channel_id=100), {})
+    # Lokal chatda **o'sha raqam**, lekin turi `private` (PeerUser(100)).
+    session = _FakeSession(chats=[(5, 100, "Ali", "https://t.me/c/5/", "private")], msgs=[])
+
+    assert await TS.persist_server_hits(session, 1, [hit]) == 0  # type: ignore[arg-type]
+    assert not written
+    assert hit.chat_id is None and hit.message_id is None
+
+
+async def test_saved_messages_hits_have_no_chat_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """M7: "Saved Messages" `chat_id=0` emas, `None` — 0 haqiqiy chat emas."""
+    from telethon.tl import types as tlt
+
+    client = _Client({"SearchRequest": _messages([_msg(4, "eslatma", channel_id=0)])})
+    _patch_pool(monkeypatch, client)
+
+    res = await TS.server_search_saved(1, "eslatma")
+
+    assert res.hits and all(h.chat_id is None for h in res.hits)
+    assert all(h.saved for h in res.hits)
+    assert res.hits[0].chat_title == "Saved Messages"
+    req = _req(client, "SearchRequest")
+    assert isinstance(req.peer, tlt.InputPeerSelf)

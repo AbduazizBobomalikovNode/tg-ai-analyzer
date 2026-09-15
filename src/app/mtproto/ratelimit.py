@@ -225,7 +225,10 @@ class MethodBuckets:
         if spec.per_day and state.day_used >= spec.per_day:
             self.store.save(key, state)
             return False
-        cost = 1.0 + self.jitter * (2.0 * self._rng.random() - 1.0)
+        # M2: jitter narxi hech qachon `burst` dan oshmasin. `burst=1` bo'lgan
+        # `discover` bucket'ida 1.0-1.2 oralig'idagi narx to'la bucket'da ham
+        # rad etilardi — ya'ni chaqiruvlarning ~yarmi bekorga tushib qolardi.
+        cost = min(1.0 + self.jitter * (2.0 * self._rng.random() - 1.0), float(spec.burst))
         if state.tokens < cost:
             self.store.save(key, state)
             return False
@@ -234,12 +237,17 @@ class MethodBuckets:
         self.store.save(key, state)
         return True
 
-    def retry_after(self, account_id: int, bucket: str) -> int:
-        """Necha soniyadan keyin qayta urinish mantiqiy (≥1, holatni buzmaydi)."""
+    def retry_after(self, account_id: int, bucket: str) -> int | None:
+        """Necha soniyadan keyin qayta urinish mantiqiy (≥1, holatni buzmaydi).
+
+        M4: sinf butunlay o'chiq (`per_minute <= 0`) bo'lsa — `None`, ya'ni
+        "hech qachon". Ilgari `0` qaytardi va chaqiruvchi uni "darhol qayta
+        urin" deb o'qishi mumkin edi (spin).
+        """
         spec, state = self._state(account_id, bucket)
         self.store.save(self._key(account_id, bucket), state)
         if spec.per_minute <= 0:
-            return 0
+            return None
         if spec.per_day and state.day_used >= spec.per_day:
             # Kunlik chegara — ertangi UTC yarim tungacha
             return max(1, int(86_400 - (self._wall() % 86_400)))

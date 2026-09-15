@@ -379,7 +379,9 @@ def deep_client(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> TestClie
 
     monkeypatch.setattr(deep_router, "session_scope", lambda: _Scope())
     monkeypatch.setattr(deep_router.cs, "get_conversation", fake_conv)
-    monkeypatch.setattr(deep_router.limits, "check_deep_rate", lambda uid: True)
+    from app.services import limits as _lim
+
+    monkeypatch.setattr(_lim, "check_deep_rate", lambda uid: True)
     return client
 
 
@@ -412,7 +414,9 @@ def test_deep_api_validates_and_maps_errors(
     r = deep_client.post("/api/deep", json={"conversation_id": 1, "question": "q"}, headers=H)
     assert r.status_code == 429 and r.json()["detail"]["code"] == "chat.err.budget"
 
-    monkeypatch.setattr(deep_router.limits, "check_deep_rate", lambda uid: False)
+    from app.services import limits as _lim
+
+    monkeypatch.setattr(_lim, "check_deep_rate", lambda uid: False)
     r = deep_client.post("/api/deep", json={"conversation_id": 1, "question": "q"}, headers=H)
     assert r.status_code == 429 and r.json()["detail"]["code"] == "chat.err.rate_limited"
 
@@ -462,13 +466,103 @@ def test_deep_stream_yields_ordered_sse_events(
 
 
 def test_deep_disabled_by_config(deep_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    from app.web.routers import deep as deep_router
+    from app.config import get_settings
 
-    s = deep_router.get_settings()
+    s = get_settings()
     monkeypatch.setattr(s, "deep_search_enabled", False)
     deep_client.cookies.set(sec.SESSION_COOKIE, sec.issue_session(7))
     r = deep_client.post("/api/deep", json={"conversation_id": 1, "question": "q"}, headers=H)
     assert r.status_code == 403 and r.json()["detail"]["code"] == "chat.err.disabled"
+
+
+# ─── H1: deep qopqog'i **ikkala** yo'lda ─────────────────────────────────────
+
+
+@pytest.fixture
+def deep_gate_client(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    """H1: ikkala deep yo'li uchun soxta DB — shift **soxtalashtirilmaydi**.
+
+    `deep_client` fixture'i `check_deep_rate` ni har doim `True` qiladi, ya'ni
+    qopqoqning o'zini sinay olmaydi. Bu yerda esa haqiqiy `limits` ishlaydi.
+    """
+    from app.services import limits as lim
+    from app.web.routers import chat as chat_router
+    from app.web.routers import deep as deep_router
+
+    class _Rows:
+        def first(self) -> Any:
+            return None
+
+        def all(self) -> list[Any]:
+            return []
+
+        def scalars(self) -> Any:
+            return self
+
+    class _Session:
+        async def get(self, model: Any, pk: int) -> Any:
+            return SimpleNamespace(id=pk, user_id=7, account_id=3)
+
+        async def execute(self, *a: Any, **kw: Any) -> Any:
+            return _Rows()
+
+    class _Scope:
+        async def __aenter__(self) -> Any:
+            return _Session()
+
+        async def __aexit__(self, *a: Any) -> None: ...
+
+    async def fake_conv(db: Any, user_id: int, conversation_id: int) -> Any:
+        return SimpleNamespace(id=conversation_id, user_id=user_id, account_id=3)
+
+    async def no_budget(db: Any, user_id: int) -> Any:
+        return None
+
+    for mod in (deep_router, chat_router):
+        monkeypatch.setattr(mod, "session_scope", lambda: _Scope())
+        monkeypatch.setattr(mod.cs, "get_conversation", fake_conv)
+    monkeypatch.setattr(lim, "assert_within_budget", no_budget)
+    monkeypatch.setattr(lim, "check_chat_rate", lambda uid: True)
+    client.cookies.set(sec.SESSION_COOKIE, sec.issue_session(7))
+    return client
+
+
+def _deep_via_chat(c: TestClient) -> Any:
+    return c.post("/api/conversations/1/messages", json={"text": "q", "mode": "deep"}, headers=H)
+
+
+def _deep_via_api(c: TestClient) -> Any:
+    return c.post("/api/deep", json={"conversation_id": 1, "question": "q"}, headers=H)
+
+
+def test_deep_rate_zero_refuses_both_routes(
+    deep_gate_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`DEEP_RATE_PER_MINUTE=0` — SSE yo'li ham, chat API `mode="deep"` ham 429 (H1)."""
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "deep_rate_per_minute", 0)
+
+    r = _deep_via_api(deep_gate_client)
+    assert r.status_code == 429 and r.json()["detail"]["code"] == "chat.err.rate_limited"
+
+    r2 = _deep_via_chat(deep_gate_client)
+    assert r2.status_code == 429 and r2.json()["detail"]["code"] == "chat.err.rate_limited"
+
+
+def test_deep_disabled_refuses_both_routes(
+    deep_gate_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`DEEP_SEARCH_ENABLED=false` — ikkala yo'l ham 403 (H1)."""
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "deep_search_enabled", False)
+
+    r = _deep_via_api(deep_gate_client)
+    assert r.status_code == 403 and r.json()["detail"]["code"] == "chat.err.disabled"
+
+    r2 = _deep_via_chat(deep_gate_client)
+    assert r2.status_code == 403 and r2.json()["detail"]["code"] == "chat.err.disabled"
 
 
 def test_chat_page_has_deep_toggle(client: TestClient) -> None:
@@ -572,11 +666,13 @@ class _AlertSession:
         self.rows = rows or []
         self.added: list[Any] = []
         self.deleted = 0
+        self.stmts: list[Any] = []  # bajarilgan so'rovlar (limit/filtr tekshiruvi uchun)
 
     async def get(self, model: Any, pk: int) -> Any:
         return self.objects.get((model.__name__, int(pk)))
 
     async def execute(self, stmt: Any) -> Any:
+        self.stmts.append(stmt)
         text_ = str(stmt)
         rows = self.rows
         if text_.lstrip().upper().startswith("DELETE"):
@@ -728,6 +824,58 @@ def test_alerts_update_clears_cached_vector(
     rule.embedding = [0.2] * 8
     assert c.put("/api/alerts/5", json={"enabled": False}, headers=H).status_code == 200
     assert rule.embedding is not None and rule.enabled is False
+
+
+def test_alerts_scope_change_resets_the_cursor(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F2/M12: qamrov o'zgarsa eski kursor yangi chatning butun tarixini yashiradi.
+
+    Kursor nolga tushadi; ish hajmini skanerning `limit` i chegaralaydi.
+    """
+    mine = SimpleNamespace(id=3, user_id=7)
+    rule = SimpleNamespace(
+        id=5,
+        account_id=3,
+        kind="keyword",
+        pattern="to'lov",
+        threshold=0.8,
+        cooldown_minutes=30,
+        label="",
+        enabled=True,
+        chat_id=None,
+        last_checked_msg_id=9_999,
+        created_at=None,
+        embedding=None,
+    )
+    chat = SimpleNamespace(id=11, account_id=3)
+    session = _AlertSession({("Account", 3): mine, ("AlertRule", 5): rule, ("Chat", 11): chat})
+    c = _alert_client(client, monkeypatch, session)
+
+    assert c.put("/api/alerts/5", json={"chat_id": 11}, headers=H).status_code == 200
+    assert rule.chat_id == 11 and rule.last_checked_msg_id == 0
+
+    # bir xil qiymat qayta yuborilsa kursor tegilmaydi
+    rule.last_checked_msg_id = 500
+    assert c.put("/api/alerts/5", json={"chat_id": 11}, headers=H).status_code == 200
+    assert rule.last_checked_msg_id == 500
+
+
+def test_alert_events_hide_deleted_messages(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F2/M10: o'chirilgan xabar hodisasi API'da ham ko'rinmaydi."""
+    from app.web.routers import alerts as alerts_router
+
+    mine = SimpleNamespace(id=3, user_id=7)
+    rule = SimpleNamespace(id=5, account_id=3)
+    session = _AlertSession({("Account", 3): mine, ("AlertRule", 5): rule})
+    c = _alert_client(client, monkeypatch, session)
+
+    assert c.get("/api/alerts/5/events").status_code == 200
+    sql = " ".join(str(s) for s in session.stmts)
+    assert "messages.deleted_at IS NULL" in sql
+    assert alerts_router is not None
 
 
 # ─── phase3/B: briefing API ─────────────────────────────────────────────────
@@ -885,6 +1033,46 @@ def test_briefings_list_and_detail(client: TestClient, monkeypatch: pytest.Monke
     assert c2.get("/api/briefings/2026-09-14?account_id=3").status_code == 404
 
 
+def test_briefing_text_is_never_inlined_into_the_page(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F2: briefing matni **faqat** API'dan JSON bo'lib chiqadi.
+
+    Sahifa shablonida u umuman yo'q; brauzerda esa yagona renderer
+    (`static/md.js`) chizadi, ya'ni `<img onerror=...>` hech qachon xom
+    HTML bo'lib `innerHTML` ga tushmaydi. Shablon xom matnni inline qilib
+    qo'ysa — bu test yiqiladi.
+    """
+    from datetime import date
+
+    evil = '<img src=x onerror="alert(1)"> va <script>alert(2)</script>'
+    row = SimpleNamespace(
+        account_id=3,
+        day=date(2026, 9, 14),
+        text=evil,
+        structured={"tldr": evil, "chats": []},
+        tokens_in=1,
+        tokens_out=1,
+        cost_usd=None,
+        model="m",
+        delivered_at=None,
+        delivery_error=None,
+        created_at=datetime(2026, 9, 15, tzinfo=UTC),
+    )
+    session = _BriefSession({("Account", 3): _account()}, rows=[row])
+    c = _brief_client(client, monkeypatch, session)
+
+    # API xom matnni qaytaradi (JSON — bu yerda escaping kerak emas)…
+    assert c.get("/api/briefings/2026-09-14?account_id=3").json()["text"] == evil
+
+    # …sahifa esa uni umuman ichiga olmaydi.
+    page = c.get("/briefings/2026-09-14?lang=en")
+    assert page.status_code == 200
+    assert "onerror" not in page.text and "<script>alert(2)" not in page.text
+    assert "/static/md.js" in page.text or "/static/briefings.js" in page.text
+    c.cookies.clear()
+
+
 def test_briefings_page_renders_for_logged_in_user(client: TestClient) -> None:
     client.cookies.set(sec.SESSION_COOKIE, sec.issue_session(7))
     r = client.get("/briefings/2026-09-14?lang=en")
@@ -892,3 +1080,66 @@ def test_briefings_page_renders_for_logged_in_user(client: TestClient) -> None:
     assert "Briefing" in r.text and "/static/briefings.js" in r.text
     assert 'window.TGAI_BRIEF_DAY = "2026-09-14"' in r.text
     client.cookies.clear()
+
+
+# ─── phase4/B: chat ro'yxati endpoint (alert UI select'lari uchun) ───────────
+
+
+def _chat_row(chat_id: int, title: str) -> Any:
+    return SimpleNamespace(
+        id=chat_id,
+        tg_peer_id=1000 + chat_id,
+        title=title,
+        type="group",
+        username=None,
+        is_admin=False,
+        is_writable=True,
+        write_mode="read_only",
+        participants_count=3,
+        sync_state="done",
+        synced_total=10,
+        total_estimate=10,
+        sync_error=None,
+        last_sync_at=None,
+        last_message_at=None,
+    )
+
+
+def test_tg_chats_endpoint_auth_and_ownership(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Login shart; begona akkaunt — 404; `limit` SQL'ga tushadi."""
+    from app.web.routers import tg as tg_router
+
+    assert client.get("/api/accounts/3/chats").status_code == 401
+
+    session = _AlertSession(
+        {
+            ("Account", 3): SimpleNamespace(id=3, user_id=7),
+            ("Account", 9): SimpleNamespace(id=9, user_id=99),  # boshqa foydalanuvchi
+        },
+        rows=[_chat_row(11, "Ish <b>chat</b>"), _chat_row(12, "Oila")],
+    )
+    monkeypatch.setattr(tg_router, "session_scope", _AlertScopeFactory(session))
+    client.cookies.set(sec.SESSION_COOKIE, sec.issue_session(7))
+
+    # begona akkaunt — mavjudligi ham oshkor qilinmaydi
+    assert client.get("/api/accounts/9/chats").status_code == 404
+    # umuman yo'q akkaunt
+    assert client.get("/api/accounts/404/chats").status_code == 404
+
+    r = client.get("/api/accounts/3/chats?limit=1")
+    assert r.status_code == 200, r.text
+    items = r.json()["items"]
+    assert [c["id"] for c in items] == [11, 12]  # soxta sessiya limitni qo'llamaydi
+    assert items[0]["title"] == "Ish <b>chat</b>"  # server escape qilmaydi — UI qiladi
+    assert "LIMIT" in str(session.stmts[-1])
+
+    # limit berilmasa — LIMIT yo'q (to'liq registr)
+    assert client.get("/api/accounts/3/chats").status_code == 200
+    assert "LIMIT" not in str(session.stmts[-1])
+
+
+def test_tg_chats_endpoint_rejects_bad_limit(client: TestClient) -> None:
+    client.cookies.set(sec.SESSION_COOKIE, sec.issue_session(7))
+    assert client.get("/api/accounts/3/chats?limit=5000").status_code == 422

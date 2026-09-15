@@ -75,7 +75,41 @@ def test_buckets_and_accounts_are_isolated() -> None:
 def test_zero_rate_disables_the_class() -> None:
     buckets, _ = _mb(specs={"discover": BucketSpec("discover", 0, 1)})
     assert not buckets.try_acquire(1, "discover")
-    assert buckets.retry_after(1, "discover") == 0
+    # M4: o'chirilgan sinf uchun "hech qachon" — `0` bo'lsa chaqiruvchi uni
+    # "darhol qayta urin" deb o'qib spin qilardi.
+    assert buckets.retry_after(1, "discover") is None
+
+
+def test_jitter_never_exceeds_burst() -> None:
+    """M2: `burst=1` bo'lgan bucket to'la bo'lsa — har doim olinadi.
+
+    Jitter narxi 1.0-1.2 oralig'ida edi, ya'ni to'la bucket'dagi chaqiruvlarning
+    ~yarmi bekorga rad etilardi (`discover` — eng qimmat sinf).
+    """
+    import random
+
+    clock, wall = _Clock(), _Clock()
+    wall.t = 1_800_000_000.0
+    buckets = MethodBuckets(
+        specs={"discover": BucketSpec("discover", 60, 1)},
+        clock=clock,
+        wall_clock=wall,
+        jitter=0.2,
+        rng=random.Random(1234),  # noqa: S311 — shift jitteri, kriptografiya emas
+    )
+    for _ in range(200):
+        clock.tick(10.0)  # bucket to'liq to'ladi (60/min, burst=1)
+        assert buckets.try_acquire(1, "discover")
+
+
+def test_tools_guard_text_when_class_is_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """M4: `retry_after is None` → matn "retry in Nones" bo'lib qolmaydi."""
+    from app.services import tools as T
+
+    monkeypatch.setattr(T._buckets, "specs", {"discover": BucketSpec("discover", 0, 1)})
+    monkeypatch.setattr(T.get_settings(), "tg_search_rate_per_minute", 5)
+    msg = T._tg_guard(1, "discover")
+    assert msg is not None and "disabled" in msg and "None" not in msg
 
 
 def test_unknown_bucket_is_a_programming_error() -> None:

@@ -243,8 +243,10 @@
     wrap.hidden = false;
   }
 
-  // Sitatalar (#123) → havola. DOM matn tugunlari bo'ylab yuriladi — HTML
-  // qayta parse qilinmaydi, ya'ni escape-first invarianti buzilmaydi.
+  // Sitatalar (#c<chat>m<msg> / #x<n>) → havola. DOM matn tugunlari bo'ylab
+  // yuriladi — HTML qayta parse qilinmaydi, ya'ni escape-first invarianti
+  // buzilmaydi. Kalit chat bilan birga: bir xil `tg_msg_id` li ikki chat
+  // bir-birining havolasini olmaydi.
   function linkifyCitations(root, links) {
     if (!links || !Object.keys(links).length) return;
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
@@ -252,17 +254,20 @@
     while (walker.nextNode()) {
       const n = walker.currentNode;
       if (!n.parentElement || n.parentElement.closest("a, code, pre")) continue;
-      if (/#\d/.test(n.nodeValue || "")) targets.push(n);
+      if (/#(?:c\d|x\d)/.test(n.nodeValue || "")) targets.push(n);
     }
     for (const n of targets) {
       const s = n.nodeValue;
       const frag = document.createDocumentFragment();
       let last = 0;
-      const re = /#(\d{1,12})/g;
+      const re = /#(c(\d{1,12})m(\d{1,12})|x\d{1,12})/g;
       let m;
       while ((m = re.exec(s)) !== null) {
         frag.appendChild(document.createTextNode(s.slice(last, m.index)));
-        const url = safeHref(links[m[1]]);
+        // Tokendan to'g'ridan-to'g'ri, bo'lmasa o'sha chatning havola prefiksidan.
+        let href = links[m[1]];
+        if (!href && m[2] && links.prefix && links.prefix[m[2]]) href = links.prefix[m[2]] + m[3];
+        const url = safeHref(href);
         if (url) {
           const a = document.createElement("a");
           a.href = url; a.target = "_blank"; a.rel = "noopener noreferrer"; a.className = "cite";
@@ -276,14 +281,36 @@
     }
   }
 
-  function parseFrame(frame) {
-    let kind = "message", data = "";
-    for (const line of frame.split("\n")) {
-      if (line.startsWith("event:")) kind = line.slice(6).trim();
-      else if (line.startsWith("data:")) data += line.slice(5).trim();
+  // `done` hodisasidagi sitatalardan havola jadvali: token → URL, va har chat
+  // uchun havola prefiksi (`link` dan `tg_msg_id` ni olib tashlab).
+  function citationLinks(citations) {
+    const links = { prefix: {} };
+    for (const c of citations || []) {
+      if (!c || !c.link) continue;
+      if (c.token) links[c.token] = c.link;
+      const tail = String(c.id == null ? "" : c.id);
+      if (c.chat_id && tail && c.link.endsWith(tail)) {
+        links.prefix[String(c.chat_id)] = c.link.slice(0, c.link.length - tail.length);
+      }
     }
-    if (!data) return null;
-    try { return { kind, data: JSON.parse(data) }; } catch (_) { return null; }
+    return links;
+  }
+
+  const SSE_MAX_BUFFER = 2 * 1024 * 1024; // bitta ramka shundan oshsa — xato
+
+  function parseFrame(frame) {
+    let kind = "message";
+    const data = [];
+    // SSE: bir hodisada bir nechta `data:` satri bo'lishi mumkin va ular
+    // **`\n` bilan** birlashtiriladi (spetsifikatsiya). Ilgari ular yopishtirib
+    // yuborilardi — ko'p satrli JSON buzilardi.
+    for (const line of frame.split(/\r?\n/)) {
+      if (line.startsWith("event:")) kind = line.slice(6).trim();
+      else if (line.startsWith("data:")) data.push(line.slice(5).replace(/^ /, ""));
+    }
+    const body = data.join("\n").trim();
+    if (!body) return null;
+    try { return { kind, data: JSON.parse(body) }; } catch (_) { return null; }
   }
 
   async function sendDeep(text, node) {
@@ -317,10 +344,11 @@
       const { value, done } = await reader.read();
       if (done) break;
       buf += dec.decode(value, { stream: true });
-      let idx;
-      while ((idx = buf.indexOf("\n\n")) >= 0) {
-        const ev = parseFrame(buf.slice(0, idx));
-        buf = buf.slice(idx + 2);
+      let m;
+      // Ramka chegarasi — `\r\n\r\n` ham bo'lishi mumkin (proxy CRLF qo'shadi).
+      while ((m = /\r?\n\r?\n/.exec(buf)) !== null) {
+        const ev = parseFrame(buf.slice(0, m.index));
+        buf = buf.slice(m.index + m[0].length);
         if (!ev) continue;
         const d = ev.data || {};
         if (ev.kind === "plan") { total = (d.subqueries || []).length; step("web.deep.step_search", { n: 0, m: total }); }
@@ -332,9 +360,7 @@
         else if (ev.kind === "coverage") { renderCoverage(covEl, d, null); }
         else if (ev.kind === "done") {
           status.hidden = true;
-          const links = {};
-          for (const c of d.citations || []) if (c.link) links[String(c.id)] = c.link;
-          linkifyCitations(answerEl, links);
+          linkifyCitations(answerEl, citationLinks(d.citations));
           if (d.cost_usd != null) { const rows = covEl.querySelector(".cov-rows"); if (rows) rows.insertAdjacentHTML("beforeend", ` · ${esc(t("web.deep.cov_cost"))}: <b>$${d.cost_usd < 0.01 ? d.cost_usd.toFixed(4) : d.cost_usd.toFixed(3)}</b>`); }
           metaEl.textContent = `${d.provider || ""} · ${d.model || ""} · ${fmtN(d.tokens_in || 0)}→${fmtN(d.tokens_out || 0)}${d.latency_ms ? ` · ${(d.latency_ms / 1000).toFixed(1)}s` : ""}`;
           metaEl.hidden = false;
@@ -343,6 +369,13 @@
           failed = new Error(t(`chat.err.${d.code}`) === `chat.err.${d.code}` ? (d.detail || d.code) : t(`chat.err.${d.code}`));
           failed.code = `chat.err.${d.code}`;
         }
+      }
+      // Ramka chegarasiz cheksiz o'sish — xotirani yeydi. Qopqoq: 2 MB.
+      if (buf.length > SSE_MAX_BUFFER) {
+        try { await reader.cancel(); } catch (_) { /* allaqachon yopiq */ }
+        const err = new Error(t("chat.err.internal"));
+        err.code = "chat.err.internal";
+        throw err;
       }
     }
     if (failed) throw failed;
@@ -353,8 +386,11 @@
     el.del.hidden = false;
   }
 
-  function renderMessages(items) {
+  function renderMessages(all) {
     el.messages.innerHTML = "";
+    // Uzilgan deep yugurishning hisob qatori (`context.aborted`) — u faqat
+    // kunlik byudjet uni sanashi uchun yoziladi, javob emas (H2).
+    const items = (all || []).filter((m) => !(m.context && m.context.aborted));
     if (!items.length) { el.messages.appendChild(el.empty); el.empty.hidden = false; return; }
     for (const m of items) el.messages.appendChild(msgNode(m));
     window.TGAI.hydrate(el.messages).then(scrollBottom);

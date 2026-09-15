@@ -28,16 +28,28 @@ _TAG_RE = re.compile(r"<(?=\s*/?\s*untrusted_data)", re.IGNORECASE)
 # ko'rinmas/bidi + C0 (\n, \t qoladi) + DEL
 _INVISIBLE_RE = re.compile("[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff\x00-\x08\x0b-\x1f\x7f]")
 
+# Deep search sitata tokeni (`#c<chat>m<msg>` / `#x<n>`) \u2014 begona matn ichida
+# uchrasa u **token bo'lmasligi** kerak: aks holda begona odam o'z xabarida
+# `#c1m42` yozib javobdagi sitatani boshqa xabarga yo'naltira olardi (H3/L3).
+_CITE_LOOKALIKE_RE = re.compile(r"#(?=(?:c\d{1,12}m\d{1,12}|x\d{1,12})\b)", re.IGNORECASE)
+_ZWSP = "\u200b"  # `#` dan keyin qo'yiladi \u2014 ko'rinishi bir xil, token emas
+
 _FAKE_LT = "\u2039"  # teg ochmaydigan "<" o'rnini bosuvchi
 _FAKE_GT = "\u203a"  # teg yopmaydigan ">" o'rnini bosuvchi
 ATTR_MAX_CHARS = 128
 
 
 def neutralize(text: str | None) -> str:
-    """Konvert ichiga tushadigan kontent — teg yarata olmaydi, ko'rinmas belgisiz."""
+    """Konvert ichiga tushadigan kontent — teg va sitata tokeni yarata olmaydi.
+
+    Tartib muhim: avval ko'rinmas belgilar olib tashlanadi, **keyin** sitata
+    tokeniga o'xshagan naqshga U+200B qo'yiladi — aks holda qo'yilgan belgining
+    o'zi darhol o'chib ketardi.
+    """
     if not text:
         return ""
-    return _TAG_RE.sub(_FAKE_LT, _INVISIBLE_RE.sub("", str(text)))
+    out = _TAG_RE.sub(_FAKE_LT, _INVISIBLE_RE.sub("", str(text)))
+    return _CITE_LOOKALIKE_RE.sub("#" + _ZWSP, out)
 
 
 def attr(value: str | None, *, max_chars: int = ATTR_MAX_CHARS) -> str:

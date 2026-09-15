@@ -126,6 +126,13 @@ class ServerHit:
     link: str = ""
     message_id: int | None = None  # lokal `messages.id` (saqlangandan keyin)
     raw: Any = None  # xom TL xabari — faqat `persist_server_hits` uchun
+    # `Peer*` sinfidan olingan tur: `user` | `chat` | `channel` | None (M6).
+    # Telegram'da raqamli id **tur bo'yicha** unikal: `PeerUser(777)` va
+    # `PeerChannel(777)` butunlay boshqa ob'ektlar. Turni tashimasak,
+    # `persist_server_hits` xabarni boshqa chatga yozib qo'yishi mumkin.
+    peer_kind: str | None = None
+    # "Saved Messages" (peer=self) — lokal `chats` da o'z qatori yo'q (M7).
+    saved: bool = False
 
 
 @dataclass(slots=True)
@@ -162,6 +169,38 @@ def peer_id_of(peer: Any) -> int | None:
         if val:
             return int(val)
     return None
+
+
+#: `Peer*` atributi → peer turi. `chats.type` bilan moslashtirish uchun (M6).
+PEER_KINDS: tuple[tuple[str, str], ...] = (
+    ("user_id", "user"),
+    ("chat_id", "chat"),
+    ("channel_id", "channel"),
+)
+
+#: Peer turi ↔ `chats.type` mosligi. Supergroup Telegram'da ham kanal
+#: (`PeerChannel`), shuning uchun `channel` ikkalasini ham qabul qiladi.
+PEER_KIND_CHAT_TYPES: dict[str, frozenset[str]] = {
+    "user": frozenset({"private"}),
+    "chat": frozenset({"group"}),
+    "channel": frozenset({"channel", "supergroup"}),
+}
+
+
+def peer_kind_of(peer: Any) -> str | None:
+    """`PeerUser/PeerChat/PeerChannel` → `user` / `chat` / `channel`."""
+    for attr, kind in PEER_KINDS:
+        if getattr(peer, attr, None):
+            return kind
+    return None
+
+
+def peer_kind_matches(kind: str | None, chat_type: Any) -> bool:
+    """Peer turi lokal `chats.type` bilan mos keladimi? Tur noma'lum — mos emas."""
+    if not kind:
+        return False
+    allowed = PEER_KIND_CHAT_TYPES.get(kind) or frozenset()
+    return str(chat_type) in allowed
 
 
 def entity_index(res: Any) -> dict[int, Any]:
@@ -217,6 +256,7 @@ def hit_of(
     return ServerHit(
         tg_msg_id=int(getattr(m, "id", 0) or 0),
         tg_peer_id=pid,
+        peer_kind=peer_kind_of(getattr(m, "peer_id", None)),
         date=getattr(m, "date", None),
         sender=who_of(m, index),
         text=_body_of(m, snippet),
@@ -260,7 +300,15 @@ async def send_request(
         hint = (explain or {}).get(type(exc).__name__)
         if hint:
             return None, f"error: {hint}"
-        return None, f"error: {type(exc).__name__}: {str(exc)[:200]}"
+        # L2: xom istisno matni modelga/klientga berilmaydi — u xabar matni,
+        # peer id yoki ichki yo'lni olib chiqishi mumkin. Log'da to'liq turadi.
+        log.warning(
+            "tg_search.rpc_error",
+            account_id=account_id,
+            error_class=type(exc).__name__,
+            error=str(exc)[:200],
+        )
+        return None, f"error: {type(exc).__name__}"
 
 
 async def _peer_for_chat(account_id: int, chat_id: int) -> tuple[Any, str | None]:
@@ -288,9 +336,10 @@ def _rate_limited(bucket: str, err: str) -> ServerHits:
 
 async def server_search_chat(
     account_id: int,
-    chat_id: int,
+    chat_id: int | None,
     query: str,
     *,
+    saved: bool = False,
     from_user: str | None = None,
     from_peer: Any = None,
     topic_id: int | None = None,
@@ -320,6 +369,8 @@ async def server_search_chat(
         return ServerHits(error_text=f"error: unknown filter {filter!r}")
 
     if peer is None:
+        if chat_id is None:
+            return ServerHits(error_text="error: `chat_id` or `peer` is required")
         peer, err = await _peer_for_chat(account_id, chat_id)
         if err is not None:
             return ServerHits(error_text=err)
@@ -355,7 +406,12 @@ async def server_search_chat(
         hit_of(m, index, chat_title=chat_title) for m in list(getattr(res, "messages", None) or [])
     ]
     for h in hits:
-        h.chat_id = chat_id
+        # M7: `chat_id` faqat **haqiqiy** lokal `chats.id` bo'lganda qo'yiladi.
+        # Ilgari "Saved Messages" yo'li 0 ni uzatardi va 0 keyingi bosqichlarda
+        # chat sifatida o'qilardi (sitata, havola prefiksi, qamrov).
+        if chat_id:
+            h.chat_id = chat_id
+        h.saved = saved
     return ServerHits(hits=hits, calls=1)
 
 
@@ -459,13 +515,19 @@ async def server_search_saved(
     until: datetime | None = None,
     limit: int = 20,
 ) -> ServerHits:
-    """`messages.Search` peer=self — "Saved Messages"."""
+    """`messages.Search` peer=self — "Saved Messages".
+
+    `chat_id=None`: Saved Messages lokal `chats` jadvalida alohida qator emas,
+    shuning uchun topilmalar tashqi (external-like) sifatida ishlanadi —
+    dalilda "Saved Messages" deb belgilanadi va sitata `#x<n>` bo'ladi (M7).
+    """
     from telethon.tl import types as tlt
 
     return await server_search_chat(
         account_id,
-        0,
+        None,
         query,
+        saved=True,
         filter=filter,
         since=since,
         until=until,
@@ -633,20 +695,30 @@ async def persist_server_hits(
         return 0
     rows = (
         await session.execute(
-            select(Chat.id, Chat.tg_peer_id, Chat.title, Chat.link_prefix).where(
+            select(Chat.id, Chat.tg_peer_id, Chat.title, Chat.link_prefix, Chat.type).where(
                 Chat.account_id == account_id, Chat.tg_peer_id.in_(peers)
             )
         )
     ).all()
-    known = {int(peer): (int(cid), title, prefix) for cid, peer, title, prefix in rows}
+    # M6: kalit — **(peer id, peer turi)**. Raqamli id Telegram'da tur ichida
+    # unikal: `PeerUser(777)` va `PeerChannel(777)` boshqa-boshqa chatlar.
+    known: dict[tuple[int, str], tuple[int, str, str]] = {}
+    for cid, peer, title, prefix, ctype in rows:
+        for kind, types in PEER_KIND_CHAT_TYPES.items():
+            if str(ctype) in types:
+                known[(int(peer), kind)] = (int(cid), title, prefix)
     if not known:
         return 0
 
     to_write: list[dict[str, Any]] = []
     pairs: set[tuple[int, int]] = set()
     for h in hits:
-        found = known.get(int(h.tg_peer_id)) if h.tg_peer_id else None
+        found = (
+            known.get((int(h.tg_peer_id), h.peer_kind)) if h.tg_peer_id and h.peer_kind else None
+        )
         if found is None:
+            if h.tg_peer_id and not h.peer_kind:
+                log.info("tg_search.persist_skipped_no_peer_kind", peer=int(h.tg_peer_id))
             continue
         cid, title, prefix = found
         h.chat_id = cid

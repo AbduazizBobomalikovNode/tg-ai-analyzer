@@ -360,6 +360,27 @@ async def send_message(
     )
 
 
+def assert_deep_allowed(user_id: int) -> None:
+    """Deep rejimga kirish qopqog'i — **yagona** joy (H1).
+
+    Ikkala yo'l ham shu yerdan o'tadi: `mode="deep"` (chat API) va
+    `POST /api/deep*` (SSE router, `_prepare` shu funksiyani chaqiradi).
+    Ilgari tekshiruv faqat routerda edi, ya'ni `DEEP_SEARCH_ENABLED=false`
+    yoki `DEEP_RATE_PER_MINUTE=0` bo'lsa ham chat API orqali deep quvuri
+    ishlab ketardi.
+
+    Raises:
+        ChatError("disabled"): `DEEP_SEARCH_ENABLED=false`.
+        ChatError("rate_limited"): shift to'ldi (yoki `DEEP_RATE_PER_MINUTE=0`).
+    """
+    from app.services import limits
+
+    if not get_settings().deep_search_enabled:
+        raise ChatError("disabled")
+    if not limits.check_deep_rate(user_id):
+        raise ChatError("rate_limited")
+
+
 async def _send_via_deep(
     *,
     user_id: int,
@@ -379,6 +400,7 @@ async def _send_via_deep(
     from app.db.base import session_scope
     from app.services.deep_search import DeepSearchError, run_deep_search
 
+    assert_deep_allowed(user_id)
     try:
         result = await run_deep_search(
             session_scope,
