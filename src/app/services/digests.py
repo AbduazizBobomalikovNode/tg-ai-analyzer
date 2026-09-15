@@ -210,10 +210,27 @@ async def digest_for_day(
     cached.tokens_in = t_in
     cached.tokens_out = t_out
     await session.flush()
+    await _mirror_node(session, chat.id, day)
     log.info(
         "digest.built", chat_id=chat.id, day=str(day.date()), msgs=len(msgs), tokens=t_in + t_out
     )
     return DayDigest(day, summary, len(msgs), False, t_in, t_out, model)
+
+
+async def _mirror_node(session: AsyncSession, chat_id: int, day: datetime) -> None:
+    """Yangi L1 digest → `retrieval_nodes` level 2 (2-bosqich).
+
+    Kech import: `services/nodes.py` `episodes` → `digests._line` zanjiri
+    orqali shu modulga qaytadi, modul darajasidagi import halqa yaratardi.
+    Tugun yozilmasa digest baribir yozilgan bo'ladi — indeks keyingi
+    yugurishda tutib oladi, shuning uchun xato yutiladi.
+    """
+    try:
+        from app.services.nodes import upsert_digest_nodes
+
+        await upsert_digest_nodes(session, chat_id, day)
+    except Exception as exc:  # indeks digestni bloklamaydi
+        log.warning("digest.node_mirror_failed", chat_id=chat_id, error=str(exc)[:200])
 
 
 async def digests_for_window(

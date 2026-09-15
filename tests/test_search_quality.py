@@ -469,3 +469,136 @@ def test_claude_long_system_gets_cache_control() -> None:
         json_mode=False,
     )
     assert short["system"] == "S"
+
+
+# ─── 2-bosqich: akkaunt bo'ylab qidiruv + tugun kanali (phase2/A) ────────────
+
+
+def _node_row(node_id: int, *, level: int = 1, chat_id: int = 1, lo: int = 10, hi: int = 12) -> Any:
+    from app.db.models import RetrievalNode
+
+    return RetrievalNode(
+        id=node_id,
+        account_id=7,
+        chat_id=chat_id,
+        level=level,
+        starts_at=NOW,
+        ends_at=NOW,
+        msg_lo=lo,
+        msg_hi=hi,
+        msg_count=hi - lo + 1,
+        text="epizod matni",
+        ctx_prefix="[chat: T (supergroup) | 2026-08-18 | speakers: user:1]",
+        content_hash="h",
+        simhash=0,
+    )
+
+
+def test_hit_level_defaults_to_zero_and_survives_rrf() -> None:
+    raw = S.Hit(1, 101, 1.0, "tsv_uz")
+    node = S.Hit(2, 102, 1.0, "node", level=2)
+    assert raw.level == 0
+    fused = S.rrf([raw], [node])
+    assert {h.message_id: h.level for h in fused} == {1: 0, 2: 2}
+
+
+async def test_node_search_tsv_channel_filters_account_levels_and_window() -> None:
+    session = _FakeSession([(_node_row(5), 0.4)])
+    hits = await S.node_search(  # type: ignore[arg-type]
+        session,
+        7,
+        "to'lov",
+        levels=(1, 2),
+        chat_ids=[1, 3],
+        since=NOW - timedelta(days=7),
+        until=NOW,
+        limit=5,
+    )
+    sql = session.sql[0]
+    assert "retrieval_nodes.tsv" in sql and "to_tsquery" in sql
+    assert "retrieval_nodes.account_id" in sql and "retrieval_nodes.level IN" in sql
+    assert "retrieval_nodes.chat_id IN" in sql
+    assert "retrieval_nodes.ends_at >=" in sql and "retrieval_nodes.starts_at <" in sql
+    assert len(session.sql) == 1  # vektor kanali yo'q (vektor ham, llm ham berilmagan)
+    assert [h.node_id for h in hits] == [5]
+    assert hits[0].msg_lo == 10 and hits[0].msg_hi == 12 and hits[0].level == 1
+    assert hits[0].source == "node_tsv"
+
+
+async def test_node_search_uses_supplied_query_vector() -> None:
+    session = _FakeSession([], [(_node_row(9, level=2), 0.1)])
+    hits = await S.node_search(session, 7, [0.1, 0.2], text="to'lov")  # type: ignore[arg-type]
+    assert any("retrieval_node_embeddings" in q for q in session.sql)
+    assert [h.node_id for h in hits] == [9] and hits[0].source == "node_vector"
+
+
+async def test_node_search_without_terms_or_vector_is_empty() -> None:
+    session = _FakeSession()
+    assert await S.node_search(session, 7, "и в на") == []  # type: ignore[arg-type]
+    assert session.sql == []
+
+
+async def test_node_hits_to_messages_maps_back_to_level_zero_ids() -> None:
+    session = _FakeSession([(501, 10, 1), (502, 11, 1), (503, 12, 1)])
+    node_hits = [S.NodeHit(5, 1, 1, 0.9, "node_tsv", msg_lo=10, msg_hi=12)]
+    hits = await S.node_hits_to_messages(session, node_hits, per_node=2)  # type: ignore[arg-type]
+    assert [(h.message_id, h.tg_msg_id) for h in hits] == [(501, 10), (502, 11)]
+    assert all(h.source == "node" and h.level == 1 for h in hits)
+    assert "deleted_at IS NULL" in session.sql[0]
+
+
+async def test_node_hits_to_messages_ignores_empty_ranges() -> None:
+    session = _FakeSession()
+    assert await S.node_hits_to_messages(session, []) == []  # type: ignore[arg-type]
+    bad = [S.NodeHit(1, 1, 1, 0.5, "node_tsv", msg_lo=0, msg_hi=0)]
+    assert await S.node_hits_to_messages(session, bad) == []  # type: ignore[arg-type]
+    assert session.sql == []
+
+
+async def test_hybrid_multi_scopes_by_account_chats_and_dates() -> None:
+    llm = _EmbedLLM()
+    session = _FakeSession(
+        [(1, 101, 1, 0.5)],  # tsv_uz
+        [],  # trigram
+        [],  # vektor
+        [],  # tugun tsv
+        [],  # tugun vektor
+    )
+    hits = await S.hybrid_search_multi(  # type: ignore[arg-type]
+        session,
+        7,
+        "crypto",
+        chat_ids=[1, 2],
+        since=NOW - timedelta(days=30),
+        until=NOW,
+        llm=llm,
+    )
+    sql = session.sql[0]
+    assert "chats.account_id" in sql and "JOIN chats" in sql
+    assert "messages.chat_id IN" in sql
+    assert "messages.published_at >=" in sql and "messages.published_at <" in sql
+    assert "deleted_at IS NULL" in sql
+    assert llm.task_types == ["RETRIEVAL_QUERY"]  # bitta so'rov embeddingi
+    assert [h.message_id for h in hits] == [1] and hits[0].chat_id == 1
+
+
+async def test_hybrid_multi_folds_node_channel_into_rrf() -> None:
+    llm = _EmbedLLM()
+    session = _FakeSession(
+        [],  # tsv_uz
+        [],  # trigram
+        [],  # vektor
+        [(_node_row(5, lo=10, hi=11), 0.4)],  # tugun tsv
+        [],  # tugun vektor
+        [(501, 10, 1)],  # tugun → level 0 xabarlar
+    )
+    hits = await S.hybrid_search_multi(session, 7, "crypto", llm=llm)  # type: ignore[arg-type]
+    assert [h.message_id for h in hits] == [501]
+    assert hits[0].level == 1  # epizod tugunidan kelgan
+    assert S.DEFAULT_MULTI_RRF_WEIGHTS == (1.0, 1.0, 0.6, 1.2, 0.8)
+
+
+async def test_hybrid_multi_without_terms_does_no_sql() -> None:
+    session = _FakeSession()
+    assert await S.hybrid_search_multi(session, 7, "и в на") == []  # type: ignore[arg-type]
+    assert session.sql == []

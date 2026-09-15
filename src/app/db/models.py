@@ -14,7 +14,7 @@ from datetime import date, datetime
 from enum import StrEnum
 from typing import Any
 
-from pgvector.sqlalchemy import Vector
+from pgvector.sqlalchemy import HALFVEC, Vector
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -33,7 +33,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.config import get_settings
@@ -237,6 +237,87 @@ class MessageEmbedding(Base):
     )
     model: Mapped[str] = mapped_column(String(64))
     vector: Mapped[Any] = mapped_column(Vector(get_settings().embed_dim))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now())
+
+
+class RetrievalNode(Base):
+    """Ierarxik retrieval tuguni (2-bosqich, arxitektura v2, 3.3/5-bo'lim).
+
+    Darajalar: **0 xabar (bu jadvalda saqlanmaydi)**, 1 epizod, 2 kun,
+    3 hafta, 4 oy. Level 0 ataylab yo'q — xabarlar `messages` da, vektorlari
+    `message_embeddings` da; dublikat million qator yaratilmaydi.
+
+    `text` — `digests._line` formatidagi qatorlar; `ctx_prefix` — metadatadan
+    bepul olingan kontekst sarlavhasi (chat, sana, so'zlovchilar, nimaga
+    javob). Embed qilinadigan matn — `ctx_prefix + "\\n" + text`.
+
+    `content_hash` (md5 hex) manba o'zgarganini sezadi: epizodda xabarlar
+    ro'yxati, hafta tugunida esa bolalarning hash'lari ustidan md5.
+    `simhash` — `textnorm.simhash64`, **belgili** bigint sifatida saqlanadi
+    (`services/nodes.to_signed64`), chunki Postgres `bigint` belgili.
+    """
+
+    __tablename__ = "retrieval_nodes"
+    __table_args__ = (
+        UniqueConstraint("chat_id", "level", "starts_at", name="uq_node_chat_level_start"),
+        Index("ix_nodes_account_level_time", "account_id", "level", text("starts_at DESC")),
+        Index("ix_nodes_chat_level_time", "chat_id", "level", "starts_at"),
+        Index("ix_nodes_tsv", "tsv", postgresql_using="gin"),
+        Index("ix_nodes_simhash", "simhash"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"))
+    chat_id: Mapped[int] = mapped_column(ForeignKey("chats.id", ondelete="CASCADE"))
+    level: Mapped[int] = mapped_column(SmallInteger)
+
+    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    ends_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    msg_lo: Mapped[int] = mapped_column(BigInteger)  # tg_msg_id, inclusive
+    msg_hi: Mapped[int] = mapped_column(BigInteger)  # tg_msg_id, inclusive
+    msg_count: Mapped[int] = mapped_column(Integer, default=0)
+    speakers: Mapped[list[int]] = mapped_column(
+        ARRAY(BigInteger), default=list, server_default=text("'{}'::bigint[]")
+    )
+
+    text: Mapped[str] = mapped_column(Text, default="")
+    ctx_prefix: Mapped[str] = mapped_column(Text, default="")
+    content_hash: Mapped[str] = mapped_column(String(32))  # md5 hex
+    simhash: Mapped[int] = mapped_column(BigInteger, default=0)  # belgili 64-bit
+    structured: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=_now(), onupdate=_now()
+    )
+
+    # generated stored — DB hisoblaydi, ORM hech qachon yozmaydi
+    tsv: Mapped[Any] = mapped_column(
+        TSVECTOR,
+        Computed(
+            "to_tsvector('simple', uz_fold(coalesce(ctx_prefix, '') || ' ' || coalesce(text, '')))",
+            persisted=True,
+        ),
+        deferred=True,
+        nullable=True,
+    )
+
+
+class RetrievalNodeEmbedding(Base):
+    """Tugun vektori — `halfvec(768)` (xotira ~2x, aniqlik farqi sezilmas).
+
+    `model` ustuni bosqichma-bosqich re-embed uchun: yangi model qatorlari
+    eskilari bilan yonma-yon turadi, qidiruv joriy modelni filtrlaydi.
+    """
+
+    __tablename__ = "retrieval_node_embeddings"
+    __table_args__ = (Index("ix_node_emb_model", "model"),)
+
+    node_id: Mapped[int] = mapped_column(
+        ForeignKey("retrieval_nodes.id", ondelete="CASCADE"), primary_key=True
+    )
+    model: Mapped[str] = mapped_column(String(64))
+    vector: Mapped[Any] = mapped_column(HALFVEC(get_settings().embed_dim))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now())
 
 

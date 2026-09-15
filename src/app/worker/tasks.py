@@ -8,6 +8,9 @@
   embed_messages()                 cron: embedding'siz xabarlar → pgvector (15 daqiqa)
   build_daily_digests()            cron: kechagi kun digest'lari (02:30)
   process_autoreplies()            cron: auto-reply qoidalari → javob takliflari (5 daqiqa)
+  build_episodes_account(acc)      ierarxik indeks: epizodlar (sync oxirida ham chaqiriladi)
+  embed_nodes_task()               cron: vektori yo'q retrieval tugunlari (15 daqiqa)
+  build_week_nodes_task()          cron: hafta tugunlari, faqat kun tugunlaridan (du 03:30)
 
 FloodWait siyosati: `SyncPaused` → ish shu yerda tugaydi va o'zini `retry_after`
 soniyadan keyin qayta navbatga qo'yadi. Retry-storm yo'q, `max_jobs=4` oshirilmaydi.
@@ -57,14 +60,19 @@ async def sync_account(ctx: dict[str, Any], account_id: int, full: bool = False)
         return {"paused": exc.retry_after}
 
     fetched = 0
+    changed: list[int] = []
     for chat_id in chat_ids:
         try:
             report = await ing.sync_chat(chat_id, max_messages=limits.max_messages)
             fetched += report.fetched
+            if report.fetched:
+                changed.append(chat_id)
         except ing.SyncPaused as exc:
+            await _build_episodes_for(changed)
             await _requeue_account(account_id, full, exc.retry_after)
             return {"chats": n_chats, "fetched": fetched, "paused": exc.retry_after}
 
+    await _build_episodes_for(changed)
     log.info(
         "worker.sync_account.done",
         account_id=account_id,
@@ -254,3 +262,143 @@ async def process_autoreplies(ctx: dict[str, Any]) -> dict[str, Any]:
     log.info("worker.autoreply.done", rules=len(ids), proposed=proposed)
     await heartbeat("process_autoreplies", extra={"rules": len(ids), "proposed": proposed})
     return {"rules": len(ids), "proposed": proposed}
+
+
+# ─── 2-bosqich (phase2/A): ierarxik retrieval indeksi ────────────────────────
+#
+# Uch ish: epizodlar (har sync'dan keyin), tugun embeddinglari (15 daqiqa),
+# hafta tugunlari (dushanba 03:30). Cron'lar `PHASE2_CRONS` da e'lon qilinadi —
+# `worker/settings.py` ni bir nechta agent bir vaqtda tahrirlamasligi uchun.
+
+
+async def _build_episodes_for(chat_ids: list[int]) -> int:
+    """Sync'dan keyin o'zgargan chatlarning epizodlarini qayta quradi.
+
+    Xato bitta chatni yo'qotadi, sync'ni emas: indeks keyingi yugurishda
+    baribir tutib oladi (`build_episodes` idempotent).
+    """
+    if not chat_ids:
+        return 0
+    from app.db.base import session_scope
+    from app.services.episodes import build_episodes
+
+    done = 0
+    for chat_id in chat_ids:
+        try:
+            async with session_scope() as db:
+                await build_episodes(db, chat_id)
+            done += 1
+        except Exception as exc:  # bitta chat xatosi sync'ni yiqitmasin
+            log.warning("worker.episodes_failed", chat_id=chat_id, error=str(exc)[:200])
+    log.info("worker.episodes.done", chats=done)
+    return done
+
+
+async def build_episodes_account(
+    ctx: dict[str, Any], account_id: int, full: bool = False
+) -> dict[str, Any]:
+    """Akkauntning barcha sinxronlangan chatlarida epizodlarni quradi/yangilaydi."""
+    from sqlalchemy import select
+
+    from app.db.base import session_scope
+    from app.db.models import Chat
+    from app.services.episodes import build_episodes
+
+    async with session_scope() as db:
+        chat_ids = [
+            int(r[0])
+            for r in (
+                await db.execute(
+                    select(Chat.id).where(Chat.account_id == account_id, Chat.synced_total > 0)
+                )
+            ).all()
+        ]
+    created = updated = deleted = 0
+    for chat_id in chat_ids:
+        try:
+            async with session_scope() as db:
+                rep = await build_episodes(db, chat_id, full=full)
+            created += rep.created
+            updated += rep.updated
+            deleted += rep.deleted
+        except Exception as exc:  # bitta chat xatosi qolganini to'xtatmasin
+            log.warning("worker.episodes_failed", chat_id=chat_id, error=str(exc)[:200])
+    log.info(
+        "worker.episodes_account.done",
+        account_id=account_id,
+        chats=len(chat_ids),
+        created=created,
+        updated=updated,
+    )
+    await heartbeat(
+        "build_episodes_account", extra={"account_id": account_id, "chats": len(chat_ids)}
+    )
+    return {"chats": len(chat_ids), "created": created, "updated": updated, "deleted": deleted}
+
+
+async def embed_nodes_task(ctx: dict[str, Any], limit: int | None = None) -> dict[str, Any]:
+    """Har 15 daqiqa: vektori yo'q retrieval tugunlarini embed qiladi."""
+    from app.config import get_settings
+    from app.db.base import session_scope
+    from app.services.nodes import embed_nodes
+
+    s = get_settings()
+    if not s.node_index_enabled or not s.embed_enabled:
+        return {"skipped": "disabled"}
+    async with session_scope() as db:
+        rep = await embed_nodes(db, limit=limit or s.node_embed_batch_per_run or None)
+    await heartbeat("embed_nodes", extra={"embedded": rep.embedded})
+    return {"embedded": rep.embedded, "pending": rep.pending, "error": rep.error}
+
+
+async def build_week_nodes_task(ctx: dict[str, Any]) -> dict[str, Any]:
+    """Dushanba 03:30: o'tgan hafta uchun level-3 tugunlar (faqat kun tugunlaridan)."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.config import get_settings
+    from app.db.base import session_scope
+    from app.services.nodes import build_week_nodes, chats_needing_week_node, week_start
+
+    s = get_settings()
+    if not s.node_index_enabled or not s.week_nodes_enabled:
+        return {"skipped": "disabled"}
+    week = week_start(datetime.now(UTC) - timedelta(days=1))
+    async with session_scope() as db:
+        chat_ids = await chats_needing_week_node(db, week)
+    built = 0
+    for chat_id in chat_ids:
+        try:
+            async with session_scope() as db:
+                node = await build_week_nodes(db, chat_id, week)
+            if node is not None:
+                built += 1
+        except Exception as exc:  # bitta chat xatosi qolganini to'xtatmasin
+            log.warning("worker.week_node_failed", chat_id=chat_id, error=str(exc)[:200])
+    log.info("worker.week_nodes.done", week=str(week.date()), chats=len(chat_ids), built=built)
+    await heartbeat("build_week_nodes", extra={"chats": len(chat_ids), "built": built})
+    return {"week": str(week.date()), "chats": len(chat_ids), "built": built}
+
+
+#: phase2/A cron'lari — `worker/settings.py::WorkerSettings.cron_jobs` ga
+#: qo'shiladi (`*tasks.PHASE2_CRONS`). Ro'yxat shu yerda, chunki `settings.py`
+#: ni parallel ishlayotgan boshqa agentlar ham tahrirlaydi.
+PHASE2_FUNCTIONS: list[Any] = [build_episodes_account, embed_nodes_task, build_week_nodes_task]
+
+
+def _phase2_crons() -> list[Any]:
+    from arq.cron import cron
+
+    return [
+        cron(embed_nodes_task, minute={3, 18, 33, 48}, run_at_startup=False, timeout=1200),
+        cron(
+            build_week_nodes_task,
+            weekday=0,  # dushanba
+            hour={3},
+            minute={30},
+            run_at_startup=False,
+            timeout=3000,
+        ),
+    ]
+
+
+PHASE2_CRONS: list[Any] = _phase2_crons()

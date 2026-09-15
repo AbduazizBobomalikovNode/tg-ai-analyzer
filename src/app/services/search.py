@@ -97,6 +97,9 @@ class Hit:
     text: str = ""
     # dedup vakili ostiga yig'ilgan nusxalar: (chat_id, tg_msg_id, date)
     also_seen_in: list[tuple[int, int, datetime | None]] = field(default_factory=list)
+    # ierarxiya darajasi: 0 — xom xabar (sukut), 1 epizod, 2 kun, 3 hafta.
+    # Tugun kanalidan kelgan hit'da bu manba tugunning darajasi bo'ladi.
+    level: int = 0
 
 
 @dataclass(slots=True)
@@ -408,6 +411,7 @@ def rrf(
                     sender=h.sender,
                     date=h.date,
                     text=h.text,
+                    level=h.level,
                 )
             else:
                 cur.score += score
@@ -466,6 +470,477 @@ async def hybrid_search(
         vector=len(vec),
         fused=len(fused),
         expanded=bool(expansion and not expansion.is_empty),
+    )
+    return fused[:limit]
+
+
+# ─── akkaunt bo'ylab qidiruv + tugun kanali (2-bosqich) ─────────────────────
+#
+# Muhim: bitta `AsyncSession` **parallel** ishlatilmaydi. Kanallar shu yerda
+# ham ketma-ket yuradi — `asyncio.gather` asyncpg ulanishida `InterfaceError`
+# beradi. Parallellik kerak bo'lsa har kanalga o'z sessiyasi ochilishi kerak.
+
+
+@dataclass(slots=True)
+class NodeHit:
+    """`retrieval_nodes` dan topilma — sitata uchun `msg_lo..msg_hi` oralig'i bilan.
+
+    Tugun matni javobda to'g'ridan-to'g'ri sitata qilinmaydi: chaqiruvchi
+    oraliqdan **level 0** xabar id'larini oladi va sitata o'shalarga beriladi
+    (halollik: "shu tugunda gapirilgan" emas, "shu xabarda yozilgan").
+    """
+
+    node_id: int
+    chat_id: int
+    level: int
+    score: float
+    source: str  # node_tsv | node_vector | both
+    starts_at: datetime | None = None
+    ends_at: datetime | None = None
+    msg_lo: int = 0
+    msg_hi: int = 0
+    msg_count: int = 0
+    ctx_prefix: str = ""
+    text: str = ""
+
+
+# Tugun kanali RRF'da beshinchi kirish (v2, 6-bo'lim: tugunlar 0.8).
+W_NODES = 0.8
+DEFAULT_MULTI_RRF_WEIGHTS: tuple[float, float, float, float, float] = (
+    W_TSV_UZ,
+    W_TSV_RU,
+    W_TRIGRAM,
+    W_VECTOR,
+    W_NODES,
+)
+#: Tugun kanalidan xabarga qaytarishda: nechta tugun va har biridan nechta xabar.
+NODE_CITE_NODES = 12
+NODE_CITE_PER_NODE = 2
+
+
+def _scope(
+    account_id: int,
+    chat_ids: Sequence[int] | None,
+    since: datetime | None,
+    until: datetime | None,
+) -> list[Any]:
+    """Akkaunt + chat + sana oynasi shartlari (xabar kanallari uchun)."""
+    conds: list[Any] = [Chat.account_id == account_id]
+    if chat_ids:
+        conds.append(Message.chat_id.in_(list(chat_ids)))
+    if since is not None:
+        conds.append(Message.published_at >= since)
+    if until is not None:
+        conds.append(Message.published_at < until)
+    return conds
+
+
+async def _tsv_multi(
+    session: AsyncSession,
+    col: Any,
+    *,
+    config: str,
+    tsq: str,
+    conds: Sequence[Any],
+    limit: int,
+    source: str,
+) -> list[Hit]:
+    q = func.to_tsquery(config, tsq)
+    score = func.ts_rank_cd(col, q).label("score")
+    stmt = (
+        select(Message.id, Message.tg_msg_id, Message.chat_id, score)
+        .join(Chat, Chat.id == Message.chat_id)
+        .where(*conds, *_alive(), col.op("@@")(q))
+        .order_by(score.desc())
+        .limit(limit)
+    )
+    rows = (await session.execute(stmt)).all()
+    return [Hit(int(r[0]), int(r[1]), float(r[3] or 0), source, chat_id=int(r[2])) for r in rows]
+
+
+async def _trigram_multi(
+    session: AsyncSession, terms: Sequence[str], *, conds: Sequence[Any], limit: int
+) -> list[Hit]:
+    col = getattr(Message, "text_fold", None)
+    folded = fold_terms(terms)[:4]
+    if col is None or not folded:
+        return []
+    sims = [func.strict_word_similarity(t, col) for t in folded]
+    expr = sims[0] if len(sims) == 1 else func.greatest(*sims)
+    score = expr.label("score")
+    stmt = (
+        select(Message.id, Message.tg_msg_id, Message.chat_id, score)
+        .join(Chat, Chat.id == Message.chat_id)
+        .where(*conds, *_alive(), expr > STRICT_TRGM_THRESHOLD)
+        .order_by(score.desc())
+        .limit(limit)
+    )
+    try:
+        rows = (await session.execute(stmt)).all()
+    except Exception as exc:  # funksiya yo'q bo'lsa — kanal jimgina bo'sh
+        log.warning("search.trigram_multi_failed", error=str(exc)[:200])
+        return []
+    return [Hit(int(r[0]), int(r[1]), float(r[3] or 0), "trigram", chat_id=int(r[2])) for r in rows]
+
+
+async def _vector_multi(
+    session: AsyncSession, qvec: Sequence[float], *, conds: Sequence[Any], limit: int
+) -> list[Hit]:
+    dist = MessageEmbedding.vector.cosine_distance(list(qvec)).label("dist")
+    stmt = (
+        select(Message.id, Message.tg_msg_id, Message.chat_id, dist)
+        .join(MessageEmbedding, MessageEmbedding.message_id == Message.id)
+        .join(Chat, Chat.id == Message.chat_id)
+        .where(*conds, *_alive())
+        .order_by(dist)
+        .limit(limit)
+    )
+    rows = (await session.execute(stmt)).all()
+    return [
+        Hit(int(r[0]), int(r[1]), 1.0 - float(r[3] or 0), "vector", chat_id=int(r[2])) for r in rows
+    ]
+
+
+async def _query_vector(question: str, llm: LLM | None) -> list[float] | None:
+    """So'rov uchun **bitta** embedding (`RETRIEVAL_QUERY`). Xato bo'lsa — None."""
+    try:
+        res = await (llm or LLM()).embed([question], task_type=EMBED_QUERY)
+    except LLMError as exc:
+        log.warning("search.embed_failed", error=str(exc)[:200])
+        return None
+    return list(res.vectors[0]) if res.vectors else None
+
+
+def rrf_nodes(
+    *ranked: Sequence[NodeHit], k: int = 60, weights: Sequence[float] | None = None
+) -> list[NodeHit]:
+    """`rrf` ning tugunlar uchun varianti — kalit `node_id`."""
+    acc: dict[int, NodeHit] = {}
+    for idx, hits in enumerate(ranked):
+        w = weights[idx] if weights is not None and idx < len(weights) else 1.0
+        for i, h in enumerate(hits):
+            cur = acc.get(h.node_id)
+            if cur is None:
+                acc[h.node_id] = NodeHit(
+                    h.node_id,
+                    h.chat_id,
+                    h.level,
+                    w / (k + i + 1),
+                    h.source,
+                    starts_at=h.starts_at,
+                    ends_at=h.ends_at,
+                    msg_lo=h.msg_lo,
+                    msg_hi=h.msg_hi,
+                    msg_count=h.msg_count,
+                    ctx_prefix=h.ctx_prefix,
+                    text=h.text,
+                )
+            else:
+                cur.score += w / (k + i + 1)
+                cur.source = "both" if cur.source != h.source else cur.source
+    return sorted(acc.values(), key=lambda h: h.score, reverse=True)
+
+
+def _node_row_to_hit(row: Any, *, score: float, source: str) -> NodeHit:
+    return NodeHit(
+        node_id=int(row.id),
+        chat_id=int(row.chat_id),
+        level=int(row.level),
+        score=score,
+        source=source,
+        starts_at=row.starts_at,
+        ends_at=row.ends_at,
+        msg_lo=int(row.msg_lo or 0),
+        msg_hi=int(row.msg_hi or 0),
+        msg_count=int(row.msg_count or 0),
+        ctx_prefix=row.ctx_prefix or "",
+        text=row.text or "",
+    )
+
+
+async def node_search(
+    session: AsyncSession,
+    account_id: int,
+    query_vec_or_text: str | Sequence[float],
+    *,
+    levels: Sequence[int] = (1, 2, 3),
+    chat_ids: Sequence[int] | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    limit: int = 20,
+    text: str | None = None,
+    llm: LLM | None = None,
+    weights: Sequence[float] | None = None,
+) -> list[NodeHit]:
+    """`retrieval_nodes` ustidan ikki kanalli qidiruv (tsv + vektor) → RRF.
+
+    Tugunlar epizod/kun/hafta darajasida — ya'ni "ha, roziman" tipidagi
+    xabarlar ham o'z konteksti bilan topiladi. Har topilma `msg_lo..msg_hi`
+    oralig'ini beradi, sitata esa **level 0** xabarlarga qo'yiladi.
+
+    Args:
+        session: DB sessiyasi. **Parallel ishlatilmaydi** — kanallar ketma-ket.
+        account_id: `accounts.id` (tugunlar akkaunt bo'yicha ajratilgan).
+        query_vec_or_text: savol matni yoki tayyor so'rov vektori. Vektor
+            berilsa leksik kanal uchun `text` ni ham bering.
+        levels: qaysi darajalar (sukut: epizod, kun, hafta).
+        chat_ids: faqat shu chatlar; `None` — akkauntdagi hammasi.
+        since / until: `starts_at` oynasi.
+        limit: qaytariladigan tugunlar soni.
+        text: leksik kanal uchun matn (vektor berilganda).
+        llm: matn berilib vektor berilmaganda embedding uchun.
+        weights: `(tsv, vektor)` og'irliklari.
+
+    Returns:
+        `NodeHit` ro'yxati, RRF ballari bo'yicha kamayish tartibida.
+    """
+    from app.db.models import RetrievalNode, RetrievalNodeEmbedding
+
+    qtext = query_vec_or_text if isinstance(query_vec_or_text, str) else text
+    qvec: list[float] | None = None
+    if not isinstance(query_vec_or_text, str):
+        qvec = list(query_vec_or_text)
+    elif llm is not None:
+        qvec = await _query_vector(query_vec_or_text, llm)
+
+    conds: list[Any] = [RetrievalNode.account_id == account_id]
+    if levels:
+        conds.append(RetrievalNode.level.in_(list(levels)))
+    if chat_ids:
+        conds.append(RetrievalNode.chat_id.in_(list(chat_ids)))
+    if since is not None:
+        conds.append(RetrievalNode.ends_at >= since)
+    if until is not None:
+        conds.append(RetrievalNode.starts_at < until)
+
+    lex: list[NodeHit] = []
+    folded = fold_terms(keywords(qtext)) if qtext else []
+    tsq = _tsquery(folded, prefix=True, op=" & ") if folded else ""
+    if tsq:
+        q = func.to_tsquery("simple", tsq)
+        score = func.ts_rank_cd(RetrievalNode.tsv, q).label("score")
+        rows = (
+            await session.execute(
+                select(RetrievalNode, score)
+                .where(*conds, RetrievalNode.tsv.op("@@")(q))
+                .order_by(score.desc())
+                .limit(limit * 2)
+            )
+        ).all()
+        if not rows and len(folded) > 1:
+            q = func.to_tsquery("simple", _tsquery(folded, prefix=True, op=" | "))
+            score = func.ts_rank_cd(RetrievalNode.tsv, q).label("score")
+            rows = (
+                await session.execute(
+                    select(RetrievalNode, score)
+                    .where(*conds, RetrievalNode.tsv.op("@@")(q))
+                    .order_by(score.desc())
+                    .limit(limit * 2)
+                )
+            ).all()
+        lex = [_node_row_to_hit(r[0], score=float(r[1] or 0), source="node_tsv") for r in rows]
+
+    vec: list[NodeHit] = []
+    if qvec is not None:
+        dist = RetrievalNodeEmbedding.vector.cosine_distance(qvec).label("dist")
+        rows = (
+            await session.execute(
+                select(RetrievalNode, dist)
+                .join(RetrievalNodeEmbedding, RetrievalNodeEmbedding.node_id == RetrievalNode.id)
+                .where(*conds)
+                .order_by(dist)
+                .limit(limit * 2)
+            )
+        ).all()
+        vec = [
+            _node_row_to_hit(r[0], score=1.0 - float(r[1] or 0), source="node_vector") for r in rows
+        ]
+
+    fused = rrf_nodes(lex, vec, weights=weights or (1.0, 1.0))
+    log.debug("search.nodes", account_id=account_id, tsv=len(lex), vector=len(vec))
+    return fused[:limit]
+
+
+async def node_hits_to_messages(
+    session: AsyncSession,
+    node_hits: Sequence[NodeHit],
+    *,
+    per_node: int = NODE_CITE_PER_NODE,
+    max_nodes: int = NODE_CITE_NODES,
+) -> list[Hit]:
+    """Tugun topilmalarini **level 0** xabarlarga qaytaradi (sitata uchun).
+
+    Bitta so'rov: oraliqlar `OR` bilan birlashtiriladi (`(chat_id, tg_msg_id)`
+    unikal indeksi ishlaydi), keyin har tugundan `per_node` xabar olinadi.
+    Tugunlarning RRF tartibi saqlanadi — bu kanal kirishi shu tartibda.
+    """
+    from sqlalchemy import and_, or_
+
+    top = list(node_hits)[:max_nodes]
+    if not top:
+        return []
+    ranges = [
+        and_(
+            Message.chat_id == h.chat_id,
+            Message.tg_msg_id >= h.msg_lo,
+            Message.tg_msg_id <= h.msg_hi,
+        )
+        for h in top
+        if h.msg_hi >= h.msg_lo > 0
+    ]
+    if not ranges:
+        return []
+    rows = (
+        await session.execute(
+            select(Message.id, Message.tg_msg_id, Message.chat_id)
+            .where(or_(*ranges), *_alive())
+            .order_by(Message.chat_id, Message.tg_msg_id)
+            .limit(max_nodes * per_node * 20)
+        )
+    ).all()
+    by_chat: dict[int, list[tuple[int, int]]] = {}
+    for mid, tg_id, chat_id in rows:
+        by_chat.setdefault(int(chat_id), []).append((int(tg_id), int(mid)))
+    out: list[Hit] = []
+    seen: set[int] = set()
+    for h in top:
+        picked = 0
+        for tg_id, mid in by_chat.get(h.chat_id, []):
+            if not (h.msg_lo <= tg_id <= h.msg_hi) or mid in seen:
+                continue
+            out.append(Hit(mid, tg_id, h.score, "node", chat_id=h.chat_id, level=h.level))
+            seen.add(mid)
+            picked += 1
+            if picked >= per_node:
+                break
+    return out
+
+
+async def hybrid_search_multi(
+    session: AsyncSession,
+    account_id: int,
+    question: str,
+    *,
+    chat_ids: Sequence[int] | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    limit: int = 40,
+    expansion: Expansion | None = None,
+    expand: bool = False,
+    llm: LLM | None = None,
+    weights: Sequence[float] | None = None,
+    levels: Sequence[int] = (1, 2, 3),
+) -> list[Hit]:
+    """Akkaunt bo'ylab besh kanalli qidiruv: tsv_uz, tsv_ru, trigram, vektor, tugunlar.
+
+    `hybrid_search` bitta chat uchun; bu — "burchakdan burchakka" varianti
+    (v2, 2-bo'lim): bir nechta chat, sana oynasi, tugun kanali. Tugun
+    topilmalari `node_hits_to_messages` orqali level-0 xabarlarga qaytariladi,
+    shuning uchun natija **bir xil** `Hit` turida bo'ladi va sitata har doim
+    haqiqiy `#tg_msg_id` ga tushadi.
+
+    Kanallar **ketma-ket** bajariladi: bitta `AsyncSession` ni parallel
+    ishlatib bo'lmaydi (asyncpg `InterfaceError`).
+
+    Args:
+        session: DB sessiyasi.
+        account_id: `accounts.id`.
+        question: foydalanuvchi savoli (untrusted matn emas).
+        chat_ids: qidiruv doirasi; `None` — akkauntdagi hamma chat.
+        since / until: sana oynasi (`published_at`).
+        limit: natija soni.
+        expansion: tayyor ko'p tilli kengaytma; `expand=True` bo'lsa o'zi oladi.
+        llm: LLM fasadi (embedding va kengaytirish uchun).
+        weights: besh kanal og'irligi.
+        levels: tugun kanalidagi darajalar.
+
+    Returns:
+        RRF bo'yicha tartiblangan `Hit` ro'yxati (`chat_id` to'ldirilgan).
+    """
+    base = keywords(question)
+    if expansion is None and expand and get_settings().search_expand_enabled:
+        from app.services.query_expand import expand as expand_query
+
+        expansion = await expand_query(question, llm=llm)
+
+    uz_terms = list(base)
+    ru_terms = [t for t in base if _CYRILLIC_RE.search(t)]
+    if expansion is not None:
+        uz_terms += [t for t in expansion.latin_terms() if t not in uz_terms]
+        ru_terms += [t for t in expansion.cyrillic_terms() if t not in ru_terms]
+    if not uz_terms and not ru_terms:
+        return []
+
+    conds = _scope(account_id, chat_ids, since, until)
+    wide = limit * 2
+
+    uz: list[Hit] = []
+    folded = fold_terms(uz_terms)
+    uz_col = getattr(Message, "tsv_uz", None)
+    if uz_col is not None and folded:
+        uz = await _tsv_multi(
+            session,
+            uz_col,
+            config="simple",
+            tsq=_tsquery(folded, prefix=True, op=" & "),
+            conds=conds,
+            limit=wide,
+            source="tsv_uz",
+        )
+        if not uz and len(folded) > 1:
+            uz = await _tsv_multi(
+                session,
+                uz_col,
+                config="simple",
+                tsq=_tsquery(folded, prefix=True, op=" | "),
+                conds=conds,
+                limit=wide,
+                source="tsv_uz",
+            )
+
+    ru: list[Hit] = []
+    ru_col = getattr(Message, "tsv_ru", None)
+    ru_clean = [t for t in (_tsq_safe(x.lower()) for x in ru_terms) if len(t) >= 2]
+    if ru_col is not None and ru_clean:
+        ru = await _tsv_multi(
+            session,
+            ru_col,
+            config="russian",
+            tsq=_tsquery(ru_clean, prefix=False, op=" & "),
+            conds=conds,
+            limit=wide,
+            source="tsv_ru",
+        )
+
+    tri = await _trigram_multi(session, uz_terms or ru_terms, conds=conds, limit=wide)
+
+    qvec = await _query_vector(question, llm)
+    vec = await _vector_multi(session, qvec, conds=conds, limit=wide) if qvec else []
+
+    node_hits = await node_search(
+        session,
+        account_id,
+        qvec if qvec is not None else question,
+        text=question,
+        levels=levels,
+        chat_ids=chat_ids,
+        since=since,
+        until=until,
+        limit=NODE_CITE_NODES,
+    )
+    nodes = await node_hits_to_messages(session, node_hits)
+
+    fused = rrf(uz, ru, tri, vec, nodes, weights=weights or DEFAULT_MULTI_RRF_WEIGHTS)
+    log.debug(
+        "search.hybrid_multi",
+        account_id=account_id,
+        chats=len(chat_ids) if chat_ids else 0,
+        tsv_uz=len(uz),
+        tsv_ru=len(ru),
+        trigram=len(tri),
+        vector=len(vec),
+        nodes=len(node_hits),
+        fused=len(fused),
     )
     return fused[:limit]
 
@@ -870,11 +1345,13 @@ async def select_context(
 
 
 __all__ = [
+    "DEFAULT_MULTI_RRF_WEIGHTS",
     "DEFAULT_RRF_WEIGHTS",
     "STRICT_TRGM_THRESHOLD",
     "TRGM_THRESHOLD",
     "ContextBundle",
     "Hit",
+    "NodeHit",
     "compact_text",
     "compact_window",
     "detect_window",
@@ -888,10 +1365,14 @@ __all__ = [
     "fts_search",
     "fts_uz_search",
     "hybrid_search",
+    "hybrid_search_multi",
     "hydrate_hits",
     "keywords",
     "looks_like_summary",
+    "node_hits_to_messages",
+    "node_search",
     "rrf",
+    "rrf_nodes",
     "search_context",
     "select_context",
     "trigram_search",

@@ -325,3 +325,170 @@ async def test_trigram_index_exists(pg_engine: AsyncEngine) -> None:
     # 0008 eski ifodali indekslarni olib tashlaydi
     assert "ix_messages_fts" not in names
     assert "ix_messages_trgm" not in names
+
+
+# ─── (e) 0009: retrieval_nodes + halfvec (phase2/A) ──────────────────────────
+
+
+async def test_retrieval_nodes_tables_and_indexes_exist(pg_engine: AsyncEngine) -> None:
+    """0009 qo'llanadi: jadvallar, GIN tsv va HNSW `halfvec_cosine_ops` indeksi.
+
+    HNSW `halfvec` faqat pgvector >= 0.7 da bor (bu yerdagi image — 0.8.x).
+    Indeks yo'qolsa vektor qidiruv **jimgina** ketma-ket skanga tushadi.
+    """
+    async with pg_engine.connect() as conn:
+        node_idx = (
+            (
+                await conn.execute(
+                    text("SELECT indexname FROM pg_indexes WHERE tablename = 'retrieval_nodes'")
+                )
+            )
+            .scalars()
+            .all()
+        )
+        emb_idx = (
+            (
+                await conn.execute(
+                    text(
+                        "SELECT indexdef FROM pg_indexes "
+                        "WHERE tablename = 'retrieval_node_embeddings'"
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        coltype = (
+            await conn.execute(
+                text(
+                    "SELECT format_type(a.atttypid, a.atttypmod) FROM pg_attribute a "
+                    "WHERE a.attrelid = 'retrieval_node_embeddings'::regclass "
+                    "AND a.attname = 'vector'"
+                )
+            )
+        ).scalar_one()
+    for expected in ("ix_nodes_tsv", "ix_nodes_chat_level_time", "ix_nodes_account_level_time"):
+        assert expected in node_idx
+    assert coltype == "halfvec(768)"
+    assert any("hnsw" in d and "halfvec_cosine_ops" in d for d in emb_idx)
+
+
+async def test_node_tsv_is_generated_from_prefix_and_text(pg_engine: AsyncEngine) -> None:
+    """`tsv` — `ctx_prefix || ' ' || text` ustida, `uz_fold` bilan.
+
+    Ya'ni kirill/apostrof farqi ham, prefiksdagi chat nomi ham leksik kanalga
+    tushadi; qidiruv tomoni `search.fold_terms` bilan bir xil fazoda.
+    """
+    account_id, chat_id = await _fixture_chat(pg_engine)
+    async with pg_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO retrieval_nodes (account_id, chat_id, level, starts_at, ends_at, "
+                "msg_lo, msg_hi, msg_count, speakers, text, ctx_prefix, content_hash, simhash) "
+                "VALUES (:a, :c, 1, now(), now(), 1, 9, 9, '{11,22}'::bigint[], "
+                ":t, :p, 'deadbeef', :s)"
+            ),
+            {
+                "a": account_id,
+                "c": chat_id,
+                "t": "Ўзбек тилида тўлов ҳақида",
+                "p": "[chat: Ish guruhi (supergroup) | 2026-03-14 | speakers: user:11]",
+                "s": -9223372036854775808,  # eng kichik bigint — belgili saqlash
+            },
+        )
+    async with pg_engine.connect() as conn:
+        found = (
+            await conn.execute(
+                text(
+                    "SELECT count(*) FROM retrieval_nodes WHERE chat_id = :c "
+                    "AND tsv @@ to_tsquery('simple', :q)"
+                ),
+                {"c": chat_id, "q": f"{uz_fold('тўлов')}:*"},
+            )
+        ).scalar_one()
+        by_prefix = (
+            await conn.execute(
+                text(
+                    "SELECT count(*) FROM retrieval_nodes WHERE chat_id = :c "
+                    "AND tsv @@ to_tsquery('simple', :q)"
+                ),
+                {"c": chat_id, "q": f"{uz_fold('guruhi')}:*"},
+            )
+        ).scalar_one()
+    assert found == 1  # kirill matn lotin so'rovi bilan topildi
+    assert by_prefix == 1  # prefiks ham indeksda
+
+
+async def test_node_unique_key_and_halfvec_roundtrip(pg_engine: AsyncEngine) -> None:
+    """`(chat_id, level, starts_at)` unikal; `halfvec` yozilib, cosine bilan o'qiladi."""
+    account_id, chat_id = await _fixture_chat(pg_engine)
+    when = datetime(2026, 3, 9, tzinfo=UTC)
+    insert = text(
+        "INSERT INTO retrieval_nodes (account_id, chat_id, level, starts_at, ends_at, "
+        "msg_lo, msg_hi, msg_count, text, ctx_prefix, content_hash, simhash) "
+        "VALUES (:a, :c, 1, :d, :d, 1, 2, 2, 'matn', 'pref', 'h1', 0) RETURNING id"
+    )
+    async with pg_engine.begin() as conn:
+        node_id = (
+            await conn.execute(insert, {"a": account_id, "c": chat_id, "d": when})
+        ).scalar_one()
+    with pytest.raises(Exception):  # noqa: B017 — asyncpg UniqueViolation
+        async with pg_engine.begin() as conn:
+            await conn.execute(insert, {"a": account_id, "c": chat_id, "d": when})
+
+    vec = "[" + ",".join(["0.1"] * 768) + "]"
+    async with pg_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO retrieval_node_embeddings (node_id, model, vector) "
+                "VALUES (:n, 'gemini-embedding-001', CAST(:v AS halfvec))"
+            ),
+            {"n": node_id, "v": vec},
+        )
+    async with pg_engine.connect() as conn:
+        dist = (
+            await conn.execute(
+                text(
+                    "SELECT vector <=> CAST(:v AS halfvec) FROM retrieval_node_embeddings "
+                    "WHERE node_id = :n"
+                ),
+                {"n": node_id, "v": vec},
+            )
+        ).scalar_one()
+    assert abs(float(dist)) < 1e-6  # o'ziga cosine masofasi nol
+
+
+async def test_node_rows_die_with_the_chat(pg_engine: AsyncEngine) -> None:
+    """`ON DELETE CASCADE` — chat o'chsa tugun ham, vektori ham qolmaydi."""
+    account_id, chat_id = await _fixture_chat(pg_engine)
+    async with pg_engine.begin() as conn:
+        node_id = (
+            await conn.execute(
+                text(
+                    "INSERT INTO retrieval_nodes (account_id, chat_id, level, starts_at, "
+                    "ends_at, msg_lo, msg_hi, msg_count, text, ctx_prefix, content_hash, "
+                    "simhash) VALUES (:a, :c, 2, now(), now(), 1, 2, 2, 't', 'p', 'h', 0) "
+                    "RETURNING id"
+                ),
+                {"a": account_id, "c": chat_id},
+            )
+        ).scalar_one()
+        await conn.execute(
+            text(
+                "INSERT INTO retrieval_node_embeddings (node_id, model, vector) "
+                "VALUES (:n, 'm', CAST(:v AS halfvec))"
+            ),
+            {"n": node_id, "v": "[" + ",".join(["0"] * 768) + "]"},
+        )
+        await conn.execute(text("DELETE FROM chats WHERE id = :c"), {"c": chat_id})
+    async with pg_engine.connect() as conn:
+        left = (
+            await conn.execute(
+                text(
+                    "SELECT (SELECT count(*) FROM retrieval_nodes WHERE id = :n) + "
+                    "(SELECT count(*) FROM retrieval_node_embeddings WHERE node_id = :n)"
+                ),
+                {"n": node_id},
+            )
+        ).scalar_one()
+    assert left == 0
