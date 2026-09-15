@@ -322,6 +322,20 @@ class Settings(BaseSettings):
     # qoldiradi (snapshot eng eski `captured_at` dan boshlab oladi).
     snapshot_max_messages_per_run: int = Field(default=5000, ge=100, le=100_000)
 
+    # --- ui/R1a ---
+    # Chat profil rasmlari (`services/avatars.py`, `DATA_DIR/avatars`).
+    # "Media saqlanmaydi" invariantiga **chegaralangan istisno**: faqat profil
+    # rasmi, xabar mediasi hech qachon. `false` — hech qanday fayl yuklanmaydi
+    # (UI inisiallarni chizadi); qolgan profil ma'lumoti (`about`, belgilar)
+    # baribir yangilanadi.
+    avatars_enabled: bool = True
+
+    # --- ui/R1b ---
+    # Mini App `initData` imzosining maksimal yoshi (sekund). Telegram
+    # hujjatida tavsiya — 24 soat; qisqartirilsa Mini App'ni uzoq ochiq
+    # qoldirgan foydalanuvchi qayta kirishga majbur bo'ladi.
+    miniapp_init_data_max_age: int = Field(default=86_400, ge=60, le=7 * 86_400)
+
     @property
     def trusted_proxy_networks(self) -> tuple[Any, ...]:
         """`TRUSTED_PROXIES` → `ip_network` ro'yxati. Noto'g'ri yozuv e'tiborsiz."""

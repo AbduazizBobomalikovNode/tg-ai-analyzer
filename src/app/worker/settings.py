@@ -112,6 +112,7 @@ class WorkerSettings:
         *tasks.PHASE4B_FUNCTIONS,  # phase4/B: reembed_all (cron yo'q, qo'lda)
         *tasks.PHASE4A_FUNCTIONS,  # phase4/A: entity backfill (kursorli)
         *tasks.PHASE4C_FUNCTIONS,  # phase4/C: batch embedding joblarini o'qish
+        *tasks.UI_R1A_FUNCTIONS,  # ui/R1a: chat profillari (avatar + about)
     ]
     cron_jobs: ClassVar[list[Any]] = [
         *tasks.PHASE2_CRONS,  # phase2/A: embed_nodes (15 daq), week_nodes (du 03:30)
@@ -119,6 +120,7 @@ class WorkerSettings:
         *tasks.PHASE3B_CRONS,  # phase3/B: build_briefings (soatiga), deliver_briefings (15 daq)
         *tasks.PHASE4A_CRONS,  # phase4/A: entity backfill (soatiga, ish bo'lmasa darhol chiqadi)
         *tasks.PHASE4C_CRONS,  # phase4/C: poll_embed_batches (5 daq)
+        *tasks.UI_R1A_CRONS,  # ui/R1a: refresh_all_chat_profiles (soatiga, :40)
         cron(heartbeat, minute={0, 30}, run_at_startup=False),
         # ⚠️ Snapshot cron'ini o'chirmang — views/reactions vaqt qatori shu yerdan (4.6)
         cron(tasks.snapshot_metrics, minute={5}, run_at_startup=False, timeout=3000),

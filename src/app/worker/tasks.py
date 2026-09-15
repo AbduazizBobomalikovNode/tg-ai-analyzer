@@ -84,6 +84,9 @@ async def sync_account(ctx: dict[str, Any], account_id: int, full: bool = False)
     # phase3/C: yangi xabarlar keldi — alert skanerini darhol navbatga qo'yamiz,
     # 5 daqiqalik cron'ni kutmasdan (kalit so'z alerti kechikkani sezilarli).
     await _enqueue_scan_alerts(account_id, fetched)
+    # ui/R1a: yangi chatlar ro'yxatga tushdi — avatar/about ularga soatlik
+    # cron'ni kutmasdan keladi (ish o'zi byudjetlangan, `job_id` deterministik).
+    await _enqueue_chat_profiles(account_id)
     return {"chats": len(chat_ids), "fetched": fetched, "ramp_up": limits.ramp_up}
 
 
@@ -1091,3 +1094,115 @@ def _phase4c_crons() -> list[Any]:
 
 
 PHASE4C_CRONS: list[Any] = _phase4c_crons()
+
+
+# ─── ui/R1a: chat profillari (avatar + about) ────────────────────────────────
+#
+# Nega alohida ish: `refresh_chats` faqat `GetDialogs` javobini yozadi (RPC
+# qo'shmaydi). `about` va profil rasmi esa har chat uchun **alohida** serverga
+# borishni talab qiladi, shuning uchun ular byudjetlangan, sekin yo'lda:
+# bir yugurishda ≤ `limit` ta chat, har biri uchun ko'pi bilan bitta
+# `GetFull*` va bitta fayl yuklash, oralarida `WAIT_BETWEEN_BATCHES`.
+# FloodWait retry qilinmaydi — `services/avatars.py` uni `chats.avatar_error`
+# ga matn qilib yozadi, keyingi soatlik yugurish qayta uradi.
+
+PROFILE_LIMIT = 50
+
+
+def job_id_profiles(account_id: int) -> str:
+    return f"profiles:acc:{account_id}"
+
+
+async def _stale_profile_chats(account_id: int, limit: int) -> list[int]:
+    """Profil ma'lumoti eskirgan chatlar: `about` yo'q yoki avatar yuklanmagan."""
+    from sqlalchemy import or_, select
+
+    from app.db.base import session_scope
+    from app.db.models import Chat
+
+    async with session_scope() as db:
+        rows = await db.execute(
+            select(Chat.id)
+            .where(
+                Chat.account_id == account_id,
+                or_(
+                    Chat.about.is_(None),
+                    (Chat.avatar_photo_id.isnot(None)) & (Chat.avatar_updated_at.is_(None)),
+                ),
+            )
+            .order_by(Chat.avatar_updated_at.asc().nulls_first(), Chat.id)
+            .limit(limit)
+        )
+        return [int(r) for r in rows.scalars().all()]
+
+
+async def refresh_chat_profiles(
+    ctx: dict[str, Any], account_id: int, limit: int = PROFILE_LIMIT
+) -> dict[str, Any]:
+    """Chat profillari: `about` + profil rasmi (byudjetlangan, soatiga bir marta)."""
+    import asyncio
+
+    from app.db.base import session_scope
+    from app.db.models import Chat
+    from app.services import avatars as AV
+
+    limit = max(1, min(int(limit), 200))
+    chat_ids = await _stale_profile_chats(account_id, limit)
+    about_done = 0
+    avatars_done = 0
+    for i, chat_id in enumerate(chat_ids):
+        if i:
+            await asyncio.sleep(ing.WAIT_BETWEEN_BATCHES)
+        try:
+            async with session_scope() as db:
+                row = await db.get(Chat, chat_id)
+                needs_about = row is not None and row.about is None
+                needs_avatar = row is not None and row.avatar_updated_at is None
+            if needs_about and await AV.refresh_about(account_id, chat_id):
+                about_done += 1
+            if needs_avatar and await AV.refresh_avatar(account_id, chat_id):
+                avatars_done += 1
+        except Exception as exc:  # bitta chat qolganlarini to'xtatmasin
+            log.warning("worker.profiles.failed", chat_id=chat_id, error=str(exc)[:200])
+    if chat_ids:
+        log.info(
+            "worker.profiles.done",
+            account_id=account_id,
+            chats=len(chat_ids),
+            about=about_done,
+            avatars=avatars_done,
+        )
+    await heartbeat("refresh_chat_profiles", extra={"chats": len(chat_ids)})
+    return {"chats": len(chat_ids), "about": about_done, "avatars": avatars_done}
+
+
+async def refresh_all_chat_profiles(ctx: dict[str, Any]) -> dict[str, Any]:
+    """Cron (soatiga): har faol akkaunt uchun bitta byudjetlangan yugurish."""
+    accounts = await ing.active_account_ids()
+    for account_id in accounts:
+        await refresh_chat_profiles(ctx, account_id)
+    return {"accounts": len(accounts)}
+
+
+async def _enqueue_chat_profiles(account_id: int) -> None:
+    """`sync_account` oxiridagi ilgak — yangi chatlar darhol profil oladi."""
+    try:
+        await enqueue(
+            "refresh_chat_profiles", account_id, job_id=job_id_profiles(account_id)
+        )
+    except Exception as exc:  # navbat yo'q bo'lsa ham sync muvaffaqiyatli qoladi
+        log.warning("worker.profiles_enqueue_failed", account_id=account_id, error=str(exc)[:200])
+
+
+#: ui/R1a ishlari va cron'i — `worker/settings.py` ga `*tasks.UI_R1A_*` bo'lib
+#: qo'shiladi (parallel agentlar bir xil qatorni tahrirlamasin).
+UI_R1A_FUNCTIONS: list[Any] = [refresh_chat_profiles, refresh_all_chat_profiles]
+
+
+def _ui_r1a_crons() -> list[Any]:
+    from arq.cron import cron
+
+    return [cron(refresh_all_chat_profiles, minute={40}, run_at_startup=False, timeout=1800)]
+
+
+UI_R1A_CRONS: list[Any] = _ui_r1a_crons()

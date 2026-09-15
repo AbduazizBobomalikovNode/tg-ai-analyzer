@@ -1274,3 +1274,72 @@ async def test_aborted_deep_run_is_counted_by_the_daily_budget(pg_engine: AsyncE
             )
         ).one()
         assert tuple(run) == (1_234, 56, "deep:cancelled")
+
+
+# ─── ui/R1a (migratsiya 0017): chat profili ustunlari ────────────────────────
+
+
+async def test_chat_profile_columns_exist_with_defaults(pg_engine: AsyncEngine) -> None:
+    """0017 qo'llanadi: yangi ustunlar bor, bool/int sukutlari to'ldiriladi."""
+    account_id, chat_id = await _fixture_chat(pg_engine)
+    assert account_id
+    async with pg_engine.begin() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT about, is_verified, is_scam, is_fake, unread_count, "
+                    "last_message_text, avatar_photo_id, avatar_mime, avatar_updated_at, "
+                    "avatar_error FROM chats WHERE id = :c"
+                ),
+                {"c": chat_id},
+            )
+        ).one()
+    assert row[0] is None
+    assert (row[1], row[2], row[3]) == (False, False, False)
+    assert row[4] == 0
+    assert all(v is None for v in row[5:])
+
+    async with pg_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE chats SET about = :a, is_verified = true, unread_count = 5, "
+                "last_message_text = :t, avatar_photo_id = :p, avatar_mime = 'image/jpeg' "
+                "WHERE id = :c"
+            ),
+            {"a": "Kanal haqida", "t": "salom", "p": 9_223_372_036_854_775_806, "c": chat_id},
+        )
+        got = (
+            await conn.execute(
+                text("SELECT avatar_photo_id, unread_count FROM chats WHERE id = :c"),
+                {"c": chat_id},
+            )
+        ).one()
+    assert got == (9_223_372_036_854_775_806, 5)  # BigInteger — photo_id sig'adi
+
+
+async def test_chat_search_sql_uses_uz_fold(pg_engine: AsyncEngine) -> None:
+    """`chatdata._search_sql` haqiqiy bazada ishlaydi va fold fazosida topadi."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.db.models import Chat
+    from app.web.routers import chatdata as CD
+
+    account_id, chat_id = await _fixture_chat(pg_engine)
+    async with pg_engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE chats SET title = :t, username = 'tashnews', about = :a WHERE id = :c"),
+            {"t": "Oʻzbekiston yangiliklari", "a": "Ўзбекистон haqida", "c": chat_id},
+        )
+
+    maker = async_sessionmaker(pg_engine, expire_on_commit=False)
+    conds = [Chat.account_id == account_id]
+    async with maker() as session:
+        for query in ("O'zbekiston", "ozbekiston", "Ўзбекистон", "OʻZBEK"):
+            rows = await CD._search_sql(session, conds, uz_fold(query), 10)
+            assert [c.id for c in rows] == [chat_id], query
+        # prefiks (3) — so'z ichidagi moslikdan (1) yuqori turadi
+        assert await CD._search_sql(session, conds, uz_fold("yangiliklari"), 10)
+        # about bo'yicha ham topiladi, mos kelmaydigan so'rov — bo'sh
+        assert not await CD._search_sql(session, conds, "qwertyxyz", 10)
+        # LIKE maxsus belgilari literal sifatida qaraladi (SQL injection emas)
+        assert not await CD._search_sql(session, conds, "%", 10)

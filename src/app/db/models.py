@@ -88,6 +88,19 @@ class User(Base):
     locale: Mapped[str] = mapped_column(String(8), default="uz")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now())
 
+    # --- ui/R1b (migratsiya 0018) ---
+    # UI sozlamalari — bitta JSONB. Nega alohida ustunlar emas: bular sof
+    # **prezentatsiya** sozlamalari (tema, zichlik, default rejim, pin'lar),
+    # ular ustida so'rov/JOIN qilinmaydi va UI o'sgani sayin yangi kalit
+    # qo'shiladi — har biri uchun migratsiya yozish narxi qiymatidan katta.
+    # Yagona yozish nuqtasi `services/prefs.py::merge` (faqat tanilgan,
+    # validatsiyadan o'tgan kalitlar yoziladi — ixtiyoriy JSON emas).
+    # `users.locale` ustuni o'z joyida qoladi (bot til tanlovi); web
+    # `prefs["locale"]` to'ldirilgan bo'lsa **u** ustun turadi (pages.py).
+    prefs: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, default=dict, server_default=text("'{}'::jsonb"), nullable=False
+    )
+
     accounts: Mapped[list[Account]] = relationship(back_populates="user")
 
 
@@ -135,7 +148,11 @@ class Account(Base):
 
 class Chat(Base):
     __tablename__ = "chats"
-    __table_args__ = (UniqueConstraint("account_id", "tg_peer_id", name="uq_chat_per_account"),)
+    __table_args__ = (
+        UniqueConstraint("account_id", "tg_peer_id", name="uq_chat_per_account"),
+        # 0017 (ui/R1a) — profil yangilash navbati: eng eski `avatar_updated_at`
+        Index("ix_chats_profile_stale", "account_id", "avatar_updated_at"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     account_id: Mapped[int] = mapped_column(
@@ -167,6 +184,23 @@ class Chat(Base):
     # 1-bosqich: sitata havolasi (`<prefix><tg_msg_id>`) sync vaqtida hisoblanadi —
     # runtime'da peer turini qayta tekshirishga hojat qolmaydi.
     link_prefix: Mapped[str | None] = mapped_column(String(128))
+
+    # ── ui/R1a (migratsiya 0017): chat profili ──
+    # `about` — `GetFull*` dan tavsif/bio; NULL = hali olinmagan (navbat mezoni).
+    about: Mapped[str | None] = mapped_column(Text)
+    is_verified: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
+    is_scam: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
+    is_fake: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
+    # `GetDialogs` javobidan — qo'shimcha RPC yo'q (`ingestion.refresh_chats`).
+    unread_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    last_message_text: Mapped[str | None] = mapped_column(String(200))
+    # Profil rasmi — "media saqlanmaydi" invariantiga chegaralangan istisno
+    # (migratsiya 0017 izohi). Fayl `DATA_DIR/avatars/<chat_id>.<ext>`,
+    # DB'da faqat meta. `avatar_photo_id` — o'zgarishni aniqlash kaliti.
+    avatar_photo_id: Mapped[int | None] = mapped_column(BigInteger)
+    avatar_mime: Mapped[str | None] = mapped_column(String(32))
+    avatar_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    avatar_error: Mapped[str | None] = mapped_column(String(200))
 
     account: Mapped[Account] = relationship(back_populates="chats")
 

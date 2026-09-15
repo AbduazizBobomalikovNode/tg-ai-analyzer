@@ -377,6 +377,17 @@ serverga boradi, shift bir xil.
   qo'shmang.
 - Scheduling — Telegram server-side (`schedule=`); o'z cron'imiz bilan post
   yuborish yo'q (`scheduled_jobs` hozircha bo'sh).
+- **Chat profil rasmlari — "media saqlanmaydi" invariantiga chegaralangan
+  istisno** (user aniq so'radi: "chatlarning imagelarini ham ko'rsat").
+  Faqat **profil rasmi** yuklanadi va `DATA_DIR/avatars` da saqlanadi (≤512 KB,
+  JPEG/PNG, `chats.avatar_*` meta, migratsiya 0017); xabar mediasi (photo,
+  video, document, voice) **hech qachon** yuklab olinmaydi. `upload.GetFile`
+  allowlist'da READ, lekin uni chaqiradigan **yagona modul**
+  `services/avatars.py` — boshqa joyda `download_media` / `download_file` /
+  `GetFileRequest` yo'q va buni `tests/test_avatars.py` grep bilan qo'riqlaydi.
+  Yuklash `history` bucket'idan o'tadi, FloodWait retry qilinmaydi
+  (`chats.avatar_error` ga matn bo'lib tushadi), `avatar_photo_id` o'zgarmasa
+  fayl qayta olinmaydi. `AVATARS_ENABLED=false` — butunlay o'chiradi.
 
 ## Kuzatuv va limitlar (8-bosqich)
 
@@ -441,6 +452,20 @@ serverga boradi, shift bir xil.
   yuboradi (`code_type=app`). Shuning uchun `auth.ResendCode` (`/api/auth/resend`)
   bor — `next_type` bo'sh bo'lsa Telegram qayta yuborishga ruxsat bermaydi va
   UI tugmani ko'rsatmaydi. Resend `attempts` ni **nolga tushirmaydi**.
+- **Mini App `initData`** (`POST /api/auth/telegram`, `auth.verify_init_data`):
+  kalit = `HMAC_SHA256("WebAppData", BOT_TOKEN)`, imzo shu kalit bilan
+  `data_check_string` (kalitlar alifbo tartibida, `k=v`, `\n`) ustidan;
+  taqqoslash `hmac.compare_digest` — oddiy `!=` imzoni belgima-belgi tiklash
+  uchun vaqt kanalini ochadi. `auth_date` ≤ 24 soat (`MINIAPP_INIT_DATA_MAX_AGE`),
+  kelajakdagi sana ham rad etiladi. **Bot token faqat HMAC kaliti** — log'ga,
+  xato matniga, javobga hech qachon tushmaydi.
+  `initData` — bu **kirish**, ulanish emas: `tg_user_id` mavjud `users` qatoriga
+  mos kelmasa `403 auth.err.not_linked` va akkaunt **yaratilmaydi** (MTProto
+  sessiyasi faqat QR login'da tug'iladi). IP bo'yicha shift `/api/auth/phone`
+  bilan bir xil limiter'da.
+- `DELETE /api/accounts/{id}` (uzish) `auth.LogOut` chaqirmaydi — u `DENIED`
+  (invariant 1). Faqat bizdagi session envelope o'chadi (`revoke_session`),
+  status `revoked`, joblar bekor qilinadi; ma'lumot qoladi.
 
 ## Ban riskini kamaytirish
 
