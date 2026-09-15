@@ -23,7 +23,9 @@ dependencies = [
     "redis>=5.2",
     "arq>=0.26",
     # llm
-    "google-genai>=0.3",
+    # >=2.23: `batches.create_embeddings` (phase4/C batch embedding). Eski
+    # versiyada metod yo'q — `GeminiProvider._batches()` aniq xato beradi.
+    "google-genai>=2.23",
     "anthropic>=0.122",
     # kuzatuv
     "prometheus-client>=0.21",
@@ -76,6 +78,9 @@ ignore = ["S101"]  # assert allowed in tests
 "tests/test_db_integration.py" = ["RUF001", "RUF002", "RUF003"]
 "tests/test_ingest_normalization.py" = ["RUF001", "RUF002", "RUF003"]
 "tests/test_alerts.py" = ["RUF001", "RUF002", "RUF003"]  # phase3/C: fold parite korpusi
+# phase4/A: entity regexlari kirill hashtag'larni ham qamraydi — namunalar kirillda.
+"src/app/services/entities.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_entities.py" = ["RUF001", "RUF002", "RUF003"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

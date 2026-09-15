@@ -190,17 +190,40 @@ ham qamrab oladi.
 
 ### 3.5 `node_entities` (3-bosqich)
 
+Amalga oshirilgan shakl (migratsiya `0012`, `services/entities.py`) —
+rejadagi eskizdan farq qiladi: kalit **xabar**, tugun esa keyin bog'lanadi,
+chunki entity ingest vaqtida (epizoddan oldin) yoziladi.
+
 ```sql
 CREATE TABLE node_entities (
-  node_id bigint NOT NULL REFERENCES retrieval_nodes(id) ON DELETE CASCADE,
-  entity  text   NOT NULL,
-  kind    varchar(16) NOT NULL,   -- username | link | hashtag | domain
-  PRIMARY KEY (node_id, entity, kind)
+  id         bigserial PRIMARY KEY,
+  account_id int    NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  chat_id    int    NOT NULL REFERENCES chats(id)    ON DELETE CASCADE,
+  message_id bigint REFERENCES messages(id)          ON DELETE CASCADE,
+  node_id    bigint REFERENCES retrieval_nodes(id)   ON DELETE SET NULL,
+  kind       varchar(16) NOT NULL,   -- CHECK: username | hashtag | cashtag |
+                                     -- url_domain | tme_link | mention_name
+  value      text NOT NULL,          -- normallashtirilgan (lower / uz_fold)
+  value_raw  text NOT NULL DEFAULT '',
+  seen_at    timestamptz,
+  UNIQUE (message_id, kind, value)
 );
+CREATE INDEX ix_node_entities_account_kind_value ON node_entities (account_id, kind, value);
+CREATE INDEX ix_node_entities_chat_seen ON node_entities (chat_id, seen_at DESC);
+CREATE INDEX ix_node_entities_node ON node_entities (node_id);
 ```
 
-Regex bilan chiqariladi (`@username`, `t.me/...`, `#hashtag`, URL domeni) —
-LLM chaqirilmaydi.
+Regex bilan chiqariladi (`@username`, `t.me/...`, `#hashtag`, URL domeni,
+`$CASHTAG`) — LLM chaqirilmaydi. `mention_name` **faqat** Telegram
+`MessageEntityMentionName` dan olinadi; erkin matndan ism taxmin qilinmaydi.
+**Telefon raqami va email hech qachon chiqarilmaydi** — `phone_like` turi yo'q
+va `CHECK` uni bazada ham to'sadi.
+
+Retrieval: `search.entity_search` → `hybrid_search_multi` da **oltinchi** RRF
+kanali (og'irlik 1.1), faqat planner `entities` bergan bo'lsa. Agent tool
+registry'siga qo'shilmaydi (prompt narxi). `node_id` ni
+`episodes.link_entities` bitta `UPDATE` bilan to'ldiradi; eski xabarlar uchun
+`worker.tasks.backfill_entities` (soatlik cron, ish bo'lmasa darhol chiqadi).
 
 ## 4. Ingest qatlami
 
@@ -586,7 +609,7 @@ jimgina ishlamay qoladi.
 | **0 — joriy** | 5 ta HIGH xato: envelope escape, `input_peer` access_hash, duplicate row, confirm race, strict `zip` | `test_phase0.py`, `test_write_actions.py` |
 | **1 — Retrieval poydevori** (akkauntsiz testlanadi) | migratsiya (ustunlar, generated columns, GIN, `lang`, fwd, `top_msg_id`, `deleted_at`/`edited_at`, `link_prefix`, `chat_digests` kengaytmasi); `services/textnorm.py` + SQL `uz_fold`; sanitizatsiya `ingestion.py` da; `services/stopwords.py`; trigram fix + `task_type` (`search.py`); so'rov kengaytirish + og'irlikli RRF; `services/rerank.py`; `services/cluster.py`; Telethon 1.44; `allowlist.py` +12; token bucket'lar (`tools.py`); `search_telegram` parametrlari + 4 yangi tool + `prompts.py` | `test_textnorm.py` (SQL/Python paritet), `test_search_quality.py`, `test_allowlist.py`, `test_tg_search.py`, CI'ga Postgres service + append-only trigger testi |
 | **2 — Ierarxik indeks + deep search** ✅ *(qolgani 3-bosqichda bajarildi)* | ✅ `retrieval_nodes` / epizodlar / `halfvec` (migratsiya `0009`); ✅ kontekstli embedding; ✅ digest embedding + L2/L3 (`services/nodes.py`); ✅ `services/deep_search.py` (plan → fan-out → cluster → rerank → reflect → synth); ✅ SSE `/api/deep/stream` + UI (klaster yorliqlari, qamrov paneli); ✅ updates listener (`worker/updates.py`, `TG_UPDATES_LISTENER`); ✅ eval harness (`evals/`, `test_evals.py`) | ✅ `test_episodes.py`, `test_nodes.py`, `test_deep_search.py` (taint chegarasi), `test_updates.py`, `test_evals.py` |
-| **3 — Qamrov + mahsulot** | ✅ server pog'onalari (`services/tg_search.py`, deep search fan-out'ga qo'shildi); ⬜ `discover_channels` / `SearchPosts` (Stars qarori kutilmoqda, §13.1) / forum tool'lar; ✅ briefing/digest push + jim soatlar (`services/briefing.py`, migratsiya `0010`); ✅ alertlar (`services/alerts.py`, migratsiya `0011`); ⬜ `node_entities`; ⬜ golden set (real akkaunt bilan to'ldirish); ⬜ Batch API; ⬜ `gemini-embedding-2` re-embed | `test_tg_search_internal.py`, `test_briefing.py`, `test_bot_push.py`, `test_alerts.py`, `evals/` harness |
+| **3 — Qamrov + mahsulot** | ✅ server pog'onalari (`services/tg_search.py`, deep search fan-out'ga qo'shildi); ⬜ `discover_channels` / `SearchPosts` (Stars qarori kutilmoqda, §13.1) / forum tool'lar; ✅ briefing/digest push + jim soatlar (`services/briefing.py`, migratsiya `0010`); ✅ alertlar (`services/alerts.py`, migratsiya `0011`); ✅ `node_entities` (`services/entities.py`, migratsiya `0012`, `test_entities.py`); ⬜ golden set (real akkaunt bilan to'ldirish); ⬜ Batch API; ⬜ `gemini-embedding-2` re-embed | `test_tg_search_internal.py`, `test_briefing.py`, `test_bot_push.py`, `test_alerts.py`, `evals/` harness |
 
 **2-bosqichdan qolgani — endi bajarildi (3-bosqich).** Deep search ichida
 **server pog'onalari** qo'shildi: `services/tg_search.py` orqali

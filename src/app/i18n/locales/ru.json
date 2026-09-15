@@ -299,6 +299,7 @@
   "web.alerts.no_rules": "Правил пока нет.",
   "web.alerts.no_events": "Совпадений нет.",
   "web.alerts.account": "Аккаунт",
+  "web.alerts.no_accounts": "Нет подключённых аккаунтов",
   "alert.err.not_found": "Правило не найдено.",
   "alert.err.bad_kind": "Неверный тип правила.",
   "alert.err.empty_pattern": "Пустой шаблон.",
@@ -330,5 +331,7 @@
   "web.brief.quiet_to": "Тихие часы: до",
   "web.brief.quiet_note": "Тихое окно может проходить через полночь (22:00 → 07:00).",
   "web.brief.save": "Сохранить",
-  "web.brief.saved": "Сохранено"
+  "web.brief.saved": "Сохранено",
+  "account.not_found": "Аккаунт не найден.",
+  "web.alerts.semantic_note": "Семантическое правило видит только сообщения, для которых посчитан вектор (от 20 символов); более короткие ловит только правило по ключевым словам."
 }

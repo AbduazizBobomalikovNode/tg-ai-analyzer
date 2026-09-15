@@ -240,6 +240,66 @@ class Settings(BaseSettings):
     # va `MethodBuckets` kvotasini yeydi.
     deep_server_max_calls: int = Field(default=6, ge=0, le=40)
 
+    # --- phase4/A ---
+    # Entity indeksi (`node_entities`, migratsiya 0012) — regex bilan, LLM'siz.
+    # O'chirilsa ingest entity yozmaydi va backfill cron'i darhol chiqadi;
+    # `entity_search` esa bo'sh jadval ustida jimgina bo'sh natija beradi.
+    entities_enabled: bool = True
+    # Backfill: bitta ish nechta xabar ko'radi va bitta SELECT nechta oladi.
+    # Kursor Redis'da (`entities:backfill:<account_id>`) — `messages.id` bo'yicha.
+    entities_backfill_limit: int = Field(default=20_000, ge=100, le=1_000_000)
+    entities_backfill_batch: int = Field(default=500, ge=50, le=5_000)
+
+    # --- phase4/B ---
+    # Vazifa → **model** override (provider-agnostik). `llm_task_*` dan farqi:
+    # u `provider:model` juftini beradi, bu esa faqat model nomini almashtiradi
+    # — provider o'sha-o'sha (router qaysi providerni tanlagan bo'lsa).
+    # Model provider imkoniyatiga mos kelmasa router **aniq xato** tashlaydi
+    # (jimgina boshqa modelga o'tmaydi): noto'g'ri nom deploy paytida ko'rinsin.
+    # Voris modelga o'tish yo'li ham shu (masalan `gemini-2.5-flash-lite`
+    # 2026-10-16 da eskiradi → `LLM_MODEL_ROUTE=<voris>`).
+    llm_model_route: str = ""
+    llm_model_search: str = ""
+    llm_model_tools: str = ""
+    llm_model_deep: str = ""
+    llm_model_embed: str = ""
+
+    # Embedding modeli/o'lchami uchun provider-neytral nomlar. Bo'sh/0 =
+    # eski maydonlar (`gemini_model_embed`, `embed_dim`) — yagona haqiqat
+    # manbai bitta bo'lib qoladi, ikkita raqam bir-biriga zid bo'lmaydi.
+    # `EMBED_DIMS` Gemini `output_dimensionality` — **DB ustuni** shu o'lchamda
+    # qurilgan (`Vector(embed_dim)`), o'zgartirish migratsiya talab qiladi.
+    embed_model_name: str = Field(default="", validation_alias="EMBED_MODEL")
+    embed_dims_value: int = Field(default=0, ge=0, le=3072, validation_alias="EMBED_DIMS")
+
+    # --- phase4/C ---
+    # Indekslash embeddinglari uchun Gemini Batch API. Narx sinxron yo'lning
+    # **yarmi**, evaziga javob soatlar ichida (SLA 24 soat). Indekslash fon
+    # ishi — kechikish muhim emas; qidiruv tomoni (`RETRIEVAL_QUERY`) esa
+    # hech qachon batch bo'lmaydi, u user kutib turgan yo'l.
+    #
+    # Default `sync` — ataylab. Batch rejimi yangi xabarning qidiruvda
+    # ko'rinishini soatlarga kechiktiradi; buni user bilib yoqishi kerak.
+    embed_mode: str = Field(default="sync", pattern="^(sync|batch)$")
+    # Bitta jobdagi elementlar soni. Inline so'rov `asyncBatchEmbedContent`
+    # tanasiga sig'ishi kerak, shuning uchun belgilar bo'yicha ikkinchi
+    # qopqoq ham bor (quyida) — ikkalasidan qaysi biri avval to'lsa.
+    embed_batch_max_items: int = Field(default=2000, ge=1, le=20000)
+    # Inline so'rov tanasi uchun xavfsiz chegara (~8 MB matn). Gemini inline
+    # batch so'rovini 20 MB bilan cheklaydi; 4000 belgilik xabarlarda 2000
+    # element ≈ 8 MB, ya'ni zaxira bor.
+    embed_batch_max_chars: int = Field(default=8_000_000, ge=10_000)
+    # Bir job necha marta qayta yuborilishi mumkin. 2 dan keyin
+    # `failed_permanent` — cheksiz qayta yuborish = cheksiz to'lov.
+    embed_batch_max_attempts: int = Field(default=2, ge=1, le=5)
+    # `poll_embed_batches` cron'i (5 daqiqa). O'chirilsa tugagan joblar
+    # o'qilmay qoladi va elementlar abadiy "band" bo'lib turardi — shuning
+    # uchun o'chirish faqat batch rejimi ham o'chganda mantiqiy.
+    embed_batch_poll_enabled: bool = True
+    # Bir poll yugurishida o'qiladigan tugagan joblar soni (xotira qopqog'i:
+    # har jobda 2000 ta 768 o'lchamli vektor).
+    embed_batch_poll_limit: int = Field(default=4, ge=1, le=50)
+
     @field_validator("master_key_b64")
     @classmethod
     def _check_master_key(cls, v: str) -> str:
@@ -271,6 +331,21 @@ class Settings(BaseSettings):
     @property
     def is_prod(self) -> bool:
         return self.env.lower() in {"prod", "production"}
+
+    # --- phase4/B ---
+    @property
+    def embed_model(self) -> str:
+        """Konfiguratsiyadagi embedding modeli (`EMBED_MODEL` yoki eski nom).
+
+        Bu — **default**; `LLM_MODEL_EMBED` override berilgan bo'lsa haqiqiy
+        model `app.llm.embedding.active_embed_model()` dan olinadi.
+        """
+        return (self.embed_model_name or self.gemini_model_embed).strip()
+
+    @property
+    def embed_dims(self) -> int:
+        """Embedding o'lchami (`EMBED_DIMS`); 0 bo'lsa DB ustuni bilan bir xil."""
+        return self.embed_dims_value or self.embed_dim
 
 
 @lru_cache(maxsize=1)

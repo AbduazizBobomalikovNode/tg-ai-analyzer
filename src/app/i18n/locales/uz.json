@@ -299,6 +299,7 @@
   "web.alerts.no_rules": "Hali qoida yo'q.",
   "web.alerts.no_events": "Topilma yo'q.",
   "web.alerts.account": "Akkaunt",
+  "web.alerts.no_accounts": "Ulangan akkaunt yo'q",
   "alert.err.not_found": "Qoida topilmadi.",
   "alert.err.bad_kind": "Noto'g'ri qoida turi.",
   "alert.err.empty_pattern": "Naqsh bo'sh.",
@@ -330,5 +331,7 @@
   "web.brief.quiet_to": "Jim: gacha",
   "web.brief.quiet_note": "Jim oyna yarim tun orqali o'tishi mumkin (22:00 → 07:00).",
   "web.brief.save": "Saqlash",
-  "web.brief.saved": "Saqlandi"
+  "web.brief.saved": "Saqlandi",
+  "account.not_found": "Akkaunt topilmadi.",
+  "web.alerts.semantic_note": "Semantik qoida faqat vektor hisoblangan xabarlarni ko'radi (20 belgidan uzun); qisqa xabarlarni faqat kalit so'z qoidasi tutadi."
 }

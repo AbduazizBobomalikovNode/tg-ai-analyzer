@@ -231,6 +231,18 @@ class Message(Base):
     # Soft-delete — 2-bosqich updates listener to'ldiradi.
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    # ── migratsiya 0014 ──
+    # Xabarni **biz** yozganmiz (Telethon `m.out`). Shaxsiy chatda `from_id`
+    # bo'sh keladi, shuning uchun "o'zimizniki emas" filtri `sender_id` ga
+    # tayanib ishlamaydi — alertlar aynan shu ustunga qaraydi.
+    # (`text()` bu yerda chaqirilmaydi — sinf tanasida `text` ustun nomi bilan
+    #  soyalangan; satr sifatida berilgan server_default ham bir xil ishlaydi.)
+    out: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    # Qator **bazaga** tushgan payt (`published_at` — Telegram vaqti).
+    # Alert kursori faqat "cho'kkan" qatorlargacha siljiydi: READ COMMITTED
+    # da kichikroq id keyinroq ko'rinishi mumkin.
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now())
+
     # ── generated stored ustunlar: DB hisoblaydi, ORM hech qachon yozmaydi ──
     # `deferred=True` — og'ir ustunlar oddiy SELECT'da tortilmasin.
     text_fold: Mapped[str | None] = mapped_column(
@@ -601,6 +613,10 @@ class Briefing(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now())
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     delivery_error: Mapped[str | None] = mapped_column(String(500))
+    # Push urinishlari (0014) — `delivered_at` shartli UPDATE bilan "band
+    # qilinadi", shuning uchun ikki cron tiki bitta briefingni ikki marta
+    # yubora olmaydi; urinish soni esa qachon voz kechishni belgilaydi.
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
 
 # ─── 3-bosqich/C: alertlar (migratsiya 0011) ─────────────────────────────────
@@ -665,3 +681,123 @@ class AlertEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now())
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     delivery_error: Mapped[str | None] = mapped_column(String(500))
+    # Push urinishlari (0014). `ALERT_MAX_DELIVERY_ATTEMPTS` dan keyin hodisa
+    # `delivered_at` bilan yopiladi — "yetkazildi" emas, "voz kechildi".
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+
+
+# ─── 4-bosqich/A: entity indeksi (migratsiya 0012) ───────────────────────────
+
+
+class EntityKind(StrEnum):
+    """`node_entities.kind` — matn sifatida saqlanadi (DB'da `CHECK`, native enum emas).
+
+    `phone_like` **yo'q va bo'lmaydi**: telefon raqami indeksga ham,
+    promptga ham tushmaydi (`services/entities.py` sarlavhasiga qarang).
+    """
+
+    USERNAME = "username"
+    HASHTAG = "hashtag"
+    CASHTAG = "cashtag"
+    URL_DOMAIN = "url_domain"
+    TME_LINK = "tme_link"
+    MENTION_NAME = "mention_name"
+
+
+class NodeEntity(Base):
+    """Xabar ichidagi identifikator: `@username`, `#hashtag`, domen, `t.me` havolasi.
+
+    `message_id` — manba xabar (soft-delete'da qator qoladi, qidiruv
+    `messages.deleted_at IS NULL` bilan filtrlanadi). `node_id` — xabar
+    qaysi epizodga tushgani; `episodes.build_episodes` bitta `UPDATE` bilan
+    to'ldiradi, shuning uchun u **nullable** (entity xabar bilan birga,
+    epizoddan oldin yoziladi).
+
+    `uq_node_entity_value (message_id, kind, value)` — idempotentlik bazada:
+    qayta sync `ON CONFLICT DO NOTHING` ga tushadi va `node_id` yo'qolmaydi.
+    """
+
+    __tablename__ = "node_entities"
+    __table_args__ = (
+        UniqueConstraint("message_id", "kind", "value", name="uq_node_entity_value"),
+        Index("ix_node_entities_account_kind_value", "account_id", "kind", "value"),
+        Index("ix_node_entities_chat_seen", "chat_id", text("seen_at DESC")),
+        Index("ix_node_entities_node", "node_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"))
+    chat_id: Mapped[int] = mapped_column(ForeignKey("chats.id", ondelete="CASCADE"))
+    message_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("messages.id", ondelete="CASCADE")
+    )
+    node_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("retrieval_nodes.id", ondelete="SET NULL")
+    )
+
+    kind: Mapped[str] = mapped_column(String(16))
+    value: Mapped[str] = mapped_column(Text)
+    value_raw: Mapped[str] = mapped_column(Text, default="")
+    seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+# ─── 4-bosqich/C: batch embedding ────────────────────────────────────────────
+
+
+class EmbedBatchStatus(StrEnum):
+    PENDING = "pending"  # submit qilindi, hali boshlanmadi
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"  # vektorlar yozildi
+    FAILED = "failed"  # qayta urinish mumkin (`attempts` oshadi)
+    EXPIRED = "expired"
+    CANCELLED = "cancelled"
+    FAILED_PERMANENT = "failed_permanent"  # `max_attempts` tugadi — boshqa yuborilmaydi
+
+
+#: Elementlari hali "band" hisoblanadigan holatlar — yangi jobga tushmaydi.
+EMBED_BATCH_INFLIGHT = (EmbedBatchStatus.PENDING, EmbedBatchStatus.RUNNING)
+
+
+class EmbedBatch(Base):
+    """Gemini Batch API'ga yuborilgan bitta embedding jobi.
+
+    Nega jadval kerak: `batches.create_embeddings` darhol qaytadi, natija esa
+    soatlar keyin, **boshqa jarayonda** olinadi. Job nomi va **tartiblangan**
+    element id'lari xotirada saqlansa, worker qayta ishga tushishi bilan
+    yo'qolardi va to'langan job hech qachon o'qilmay qolardi.
+
+    `item_ids` — ataylab JSONB massiv, `ARRAY(BigInteger)` emas: bu qatorlar
+    bo'ylab qidirilmaydi, faqat **tartib** muhim, va `@>` konteynment bilan
+    "bu element allaqachon jobdami?" savoliga GIN indeks orqali javob beriladi
+    (`ix_embed_batches_items`, `jsonb_path_ops`).
+
+    `model` — API **qaytargan** nom (`pricing.py` qoidasi), so'ralgani emas.
+    """
+
+    __tablename__ = "embed_batches"
+    __table_args__ = (
+        Index("ix_embed_batches_status", "status", "kind"),
+        Index(
+            "ix_embed_batches_items",
+            "item_ids",
+            postgresql_using="gin",
+            postgresql_ops={"item_ids": "jsonb_path_ops"},
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    provider: Mapped[str] = mapped_column(String(32), default="gemini")
+    job_name: Mapped[str] = mapped_column(String(255), unique=True)
+    kind: Mapped[str] = mapped_column(String(16))  # 'messages' | 'nodes'
+    # `nodes` tugunlari bir nechta akkauntga tegishli bo'lishi mumkin → NULL
+    account_id: Mapped[int | None] = mapped_column(ForeignKey("accounts.id", ondelete="SET NULL"))
+    item_ids: Mapped[list[int]] = mapped_column(JSONB, default=list)
+    model: Mapped[str] = mapped_column(String(64), default="")
+    task_type: Mapped[str] = mapped_column(String(32), default="RETRIEVAL_DOCUMENT")
+    status: Mapped[str] = mapped_column(String(24), default=EmbedBatchStatus.PENDING)
+    attempts: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+
+    submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now())
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error: Mapped[str | None] = mapped_column(String(500))
+    cost_usd: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")

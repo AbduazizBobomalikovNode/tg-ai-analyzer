@@ -141,33 +141,76 @@ async def incremental_sync_all(ctx: dict[str, Any]) -> dict[str, Any]:
     return {"enqueued": n}
 
 
+async def _budget_blocked_accounts() -> set[int]:
+    """M3: kunlik byudjeti tugagan egalarning akkauntlari.
+
+    Fon ishlari chat so'rovi emas, lekin ular ham LLM pulini yeydi: bitta
+    `reembed_all` yugurishi kunlik byudjetni jimgina oshirib yuborishi mumkin.
+    Tekshiruv **xato ko'tarmaydi** — log va o'tkazib yuborish (cron qayta
+    keladi). Xatoning o'zi ham ishni to'xtatmaydi (byudjet — tejash, to'siq emas).
+    """
+    from app.db.base import session_scope
+    from app.services.limits import blocked_account_ids
+
+    try:
+        async with session_scope() as db:
+            return await blocked_account_ids(db)
+    except Exception as exc:  # DB yo'q/sekin — indekslash to'xtamasin
+        log.warning("worker.budget_check_failed", error=str(exc)[:200])
+        return set()
+
+
 async def embed_messages(ctx: dict[str, Any], limit: int | None = None) -> dict[str, Any]:
     """Embedding'siz xabarlarni batch'lab vektorlaydi (3-bosqich, hybrid qidiruv uchun).
 
     Faqat sinxronlangan chatlar, matni bo'sh bo'lmaganlar. Har xabar `EMBED_MAX_CHARS`
     gacha kesiladi. Provider — router (`Task.EMBED` → Gemini).
     """
-    from sqlalchemy import func, select
+    from sqlalchemy import and_, func, select
 
     from app.config import get_settings
     from app.db.base import session_scope
     from app.db.models import Chat, Message, MessageEmbedding
-    from app.llm import LLM, LLMError
+    from app.llm import LLM, LLMError, embed_model_name
 
     s = get_settings()
     if not s.embed_enabled:
         return {"skipped": "disabled"}
+    # phase4/C: batch rejimda bu yugurish faqat **yuboradi**; vektorlarni
+    # `poll_embed_batches` keyingi soatlarda yozadi. Batch mavjud bo'lmasa
+    # (eski SDK, boshqa provider) sinxron yo'lga tushamiz — indekslash
+    # to'xtab qolmasin.
+    # M3: byudjeti tugagan egalarning akkauntlari chetlab o'tiladi (global ish
+    # — shuning uchun to'xtatilmaydi, faqat o'sha chatlar tanlanmaydi).
+    blocked = await _budget_blocked_accounts()
+    if blocked:
+        log.info("worker.embed.budget_skip", accounts=len(blocked))
+    if s.embed_mode == "batch":
+        result = await _submit_embed_batch(KIND_MESSAGES, limit)
+        if result is not None:
+            return result
     limit = limit or s.embed_batch_per_run
+    # phase4: embedding **joriy model** bo'yicha yetishmayotganini qidiradi.
+    # Ilgari "umuman embedding yo'q" edi — model almashtirilganda eski vektorli
+    # xabarlar cron'da hech qachon to'ldirilmasdi (faqat qo'lda `reembed_all`).
+    want_model = embed_model_name()
     async with session_scope() as db:
         rows = (
             await db.execute(
                 select(Message.id, Message.text)
                 .join(Chat, Chat.id == Message.chat_id)
-                .outerjoin(MessageEmbedding, MessageEmbedding.message_id == Message.id)
+                .outerjoin(
+                    MessageEmbedding,
+                    and_(
+                        MessageEmbedding.message_id == Message.id,
+                        MessageEmbedding.model == want_model,
+                    ),
+                )
                 .where(
                     MessageEmbedding.message_id.is_(None),
                     Chat.synced_total > 0,
                     func.length(Message.text) >= EMBED_MIN_CHARS,  # "ok", "👍" — bekor xarajat
+                    *([Chat.account_id.not_in(sorted(blocked))] if blocked else []),
                 )
                 .order_by(Message.id.desc())
                 .limit(limit)
@@ -348,8 +391,15 @@ async def embed_nodes_task(ctx: dict[str, Any], limit: int | None = None) -> dic
     s = get_settings()
     if not s.node_index_enabled or not s.embed_enabled:
         return {"skipped": "disabled"}
+    blocked = await _budget_blocked_accounts()  # M3
+    if s.embed_mode == "batch":  # phase4/C — quyidagi izohga qarang
+        result = await _submit_embed_batch(KIND_NODES, limit)
+        if result is not None:
+            return result
     async with session_scope() as db:
-        rep = await embed_nodes(db, limit=limit or s.node_embed_batch_per_run or None)
+        rep = await embed_nodes(
+            db, limit=limit or s.node_embed_batch_per_run or None, skip_accounts=blocked
+        )
     await heartbeat("embed_nodes", extra={"embedded": rep.embedded})
     return {"embedded": rep.embedded, "pending": rep.pending, "error": rep.error}
 
@@ -357,6 +407,8 @@ async def embed_nodes_task(ctx: dict[str, Any], limit: int | None = None) -> dic
 async def build_week_nodes_task(ctx: dict[str, Any]) -> dict[str, Any]:
     """Dushanba 03:30: o'tgan hafta uchun level-3 tugunlar (faqat kun tugunlaridan)."""
     from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import select
 
     from app.config import get_settings
     from app.db.base import session_scope
@@ -368,6 +420,21 @@ async def build_week_nodes_task(ctx: dict[str, Any]) -> dict[str, Any]:
     week = week_start(datetime.now(UTC) - timedelta(days=1))
     async with session_scope() as db:
         chat_ids = await chats_needing_week_node(db, week)
+    # M3: byudjeti tugagan egalarning chatlari o'tkazib yuboriladi
+    # (`build_week_nodes` ni ham ikkinchi qopqoq sifatida tekshiradi).
+    blocked = await _budget_blocked_accounts()
+    if blocked:
+        from app.db.models import Chat as _Chat
+
+        async with session_scope() as db:
+            keep = (
+                await db.execute(
+                    select(_Chat.id).where(
+                        _Chat.id.in_(chat_ids), _Chat.account_id.not_in(sorted(blocked))
+                    )
+                )
+            ).scalars()
+            chat_ids = [int(x) for x in keep]
     built = 0
     for chat_id in chat_ids:
         try:
@@ -601,3 +668,391 @@ def _phase3b_crons() -> list[Any]:
 
 
 PHASE3B_CRONS: list[Any] = _phase3b_crons()
+
+
+# ─── 4-bosqich/B: model almashtirgandan keyin qayta embedding ────────────────
+#
+# Embedding modeli o'zgarsa (`EMBED_MODEL` / `LLM_MODEL_EMBED`) eski vektorlar
+# **o'chirilmaydi**: ikkala fazo yonma-yon yashaydi va qidiruv joriy model
+# bo'yicha filtrlaydi (`message_embeddings.model`). Bu ish shunchaki yangi
+# model qatorlari yo'q xabarlarni to'ldiradi — to'xtatib, keyin davom ettirsa
+# ham hech narsa yo'qolmaydi.
+#
+# Nega alohida ish: cron'dagi `embed_messages` bir yugurishda
+# `EMBED_BATCH_PER_RUN` bilan cheklangan; re-embed esa million qatorni
+# bosqichma-bosqich, o'zini qayta navbatga qo'yib bosib o'tadi.
+
+REEMBED_MAX_ROUNDS = 20  # bitta ish ichidagi batch'lar; keyin o'zini requeue qiladi
+REEMBED_JOB_ID = "reembed:all"
+
+
+def job_id_reembed(account_id: int | None) -> str:
+    return REEMBED_JOB_ID if account_id is None else f"reembed:acc:{account_id}"
+
+
+async def reembed_all(
+    ctx: dict[str, Any], account_id: int | None = None, model: str = ""
+) -> dict[str, Any]:
+    """Joriy embedding modeli uchun yetishmayotgan vektorlarni to'ldiradi.
+
+    Hech narsa **o'chirmaydi**: `model` ustuni bo'yicha yangi qatorlar
+    qo'shiladi, eskisi joyida qoladi (orqaga qaytish bepul).
+
+    Args:
+        ctx: ARQ konteksti.
+        account_id: faqat shu akkaunt chatlari; `None` — hammasi.
+        model: kutilayotgan model nomi. Bo'sh = konfiguratsiyadagi joriy model.
+            Router boshqa modelni qaytarsa ish **to'xtaydi** (aralash fazo
+            yaratmaslik uchun) va xatoni qaytaradi.
+
+    Returns:
+        `{"model", "embedded", "pending", "done"}`; `done=False` bo'lsa ish
+        o'zini qayta navbatga qo'ygan.
+    """
+    from sqlalchemy import func, select
+
+    from app.config import get_settings
+    from app.db.base import session_scope
+    from app.db.models import Chat, Message, MessageEmbedding
+    from app.llm import LLM, LLMError, embed_model_name
+
+    s = get_settings()
+    if not s.embed_enabled:
+        return {"skipped": "disabled"}
+    # M3: qayta embed — bir yugurishda eng qimmat ish. Byudjet tugagan bo'lsa
+    # boshlanmaydi ham (`account_id` berilgan bo'lsa shu akkaunt bo'yicha,
+    # aks holda global: byudjeti tugagan egalarning chatlari chetlab o'tiladi).
+    blocked = await _budget_blocked_accounts()
+    if account_id is not None and int(account_id) in blocked:
+        log.info("worker.reembed.budget_skip", account_id=account_id)
+        return {"skipped": "budget", "account_id": int(account_id)}
+    skip = sorted(blocked) if account_id is None else []
+    want = (model or "").strip() or embed_model_name()
+
+    llm = LLM()
+    embedded = 0
+    pending = 0
+    for _round in range(REEMBED_MAX_ROUNDS):
+        async with session_scope() as db:
+            missing = (
+                ~select(MessageEmbedding.message_id)
+                .where(
+                    MessageEmbedding.message_id == Message.id,
+                    MessageEmbedding.model == want,
+                )
+                .exists()
+            )
+            rows = (
+                await db.execute(
+                    select(Message.id, Message.text)
+                    .join(Chat, Chat.id == Message.chat_id)
+                    .where(
+                        missing,
+                        Chat.synced_total > 0,
+                        func.length(Message.text) >= EMBED_MIN_CHARS,
+                        *([Chat.account_id == int(account_id)] if account_id is not None else []),
+                        *([Chat.account_id.not_in(skip)] if skip else []),
+                    )
+                    .order_by(Message.id.desc())
+                    .limit(EMBED_BATCH)
+                )
+            ).all()
+        if not rows:
+            log.info("worker.reembed.done", model=want, embedded=embedded, account_id=account_id)
+            await heartbeat("reembed_all", extra={"model": want, "embedded": embedded})
+            return {"model": want, "embedded": embedded, "pending": 0, "done": True}
+
+        texts = [(t or "")[:EMBED_MAX_CHARS] for _, t in rows]
+        try:
+            res = await llm.embed(texts)
+        except LLMError as exc:
+            log.warning("worker.reembed_failed", model=want, error=str(exc)[:200])
+            return {"model": want, "embedded": embedded, "error": str(exc)[:200], "done": False}
+        if res.model != want:
+            # Aralash fazo eng yomon holat: qidiruv filtri ikkalasini ham
+            # o'tkazmay qoladi. Jimgina davom etmaymiz.
+            err = f"model mismatch: want {want}, got {res.model} — EMBED_MODEL/LLM_MODEL_EMBED?"
+            log.error("worker.reembed_model_mismatch", want=want, got=res.model)
+            return {"model": want, "embedded": embedded, "error": err, "done": False}
+        if len(res.vectors) != len(rows):
+            log.error(
+                "worker.reembed_misaligned", expected=len(rows), got=len(res.vectors), model=want
+            )
+            return {"model": want, "embedded": embedded, "error": "misaligned", "done": False}
+        async with session_scope() as db:
+            db.add_all(
+                [
+                    MessageEmbedding(message_id=int(mid), model=res.model, vector=vec)
+                    for (mid, _), vec in zip(rows, res.vectors, strict=True)
+                ]
+            )
+        embedded += len(rows)
+        pending = len(rows)
+        log.info("worker.reembed.progress", model=want, embedded=embedded, batch=len(rows))
+
+    # Hali tugamadi — o'zini qayta navbatga qo'yamiz (bitta ish uzoq ushlanmasin).
+    await enqueue(
+        "reembed_all", account_id, model=want, job_id=job_id_reembed(account_id), defer_by=5
+    )
+    return {"model": want, "embedded": embedded, "pending": pending, "done": False}
+
+
+#: phase4/B — `worker/settings.py` ga `*tasks.PHASE4B_FUNCTIONS` bo'lib qo'shiladi.
+#: Cron yo'q: re-embed faqat qo'lda (`python -m app.main reembed`) boshlanadi.
+PHASE4B_FUNCTIONS: list[Any] = [reembed_all]
+
+
+# ─── phase4/A: entity indeksi backfill (`node_entities`) ─────────────────────
+#
+# Yangi indeks eski xabarlarga ham kerak, lekin 4 million qatorni bitta ishda
+# aylantirib bo'lmaydi. Shuning uchun kursorli backfill: `messages.id` bo'yicha
+# oldinga yuriladi, kursor **Redis'da** (`kv` jadvali yo'q — yangi jadval
+# qo'shish shu ish uchun ortiqcha). Cron soatiga bir marta yuguradi va qiladigan
+# ishi bo'lmasa **darhol** chiqadi.
+
+ENTITIES_CURSOR_KEY = "entities:backfill:{account_id}"
+
+
+async def _entities_cursor(ctx: dict[str, Any], account_id: int) -> tuple[Any, int]:
+    """`(redis, last_message_id)` — Redis yo'q bo'lsa `(None, 0)`."""
+    redis = ctx.get("redis") if isinstance(ctx, dict) else None
+    if redis is None:
+        from app.worker.queue import get_queue
+
+        redis = await get_queue()
+    raw = await redis.get(ENTITIES_CURSOR_KEY.format(account_id=account_id))
+    if raw is None:
+        return redis, 0
+    if isinstance(raw, bytes):
+        raw = raw.decode()
+    try:
+        return redis, int(raw)
+    except (TypeError, ValueError):
+        return redis, 0
+
+
+async def backfill_entities(
+    ctx: dict[str, Any], account_id: int, limit: int | None = None
+) -> dict[str, Any]:
+    """Entity indeksi bo'sh bo'lgan eski xabarlarni to'ldiradi (kursorli).
+
+    `mention_name` bu yerda **chiqmaydi**: Telegram entity'lari saqlanmaydi,
+    ism esa matndan taxmin qilinmaydi. Qolgan turlar (username, hashtag,
+    cashtag, domen, `t.me`) matndan olinadi.
+    """
+    from sqlalchemy import select
+
+    from app.config import get_settings
+    from app.db.base import session_scope
+    from app.db.models import Chat, Message
+    from app.services.entities import EntityRef, index_messages_entities
+
+    s = get_settings()
+    if not s.entities_enabled:
+        return {"skipped": "disabled"}
+    budget = int(limit or s.entities_backfill_limit)
+    batch = s.entities_backfill_batch
+    redis, cursor = await _entities_cursor(ctx, account_id)
+    seen = 0
+    indexed = 0
+    done = False
+    while seen < budget:
+        async with session_scope() as db:
+            rows = (
+                await db.execute(
+                    select(Message.id, Message.chat_id, Message.text, Message.published_at)
+                    .join(Chat, Chat.id == Message.chat_id)
+                    .where(
+                        Chat.account_id == account_id,
+                        Message.id > cursor,
+                        Message.deleted_at.is_(None),
+                    )
+                    .order_by(Message.id)
+                    .limit(min(batch, budget - seen))
+                )
+            ).all()
+            if not rows:
+                done = True
+                break
+            refs = [
+                EntityRef(
+                    message_id=int(r[0]),
+                    account_id=account_id,
+                    chat_id=int(r[1]),
+                    text=r[2] or "",
+                    seen_at=r[3],
+                )
+                for r in rows
+            ]
+            indexed += await index_messages_entities(db, refs)
+        seen += len(rows)
+        cursor = int(rows[-1][0])
+        if redis is not None:
+            await redis.set(ENTITIES_CURSOR_KEY.format(account_id=account_id), str(cursor))
+    log.info(
+        "worker.entities.backfilled",
+        account_id=account_id,
+        messages=seen,
+        entities=indexed,
+        cursor=cursor,
+        done=done,
+    )
+    await heartbeat("backfill_entities", extra={"account_id": account_id, "messages": seen})
+    return {"messages": seen, "entities": indexed, "cursor": cursor, "done": done}
+
+
+async def backfill_entities_all(ctx: dict[str, Any]) -> dict[str, Any]:
+    """Soatiga bir marta: qoldig'i bor akkauntlar uchun backfill navbatga qo'yiladi.
+
+    Qiladigan ish bo'lmasa (kursor akkauntdagi eng katta `messages.id` ga
+    yetgan) — **hech narsa** navbatga qo'yilmaydi va cron darhol chiqadi.
+    """
+    from sqlalchemy import func, select
+
+    from app.config import get_settings
+    from app.db.base import session_scope
+    from app.db.models import Chat, Message
+
+    if not get_settings().entities_enabled:
+        return {"skipped": "disabled"}
+    queued = 0
+    account_ids = await ing.active_account_ids()
+    for account_id in account_ids:
+        try:
+            async with session_scope() as db:
+                max_id = (
+                    await db.execute(
+                        select(func.max(Message.id))
+                        .join(Chat, Chat.id == Message.chat_id)
+                        .where(Chat.account_id == account_id)
+                    )
+                ).scalar()
+            _, cursor = await _entities_cursor(ctx, account_id)
+            if not max_id or int(max_id) <= cursor:
+                continue
+            await enqueue("backfill_entities", account_id, job_id=f"entities:backfill:{account_id}")
+            queued += 1
+        except Exception as exc:  # bitta akkaunt xatosi qolganlarini to'xtatmasin
+            log.warning(
+                "worker.entities_backfill_failed", account_id=account_id, error=str(exc)[:200]
+            )
+    if queued:
+        log.info("worker.entities.backfill_queued", accounts=queued)
+    return {"accounts": len(account_ids), "queued": queued}
+
+
+#: phase4/A ishlari va cron'i — `worker/settings.py` ga `*tasks.PHASE4A_*` bo'lib
+#: qo'shiladi (parallel agentlar bir xil qatorni tahrirlamasin).
+PHASE4A_FUNCTIONS: list[Any] = [backfill_entities, backfill_entities_all]
+
+
+def _phase4a_crons() -> list[Any]:
+    from arq.cron import cron
+
+    return [
+        cron(backfill_entities_all, minute={17}, run_at_startup=False, timeout=600),
+    ]
+
+
+PHASE4A_CRONS: list[Any] = _phase4a_crons()
+
+
+# ─── 4-bosqich/C: batch embedding ────────────────────────────────────────────
+#
+# `EMBED_MODE=batch` da `embed_messages` / `embed_nodes_task` vektor **yozmaydi**
+# — ular faqat Gemini Batch API'ga job yuboradi (narx yarmi), vektorlarni esa
+# `poll_embed_batches` (har 5 daqiqa) tugagan jobdan o'qib yozadi.
+#
+# Nega "yuborib qo'yib yuborish" xavfsiz: job nomi va **tartiblangan** element
+# id'lari `embed_batches` jadvalida (migratsiya 0013). Worker qayta ishga
+# tushsa ham poll o'sha qatordan davom etadi.
+#
+# Fallback: batch yo'li mavjud bo'lmasa yoki submit xato bersa, `_submit_embed_batch`
+# `None` qaytaradi va chaqiruvchi **sinxron** yo'lni davom ettiradi. Ya'ni eng
+# yomon holatda narx eskisicha bo'ladi, indekslash esa to'xtamaydi.
+
+KIND_MESSAGES = "messages"
+KIND_NODES = "nodes"
+
+
+async def _submit_embed_batch(kind: str, limit: int | None) -> dict[str, Any] | None:
+    """Batch job yuboradi. `None` = batch ishlamadi, sinxron yo'l davom etsin."""
+    from app.db.base import session_scope
+    from app.services import embed_batches as eb
+
+    if not eb.batch_embedding_available():
+        log.warning("worker.embed_batch.unavailable", kind=kind)
+        return None
+    async with session_scope() as db:
+        rep = (
+            await eb.submit_messages(db, limit=limit)
+            if kind == KIND_MESSAGES
+            else await eb.submit_nodes(db, limit=limit)
+        )
+    if rep.error:
+        return None
+    await heartbeat(f"embed_{kind}", extra={"submitted": rep.submitted, "mode": "batch"})
+    return {"mode": "batch", "submitted": rep.submitted, "job": rep.job}
+
+
+async def poll_embed_batches(ctx: dict[str, Any], limit: int | None = None) -> dict[str, Any]:
+    """Har 5 daqiqa: tugagan batch joblarni o'qiydi va vektorlarni yozadi.
+
+    Bu cron **batch rejimidan qat'i nazar** ishlaydi: rejim `sync` ga
+    qaytarilgan bo'lsa ham allaqachon yuborilgan (va to'langan) joblar
+    o'qilishi kerak.
+
+    M3: byudjet qopqog'i bu yerda **ataylab yo'q**. Pul allaqachon sarflangan
+    (job yuborilgan) — o'qimaslik faqat vektorlarni yo'qotadi, tejamaydi.
+    Byudjet faqat **yuborish** yo'llarida tekshiriladi (`embed_messages`,
+    `embed_nodes_task`, `reembed_all`).
+    """
+    from app.config import get_settings
+    from app.db.base import session_scope
+    from app.services.embed_batches import poll_batches
+
+    s = get_settings()
+    if not s.embed_batch_poll_enabled:
+        return {"skipped": "disabled"}
+    async with session_scope() as db:
+        rep = await poll_batches(db, limit=limit)
+    if rep.checked:
+        log.info(
+            "worker.embed_batch.poll",
+            checked=rep.checked,
+            succeeded=rep.succeeded,
+            written=rep.written,
+            failed=rep.failed,
+            permanent=rep.permanent,
+            running=rep.still_running,
+        )
+    await heartbeat("poll_embed_batches", extra={"written": rep.written, "checked": rep.checked})
+    return {
+        "checked": rep.checked,
+        "succeeded": rep.succeeded,
+        "written": rep.written,
+        "failed": rep.failed,
+        "permanent": rep.permanent,
+        "running": rep.still_running,
+    }
+
+
+#: phase4/C ishlari va cron'i — `worker/settings.py` ga `*tasks.PHASE4C_*` bo'lib
+#: qo'shiladi (parallel agentlar bir xil qatorni tahrirlamasin).
+PHASE4C_FUNCTIONS: list[Any] = [poll_embed_batches]
+
+
+def _phase4c_crons() -> list[Any]:
+    from arq.cron import cron
+
+    return [
+        cron(
+            poll_embed_batches,
+            minute={1, 6, 11, 16, 21, 26, 31, 36, 41, 46, 51, 56},
+            run_at_startup=False,
+            timeout=900,
+        ),
+    ]
+
+
+PHASE4C_CRONS: list[Any] = _phase4c_crons()

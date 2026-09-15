@@ -299,6 +299,7 @@
   "web.alerts.no_rules": "No rules yet.",
   "web.alerts.no_events": "No matches.",
   "web.alerts.account": "Account",
+  "web.alerts.no_accounts": "No connected accounts",
   "alert.err.not_found": "Rule not found.",
   "alert.err.bad_kind": "Invalid rule kind.",
   "alert.err.empty_pattern": "Pattern is empty.",
@@ -330,5 +331,7 @@
   "web.brief.quiet_to": "Quiet to",
   "web.brief.quiet_note": "The quiet window may wrap past midnight (22:00 → 07:00).",
   "web.brief.save": "Save",
-  "web.brief.saved": "Saved"
+  "web.brief.saved": "Saved",
+  "account.not_found": "Account not found.",
+  "web.alerts.semantic_note": "Semantic rules only see messages long enough to be embedded (20 characters or more); shorter ones are matched by keyword rules only."
 }

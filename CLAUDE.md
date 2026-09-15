@@ -284,6 +284,16 @@ serverga boradi, shift bir xil.
   `bot/push.py::send_html` orqali — MTProto bu yo'lda umuman ishlatilmaydi
   (hech narsa Telegram akkaunt nomidan yuborilmaydi). `deliver_account`
   `Briefing.delivered_at` ni tekshiradi — qayta yuborish yo'q.
+- **Yetkazish bandlash bilan** (migratsiya `0014`, `briefings.attempts`):
+  push'dan **oldin** shartli `UPDATE ... WHERE delivered_at IS NULL`
+  bajariladi va `RETURNING attempts` bo'sh kelsa qator boshqa tik tomonidan
+  olingan — hech narsa yuborilmaydi. Xato bo'lsa bandlash bo'shatiladi;
+  `BRIEFING_MAX_DELIVERY_ATTEMPTS` (3) dan keyin voz kechiladi
+  (`delivered_at` qoladi, `delivery_error = "gave_up_after_N: ..."`).
+  Tekshir-keyin-yoz ko'rinishiga qaytarmang — bu aynan o'sha poyga edi.
+- `build_briefing` boshida kunlik byudjet (`limits.check_daily_budget`) —
+  briefing foydalanuvchi so'ramagan fon xarajati va `record_usage` orqali
+  o'sha limitga kiradi. To'lgan bo'lsa nashr o'tkazib yuboriladi (xato emas).
 - Jim soatlar — **yetkazishni** to'xtatadi (`delivery_check` →
   `in_quiet_hours`), **qurishni** emas: kun tugunlari mavjud bo'lganda
   briefing baribir tayyorlanadi, faqat push kutadi (keyingi yetkazish
@@ -307,6 +317,30 @@ serverga boradi, shift bir xil.
   faqat yangi xabarlarni ko'radi), `cooldown_minutes` (`(rule, chat)` bo'yicha
   — gapiradigan chat aks holda soatiga o'nlab push beradi) va
   `MAX_EVENTS_PER_PUSH = 5` ("va yana N ta").
+- **Kursor ikki tomondan klamplangan** (`_scope_max_id`, migratsiya `0014`):
+  faqat `messages.created_at` ≥5 s oldin bo'lgan qatorlargacha (READ
+  COMMITTED da kichikroq id keyinroq ko'rinadi) va semantik qoida uchun
+  faqat **vektori bor** eng katta id gacha. Ikkinchisisiz hali embed
+  qilinmagan yangi xabarlar kursor ortida qolib abadiy o'tkazib yuborilardi
+  (`_semantic_stmt` `message_embeddings` bilan INNER JOIN qiladi).
+  Shu sababli semantik qoida `EMBED_MIN_CHARS` (20) dan qisqa xabarlarni
+  **umuman** ko'rmaydi — UI'da ham shunday yozilgan.
+- **O'zimizniki emas** filtri `messages.out` ga tayanadi (`sender_id` emas):
+  shaxsiy chatda `from_id` bo'sh keladi, ya'ni o'z xabaringiz o'z alertingizni
+  uyg'otib, cooldown'ni yeb qo'yardi.
+- Push matni **element bo'yicha** yig'iladi (`render_push`): sig'magan
+  elementlar butunligicha tashlanadi va "+N" ga qo'shiladi. Tayyor HTML'ni
+  belgilar soni bo'yicha kesish yo'q — kesish `<a href="…` o'rtasiga tushsa
+  Telegram xabarni rad etadi va hodisa abadiy yetkazilmay qolardi.
+  `bot/push._hard_split` ham teg va `&entity;` ichida kesmaydi.
+- Yetkazish oynasi `created_at` bo'yicha tartiblanadi (`rule_id` emas — aks
+  holda gapiradigan qoida boshqalarni ochlikda qoldiradi); xabari
+  o'chirilgan hodisa `delivery_error="deleted"` bilan yopiladi;
+  `ALERT_MAX_DELIVERY_ATTEMPTS` (3, `alert_events.attempts`) dan keyin voz
+  kechiladi.
+- Har begona satr (chat sarlavhasi, qoida nomi, snippet) bitta yordamchidan
+  o'tadi: `_safe_html` = `neutralize` → kesish → `html.escape`. Kesish
+  escape'dan **keyin** bo'lsa `&amp;` yarim qolib, Telegram xabarni rad etadi.
 - Semantik qoidaning vektori `alert_rules.embedding` da **keshlanadi**;
   `pattern`/`kind` o'zgarsa router uni `NULL` ga tushiradi. Skaner har 5
   daqiqada yuguradi — keshsiz bu kunlik ortiqcha embedding xarajati.
@@ -451,6 +485,18 @@ fayl tizimini LLM'ga ochish. `capabilities()` da TOOLS yo'q — rost.
 - Javobdagi `model` maydoni so'ralganidan farq qilishi mumkin (alias) —
   `pricing.py` ga **qaytgan** nomni qo'shing, aks holda `estimate_cost`
   `None` qaytaradi va kunlik xarajat limiti jimgina ishlamay qoladi.
+
+**Model override (`LLM_MODEL_*`).** `LLM_TASK_*` provider bilan modelni birga
+beradi, `LLM_MODEL_ROUTE|SEARCH|TOOLS|DEEP|EMBED` esa **faqat model nomini**
+almashtiradi — provider tanlash o'zgarmaydi. Model tanlangan providerning
+`capabilities()` iga mos kelmasa router **aniq xato** tashlaydi (tool'siz model
+`TOOLS` ga, chat modeli `EMBED` ga tushmaydi) — jimgina eski modelga qaytish
+yo'q. `gemini-2.5-flash-lite` 2026-10-16 da eskiradi (`router.RETIRING`): 45 kun
+qolganda startupda `llm.model_retiring` ogohlantirishi chiqadi, lekin default
+**o'zgartirilmaydi** — vorisga `LLM_MODEL_ROUTE` bilan, o'lchovdan keyin o'ting.
+Embedding tomonida `EMBED_MODEL` / `EMBED_DIMS`; model almashsa
+`python -m app.main reembed --model X` (hech narsa o'chirmaydi, qatorlar
+yonma-yon, qidiruv joriy modelni filtrlaydi) — batafsil `docs/llm.md`.
 
 Yangi provider qo'shish: `BaseProvider` dan meros oling, `capabilities()` ni
 rostgo'ylik bilan e'lon qiling (yo'q imkoniyatni bor deb ko'rsatmang —

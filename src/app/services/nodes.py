@@ -115,6 +115,7 @@ async def embed_nodes(
     *,
     batch: int = EMBED_BATCH,
     limit: int | None = None,
+    skip_accounts: set[int] | None = None,
 ) -> EmbedReport:
     """Joriy model uchun vektori yo'q tugunlarni batch'lab embed qiladi.
 
@@ -136,7 +137,12 @@ async def embed_nodes(
         `EmbedReport(embedded, pending, model, error)`.
     """
     s = get_settings()
-    want_model = s.gemini_model_embed
+    # phase4/B: joriy embedding modeli — `EMBED_MODEL`/`LLM_MODEL_EMBED` ni ham
+    # hisobga oladi, aks holda model almashganda router boshqa model qaytarib
+    # bu yerda "model mismatch" bo'lardi.
+    from app.llm import embed_model_name
+
+    want_model = embed_model_name()
     limit = limit or s.embed_batch_per_run
     missing = (
         ~select(RetrievalNodeEmbedding.node_id)
@@ -146,11 +152,18 @@ async def embed_nodes(
         )
         .exists()
     )
+    # M3: kunlik byudjeti tugagan egalarning tugunlari bu yugurishda embed
+    # qilinmaydi (keyingi cron'da, byudjet yangilangach, o'z-o'zidan qaytadi).
+    skip = sorted(skip_accounts or ())
     rows = list(
         (
             await session.execute(
                 select(RetrievalNode)
-                .where(missing, func.length(RetrievalNode.text) > 0)
+                .where(
+                    missing,
+                    func.length(RetrievalNode.text) > 0,
+                    *([RetrievalNode.account_id.not_in(skip)] if skip else []),
+                )
                 .order_by(RetrievalNode.id.desc())
                 .limit(limit)
             )
@@ -232,6 +245,9 @@ async def upsert_digest_nodes(
                 Message.chat_id == chat_id,
                 Message.published_at >= day,
                 Message.published_at < day + timedelta(days=1),
+                # L7: o'chirilgan xabar oraliqni kengaytirib yubormasin —
+                # `node_hits_to_messages` o'sha oraliqdan sitata izlaydi.
+                Message.deleted_at.is_(None),
             )
         )
     ).one()
@@ -362,6 +378,15 @@ async def build_week_nodes(
         return node
     chat = await session.get(Chat, chat_id)
     if chat is None:
+        return None
+    # M3: hafta tuguni bu modulning **yagona** LLM chaqirig'i — akkaunt egasining
+    # kunlik byudjeti tugagan bo'lsa o'tkazib yuboriladi (xato emas, keyingi
+    # dushanbada yoki byudjet yangilangach qayta quriladi).
+    from app.services.limits import account_budget_blocked
+
+    over = await account_budget_blocked(session, int(chat.account_id))
+    if over:
+        log.info("nodes.week_budget_skip", chat_id=chat_id, exceeded=over)
         return None
 
     try:

@@ -18,6 +18,7 @@ Nima qo'riqlanadi:
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 
 import pytest
@@ -702,3 +703,568 @@ async def test_briefing_rows_die_with_the_account(pg_engine: AsyncEngine) -> Non
             )
         ).scalar_one()
     assert left == 0
+
+
+# ─── phase4/A: `node_entities` (migratsiya 0012) ─────────────────────────────
+
+
+async def test_node_entities_table_exists_with_expected_shape(pg_engine: AsyncEngine) -> None:
+    """Migratsiya 0012 qo'llanadi; ustunlar, indekslar va `CHECK` joyida."""
+    async with pg_engine.begin() as conn:
+        cols = {
+            r.column_name: r.is_nullable
+            for r in (
+                await conn.execute(
+                    text(
+                        "SELECT column_name, is_nullable FROM information_schema.columns "
+                        "WHERE table_name = 'node_entities'"
+                    )
+                )
+            ).all()
+        }
+        indexes = {
+            r.indexname
+            for r in (
+                await conn.execute(
+                    text("SELECT indexname FROM pg_indexes WHERE tablename = 'node_entities'")
+                )
+            ).all()
+        }
+    assert cols["message_id"] == "YES" and cols["node_id"] == "YES"  # ikkalasi nullable
+    assert cols["account_id"] == "NO" and cols["kind"] == "NO" and cols["value"] == "NO"
+    assert "seen_at" in cols and "value_raw" in cols
+    assert {
+        "ix_node_entities_account_kind_value",
+        "ix_node_entities_chat_seen",
+        "ix_node_entities_node",
+    } <= indexes
+
+
+async def test_node_entity_is_unique_per_message_kind_value(pg_engine: AsyncEngine) -> None:
+    """`uq_node_entity_value` — qayta sync `ON CONFLICT DO NOTHING` ga tayanadi."""
+    from sqlalchemy.exc import IntegrityError
+
+    account_id, chat_id = await _fixture_chat(pg_engine)
+    mid = await _insert_message(pg_engine, chat_id, 1, "@nurbek keldi")
+    ins = text(
+        "INSERT INTO node_entities (account_id, chat_id, message_id, kind, value, value_raw) "
+        "VALUES (:a, :c, :m, 'username', '@nurbek', '@Nurbek')"
+    )
+    async with pg_engine.begin() as conn:
+        await conn.execute(ins, {"a": account_id, "c": chat_id, "m": mid})
+    with pytest.raises(IntegrityError):
+        async with pg_engine.begin() as conn:
+            await conn.execute(ins, {"a": account_id, "c": chat_id, "m": mid})
+    # boshqa `kind` — konflikt emas
+    async with pg_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO node_entities (account_id, chat_id, message_id, kind, value) "
+                "VALUES (:a, :c, :m, 'hashtag', '@nurbek')"
+            ),
+            {"a": account_id, "c": chat_id, "m": mid},
+        )
+
+
+async def test_phone_like_kind_is_rejected_by_the_database(pg_engine: AsyncEngine) -> None:
+    """Telefon raqami indeksga tushmasligi kod xushmuomalaligiga tayanmaydi."""
+    from sqlalchemy.exc import IntegrityError
+
+    account_id, chat_id = await _fixture_chat(pg_engine)
+    mid = await _insert_message(pg_engine, chat_id, 2, "tel +998901234567")
+    with pytest.raises(IntegrityError):
+        async with pg_engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "INSERT INTO node_entities (account_id, chat_id, message_id, kind, value) "
+                    "VALUES (:a, :c, :m, 'phone_like', '+998901234567')"
+                ),
+                {"a": account_id, "c": chat_id, "m": mid},
+            )
+
+
+async def test_node_entities_die_with_the_message(pg_engine: AsyncEngine) -> None:
+    account_id, chat_id = await _fixture_chat(pg_engine)
+    mid = await _insert_message(pg_engine, chat_id, 3, "#deploy")
+    async with pg_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO node_entities (account_id, chat_id, message_id, kind, value) "
+                "VALUES (:a, :c, :m, 'hashtag', '#deploy')"
+            ),
+            {"a": account_id, "c": chat_id, "m": mid},
+        )
+        await conn.execute(text("DELETE FROM messages WHERE id = :m"), {"m": mid})
+        left = (
+            await conn.execute(
+                text("SELECT count(*) FROM node_entities WHERE message_id = :m"), {"m": mid}
+            )
+        ).scalar_one()
+    assert left == 0
+
+
+async def test_episode_link_fills_node_id_for_entities_in_range(pg_engine: AsyncEngine) -> None:
+    """`episodes.link_entities` — bitta `UPDATE`, oyna `msg_lo..msg_hi` bo'yicha."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.services.episodes import link_entities
+
+    account_id, chat_id = await _fixture_chat(pg_engine)
+    inside = await _insert_message(pg_engine, chat_id, 10, "@nurbek")
+    outside = await _insert_message(pg_engine, chat_id, 99, "@nurbek ham")
+    async with pg_engine.begin() as conn:
+        node_id = (
+            await conn.execute(
+                text(
+                    "INSERT INTO retrieval_nodes (account_id, chat_id, level, starts_at, ends_at, "
+                    "msg_lo, msg_hi, msg_count, content_hash) VALUES "
+                    "(:a, :c, 1, now(), now(), 5, 20, 2, 'x') RETURNING id"
+                ),
+                {"a": account_id, "c": chat_id},
+            )
+        ).scalar_one()
+        for mid in (inside, outside):
+            await conn.execute(
+                text(
+                    "INSERT INTO node_entities (account_id, chat_id, message_id, kind, value) "
+                    "VALUES (:a, :c, :m, 'username', '@nurbek')"
+                ),
+                {"a": account_id, "c": chat_id, "m": mid},
+            )
+
+    maker = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with maker() as session:
+        changed = await link_entities(session, chat_id)
+        await session.commit()
+    assert changed == 1
+
+    async with pg_engine.begin() as conn:
+        rows = dict(
+            (
+                await conn.execute(
+                    text("SELECT message_id, node_id FROM node_entities WHERE chat_id = :c"),
+                    {"c": chat_id},
+                )
+            ).all()
+        )
+    assert rows[inside] == node_id and rows[outside] is None
+
+
+# ─── (h) phase4/C: `embed_batches` (migratsiya 0013) ─────────────────────────
+#
+# Nima qo'riqlanadi: tartiblangan `item_ids` ↔ vektorlar mosligi. Bu yagona
+# bog'lovchi — Gemini javoblarni kirish tartibida qaytaradi, boshqa kalit yo'q.
+# Uzunlik mos kelmasa **hech narsa** yozilmasligi shart (0-bosqich qoidasi):
+# yarim yozish vektorni boshqa xabarga tushirib, indeksni jimgina buzardi.
+
+
+class _FakeBatchProvider:
+    """`GeminiProvider` o'rnini bosadi — hech qanday tarmoq chaqiruvi yo'q."""
+
+    name = "gemini"
+
+    def __init__(self, *, states: list[str], vectors: list[list[float]] | None = None) -> None:
+        self.states = states  # har `poll` chaqiruvida keyingisi
+        self.vectors = vectors or []
+        self.submitted: list[list[str]] = []
+
+    async def embed_batch_submit(self, texts, **kw):  # type: ignore[no-untyped-def]
+        from uuid import uuid4
+
+        self.submitted.append(list(texts))
+        # Baza testlar orasida tozalanmaydi — nom global unikal bo'lishi shart.
+        return f"batches/{uuid4().hex}"
+
+    async def embed_batch_poll(self, job: str):  # type: ignore[no-untyped-def]
+        from app.llm.base import BatchState, BatchStatus
+
+        raw = self.states.pop(0) if self.states else "JOB_STATE_SUCCEEDED"
+        mapping = {
+            "JOB_STATE_PENDING": BatchState.PENDING,
+            "JOB_STATE_RUNNING": BatchState.RUNNING,
+            "JOB_STATE_SUCCEEDED": BatchState.SUCCEEDED,
+            "JOB_STATE_EXPIRED": BatchState.EXPIRED,
+            "JOB_STATE_FAILED": BatchState.FAILED,
+        }
+        return BatchStatus(job=job, state=mapping[raw], raw_state=raw, model=_EMB_MODEL)
+
+    async def embed_batch_fetch(self, job: str):  # type: ignore[no-untyped-def]
+        from app.llm.base import EmbedResult, Usage
+
+        return EmbedResult(
+            vectors=self.vectors,
+            model=_EMB_MODEL,
+            provider="gemini",
+            usage=Usage(tokens_in=100),
+        )
+
+
+_EMB_MODEL = "gemini-embedding-001"
+
+
+def _vec(seed: float, dims: int) -> list[float]:
+    return [seed] + [0.0] * (dims - 1)
+
+
+async def _clear_inflight_batches(pg_engine: AsyncEngine) -> None:
+    """`poll_batches` **global** ishlaydi (har qanday uchayotgan job).
+
+    Bu ishlab chiqarishda to'g'ri, testda esa oldingi testning qatori
+    hisoblarni buzadi — shuning uchun poll testlari o'z jobidan boshqasini
+    qoldirmaydi.
+    """
+    async with pg_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE embed_batches SET status = 'succeeded' "
+                "WHERE status IN ('pending', 'running')"
+            )
+        )
+
+
+def _maker(pg_engine: AsyncEngine):  # type: ignore[no-untyped-def]
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    return async_sessionmaker(pg_engine, expire_on_commit=False)
+
+
+async def _synced_chat(pg_engine: AsyncEngine) -> tuple[int, int]:
+    """`(account_id, chat_id)`. Testlar **akkaunt bo'yicha** ajratiladi.
+
+    Baza testlar orasida tozalanmaydi, `submit_messages` esa vektori yo'q
+    hamma xabarni ko'radi — akkaunt filtri bo'lmasa oldingi testlarning
+    xabarlari ham jobga tushardi.
+    """
+    account_id, chat_id = await _fixture_chat(pg_engine)
+    async with pg_engine.begin() as conn:
+        await conn.execute(text("UPDATE chats SET synced_total = 10 WHERE id = :c"), {"c": chat_id})
+    return account_id, chat_id
+
+
+async def test_embed_batches_table_and_gin_index_exist(pg_engine: AsyncEngine) -> None:
+    async with pg_engine.begin() as conn:
+        cols = dict(
+            (
+                await conn.execute(
+                    text(
+                        "SELECT column_name, data_type FROM information_schema.columns "
+                        "WHERE table_name = 'embed_batches'"
+                    )
+                )
+            ).all()
+        )
+        indexes = {
+            r[0]
+            for r in (
+                await conn.execute(
+                    text("SELECT indexname FROM pg_indexes WHERE tablename = 'embed_batches'")
+                )
+            ).all()
+        }
+    assert cols["item_ids"] == "jsonb"
+    assert cols["account_id"] == "integer"
+    assert {"ix_embed_batches_items", "ix_embed_batches_status"} <= indexes
+
+
+async def test_embed_batches_kind_is_constrained(pg_engine: AsyncEngine) -> None:
+    from sqlalchemy.exc import IntegrityError
+
+    with pytest.raises(IntegrityError):
+        async with pg_engine.begin() as conn:
+            await conn.execute(
+                text("INSERT INTO embed_batches (job_name, kind) VALUES ('b/x', 'digests')")
+            )
+
+
+async def test_submit_records_ordered_ids_and_excludes_inflight(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.services import embed_batches as eb
+
+    account_id, chat_id = await _synced_chat(pg_engine)
+    ids = [
+        await _insert_message(pg_engine, chat_id, 9000 + i, f"yetarlicha uzun xabar matni {i}")
+        for i in range(3)
+    ]
+
+    provider = _FakeBatchProvider(states=[])
+    monkeypatch.setattr(eb, "_provider_for_batch", lambda: (provider, _EMB_MODEL))
+
+    async with _maker(pg_engine)() as session:
+        rep = await eb.submit_messages(session, limit=50, account_id=account_id)
+        await session.commit()
+    assert rep.submitted == 3
+
+    async with pg_engine.begin() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT item_ids, status, kind, attempts FROM embed_batches WHERE job_name = :j"
+                ),
+                {"j": rep.job},
+            )
+        ).one()
+    # `Message.id DESC` tartibida yuborilgan — aynan shu tartib saqlanishi shart.
+    assert row[0] == sorted(ids, reverse=True)
+    assert (row[1], row[2], row[3]) == ("pending", "messages", 1)
+
+    # Ikkinchi submit: hamma element uchayotgan jobda → hech narsa yuborilmaydi.
+    async with _maker(pg_engine)() as session:
+        again = await eb.submit_messages(session, limit=50, account_id=account_id)
+    assert again.submitted == 0
+    assert len(provider.submitted) == 1
+
+
+async def test_poll_writes_vectors_strictly_aligned(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch, settings
+) -> None:
+    from app.services import embed_batches as eb
+
+    account_id, chat_id = await _synced_chat(pg_engine)
+    ids = [
+        await _insert_message(pg_engine, chat_id, 9100 + i, f"yana bir uzunroq xabar matni {i}")
+        for i in range(3)
+    ]
+    ordered = sorted(ids, reverse=True)
+    dims = settings.embed_dims
+    vectors = [_vec(1.0, dims), _vec(2.0, dims), _vec(3.0, dims)]
+
+    provider = _FakeBatchProvider(
+        states=["JOB_STATE_RUNNING", "JOB_STATE_SUCCEEDED"], vectors=vectors
+    )
+    monkeypatch.setattr(eb, "_provider_for_batch", lambda: (provider, _EMB_MODEL))
+    await _clear_inflight_batches(pg_engine)
+
+    async with _maker(pg_engine)() as session:
+        rep = await eb.submit_messages(session, limit=50, account_id=account_id)
+        await session.commit()
+
+    # 1-poll: hali ishlayapti — vektor yozilmaydi, holat `running` bo'ladi.
+    async with _maker(pg_engine)() as session:
+        first = await eb.poll_batches(session)
+        await session.commit()
+    assert (first.still_running, first.written) == (1, 0)
+    async with pg_engine.begin() as conn:
+        assert (
+            await conn.execute(
+                text("SELECT status FROM embed_batches WHERE job_name = :j"), {"j": rep.job}
+            )
+        ).scalar_one() == "running"
+
+    # 2-poll: tugadi — vektorlar `item_ids` tartibida yoziladi.
+    async with _maker(pg_engine)() as session:
+        second = await eb.poll_batches(session)
+        await session.commit()
+    assert (second.succeeded, second.written) == (1, 3)
+
+    async with pg_engine.begin() as conn:
+        stored = dict(
+            (
+                await conn.execute(
+                    text(
+                        "SELECT message_id, (vector::real[])[1] FROM message_embeddings "
+                        "WHERE message_id = ANY(:ids)"
+                    ),
+                    {"ids": ordered},
+                )
+            ).all()
+        )
+        batch = (
+            await conn.execute(
+                text("SELECT status, model, cost_usd FROM embed_batches WHERE job_name = :j"),
+                {"j": rep.job},
+            )
+        ).one()
+    # vectors[i] ↔ item_ids[i] — moslik aynan tartib bo'yicha. Har vektorning
+    # birinchi komponenti farqli (1/2/3), shuning uchun almashib ketish
+    # darhol ko'rinadi. (Normallashtirish adapter ichida, soxta provider
+    # xom qiymat qaytaradi — bu test aynan moslikni o'lchaydi.)
+    assert [stored[mid] for mid in ordered] == pytest.approx([1.0, 2.0, 3.0])
+    assert batch[0] == "succeeded"
+    assert batch[1] == _EMB_MODEL
+    assert batch[2] > 0  # batch narxi yozildi
+
+
+async def test_poll_mismatch_writes_nothing(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch, settings
+) -> None:
+    from app.services import embed_batches as eb
+
+    account_id, chat_id = await _synced_chat(pg_engine)
+    ids = [
+        await _insert_message(pg_engine, chat_id, 9200 + i, f"uchinchi to'plam xabari {i}")
+        for i in range(3)
+    ]
+
+    # 3 element yuborildi, 2 vektor qaytdi.
+    provider = _FakeBatchProvider(
+        states=["JOB_STATE_SUCCEEDED"],
+        vectors=[_vec(1.0, settings.embed_dims), _vec(2.0, settings.embed_dims)],
+    )
+    monkeypatch.setattr(eb, "_provider_for_batch", lambda: (provider, _EMB_MODEL))
+    await _clear_inflight_batches(pg_engine)
+
+    async with _maker(pg_engine)() as session:
+        rep = await eb.submit_messages(session, limit=50, account_id=account_id)
+        await session.commit()
+    async with _maker(pg_engine)() as session:
+        out = await eb.poll_batches(session)
+        await session.commit()
+
+    assert (out.written, out.failed) == (0, 1)
+    async with pg_engine.begin() as conn:
+        written = (
+            await conn.execute(
+                text("SELECT count(*) FROM message_embeddings WHERE message_id = ANY(:ids)"),
+                {"ids": ids},
+            )
+        ).scalar_one()
+        row = (
+            await conn.execute(
+                text("SELECT status, attempts, error FROM embed_batches WHERE job_name = :j"),
+                {"j": rep.job},
+            )
+        ).one()
+    assert written == 0  # yarim yozish yo'q
+    assert row[0] == "failed" and row[1] == 2
+    assert "misaligned" in row[2]
+
+
+async def test_expired_job_increments_attempts_then_goes_permanent(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cheksiz qayta yuborish = cheksiz to'lov. `max_attempts` dan keyin to'xtaydi."""
+    from app.services import embed_batches as eb
+
+    account_id, chat_id = await _synced_chat(pg_engine)
+    await _insert_message(pg_engine, chat_id, 9300, "eskirgan job uchun xabar matni")
+
+    provider = _FakeBatchProvider(states=["JOB_STATE_EXPIRED"])
+    monkeypatch.setattr(eb, "_provider_for_batch", lambda: (provider, _EMB_MODEL))
+    await _clear_inflight_batches(pg_engine)
+
+    async with _maker(pg_engine)() as session:
+        rep = await eb.submit_messages(session, limit=50, account_id=account_id)
+        await session.commit()
+
+    async with _maker(pg_engine)() as session:
+        out = await eb.poll_batches(session)
+        await session.commit()
+    assert out.failed == 1 and out.permanent == 0
+    async with pg_engine.begin() as conn:
+        row = (
+            await conn.execute(
+                text("SELECT status, attempts FROM embed_batches WHERE job_name = :j"),
+                {"j": rep.job},
+            )
+        ).one()
+    assert tuple(row) == ("expired", 2)
+
+    # `expired` — uchayotgan emas: element keyingi yugurishda qayta olinadi.
+    provider.states = ["JOB_STATE_EXPIRED"]
+    async with _maker(pg_engine)() as session:
+        again = await eb.submit_messages(session, limit=50, account_id=account_id)
+        await session.commit()
+    assert again.submitted == 1
+
+    # Ikkinchi urinishdan keyin `max_attempts` tugaydi → `failed_permanent`.
+    async with pg_engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE embed_batches SET attempts = 2 WHERE job_name = :j"), {"j": again.job}
+        )
+    async with _maker(pg_engine)() as session:
+        out2 = await eb.poll_batches(session)
+        await session.commit()
+    assert out2.permanent == 1
+    async with pg_engine.begin() as conn:
+        assert (
+            await conn.execute(
+                text("SELECT status FROM embed_batches WHERE job_name = :j"), {"j": again.job}
+            )
+        ).scalar_one() == "failed_permanent"
+
+
+# ─── F1/H2: uzilgan deep yugurishning hisob qatori ───────────────────────────
+
+
+async def test_aborted_deep_run_is_counted_by_the_daily_budget(pg_engine: AsyncEngine) -> None:
+    """Uzilgan yugurish `conversation_messages` ga tushadi va byudjetni ko'taradi.
+
+    Aynan shu qator bo'lmasa, sintez oldidan uzilgan (yoki `LLMError` bergan)
+    deep so'rov bepul bo'lib qolardi: `limits.daily_usage` faqat assistant
+    qatorlarini yig'adi.
+    """
+    from app.services import deep_search as DS
+    from app.services import limits as LIM
+
+    account_id, _chat_id = await _fixture_chat(pg_engine)
+    async with pg_engine.begin() as conn:
+        user_id = (
+            await conn.execute(
+                text("SELECT user_id FROM accounts WHERE id = :a"), {"a": account_id}
+            )
+        ).scalar_one()
+        conv_id = (
+            await conn.execute(
+                text(
+                    "INSERT INTO conversations (user_id, account_id, title) "
+                    "VALUES (:u, :a, 'deep') RETURNING id"
+                ),
+                {"u": user_id, "a": account_id},
+            )
+        ).scalar_one()
+
+    maker = _maker(pg_engine)
+
+    @asynccontextmanager
+    async def factory():  # type: ignore[no-untyped-def]
+        """`db.base.session_scope` kabi — chiqishda **commit** qiladi."""
+        async with maker() as session:
+            yield session
+            await session.commit()
+
+    async with maker() as session:
+        before = await LIM.daily_usage(session, int(user_id))
+
+    meter = DS._Meter.__new__(DS._Meter)
+    meter.inner = None  # type: ignore[assignment]
+    meter.tokens_in, meter.tokens_out, meter.cost_usd, meter.calls = 1_234, 56, 0.004, 3
+
+    await DS._persist_usage(
+        factory,
+        conversation_id=int(conv_id),
+        user_id=int(user_id),
+        account_id=int(account_id),
+        question="to'lov haqida",
+        meter=meter,
+        status="cancelled",
+        latency_ms=900,
+    )
+
+    async with maker() as session:
+        after = await LIM.daily_usage(session, int(user_id))
+    assert after.tokens - before.tokens == 1_290
+    assert after.cost_usd > before.cost_usd
+
+    async with pg_engine.begin() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT role, content, context, task FROM conversation_messages "
+                    "WHERE conversation_id = :c ORDER BY id DESC LIMIT 1"
+                ),
+                {"c": conv_id},
+            )
+        ).one()
+        assert row[0] == "assistant" and row[1] == "" and row[3] == "deep"
+        assert row[2]["aborted"] is True and row[2]["status"] == "cancelled"
+        run = (
+            await conn.execute(
+                text(
+                    "SELECT tokens_in, tokens_out, error FROM agent_runs "
+                    "WHERE user_id = :u ORDER BY id DESC LIMIT 1"
+                ),
+                {"u": user_id},
+            )
+        ).one()
+        assert tuple(run) == (1_234, 56, "deep:cancelled")

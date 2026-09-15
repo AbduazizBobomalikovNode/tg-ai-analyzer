@@ -213,7 +213,8 @@ async def test_week_node_is_built_from_day_nodes_only() -> None:
     assert node is not None
     # ⚠️ Xom xabarlar O'QILMAYDI — ierarxiyaning butun ma'nosi shunda.
     assert not any("FROM messages" in s for s in session.sql)
-    assert all("retrieval_nodes" in s for s in session.sql)
+    # `accounts` so'rovi — M3 byudjet qopqog'i (`account_budget_blocked`).
+    assert all("retrieval_nodes" in s or "FROM accounts" in s for s in session.sql)
     assert len(llm.chats) == 1
     task, _msgs = llm.chats[0]
     assert task is Task.ROUTE
