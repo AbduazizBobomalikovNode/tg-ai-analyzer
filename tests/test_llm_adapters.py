@@ -284,3 +284,24 @@ def test_as_json_object_wraps_non_objects() -> None:
     assert _as_json_object('{"a":1}') == {"a": 1}
     assert _as_json_object("oddiy matn") == {"result": "oddiy matn"}
     assert _as_json_object("[1,2]") == {"result": [1, 2]}
+
+
+def test_deepseek_strips_leaked_tool_markup() -> None:
+    """V4 uzun transkriptdan keyin ichki razmetkani matn kanalida chiqaradi.
+
+    Razmetka `finish_reason="stop"` bilan ham keladi, shuning uchun adapter uni
+    kesadi — aks holda foydalanuvchi javob o'rniga xom markup ko'radi.
+    """
+    from app.llm.deepseek import _strip_tool_markup
+
+    bar = "｜"  # noqa: RUF001  (FULLWIDTH VERTICAL LINE — razmetka aynan shunday keladi)
+    leaked = (
+        "Serverdan qidiraman:\n\n"
+        f"<{bar}{bar}DSML{bar}{bar}tool_calls>\n"
+        f'<{bar}{bar}DSML{bar}{bar}invoke name="search_telegram">'
+    )
+    assert _strip_tool_markup(leaked) == "Serverdan qidiraman:"
+
+    clean = "Javob: #843 da kv puli haqida yozilgan."
+    assert _strip_tool_markup(clean) == clean
+    assert _strip_tool_markup("") == ""

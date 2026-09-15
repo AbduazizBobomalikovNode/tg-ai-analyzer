@@ -7,7 +7,7 @@
     return v;
   };
   const $ = (id) => document.getElementById(id);
-  const steps = { phone: $("step-phone"), code: $("step-code"), password: $("step-password"), done: $("step-done") };
+  const steps = { phone: $("step-phone"), qr: $("step-qr"), code: $("step-code"), password: $("step-password"), done: $("step-done") };
   const alertBox = $("alert");
   let flowId = null;
   let retryTimer = null;
@@ -19,6 +19,40 @@
   }
   function showError(msg) { alertBox.textContent = msg; alertBox.hidden = false; }
   function clearError() { alertBox.hidden = true; alertBox.textContent = ""; }
+
+  // ── kod qadami: izoh + "qayta yuborish" tugmasi ──────────────────────────
+  // Telegram faol sessiya ko'rsa kodni SMS emas, ilovaga tashlaydi
+  // (code_type=app). `next_type` — qayta yuborilsa qanday kelishi; bo'sh
+  // bo'lsa Telegram qayta yuborishga ruxsat bermaydi, tugma ko'rsatilmaydi.
+  let resendTimer = null;
+
+  function applyCodeStep(data) {
+    const hintKey = { app: "app", sms: "sms", call: "call", flashcall: "call" }[data.code_type] || "other";
+    $("code-hint").textContent = t(`web.login.code_hint.${hintKey}`);
+    setupResend(data.next_type, data.timeout);
+  }
+
+  function setupResend(nextType, timeout) {
+    const btn = $("btn-resend");
+    clearInterval(resendTimer);
+    if (!nextType) { btn.hidden = true; return; }
+    btn.hidden = false;
+    const label = t(`web.login.resend_as.${nextType === "sms" ? "sms" : "other"}`);
+    let left = Math.max(0, Number(timeout) || 0);
+    const tick = () => {
+      if (left > 0) {
+        btn.disabled = true;
+        btn.textContent = t("web.login.resend_wait", { s: left, how: label });
+        left -= 1;
+      } else {
+        btn.disabled = false;
+        btn.textContent = label;
+        clearInterval(resendTimer);
+      }
+    };
+    tick();
+    if (left > 0) resendTimer = setInterval(tick, 1000);
+  }
 
   async function api(path, body) {
     const res = await fetch(path, {
@@ -64,8 +98,7 @@
     try {
       const data = await api("/api/auth/phone", { phone: $("phone").value.trim() });
       flowId = data.flow_id;
-      const hintKey = { app: "app", sms: "sms", call: "call", flashcall: "call" }[data.code_type] || "other";
-      $("code-hint").textContent = t(`web.login.code_hint.${hintKey}`);
+      applyCodeStep(data);
       $("code").value = "";
       show("code");
     } catch (err) { handleError(err, btn); }
@@ -83,6 +116,18 @@
     finally { busy(btn, false); }
   });
 
+  $("btn-resend").addEventListener("click", async () => {
+    clearError();
+    const btn = $("btn-resend"); busy(btn, true);
+    try {
+      const data = await api("/api/auth/resend", { flow_id: flowId });
+      applyCodeStep(data);          // yangi code_type/next_type/timeout
+      $("code").value = "";
+      $("code").focus();
+    } catch (err) { handleError(err, btn); }
+    finally { busy(btn, false); }
+  });
+
   steps.password.addEventListener("submit", async (e) => {
     e.preventDefault(); clearError();
     const btn = $("btn-password"); busy(btn, true);
@@ -94,10 +139,51 @@
   });
 
   document.querySelectorAll("[data-back]").forEach((b) => b.addEventListener("click", async () => {
-    clearError();
+    clearError(); stopQrPoll();
     if (flowId) { try { await api("/api/auth/cancel", { flow_id: flowId }); } catch (_) { /* ignore */ } }
     flowId = null; show("phone");
   }));
+
+  // ── QR login ─────────────────────────────────────────────────────────────
+  // Telefon/kod umuman kerak emas. QR server tomonda SVG qilib chiziladi va
+  // <img src=data:…> bo'lib keladi. Token ~1 daqiqada eskiradi — backend uni
+  // o'zi yangilaydi, biz shunchaki holatni so'rab turamiz.
+  let qrPoll = null;
+
+  function stopQrPoll() { clearInterval(qrPoll); qrPoll = null; }
+
+  $("btn-qr").addEventListener("click", async () => {
+    clearError();
+    const btn = $("btn-qr"); busy(btn, true);
+    try {
+      const data = await api("/api/auth/qr", {});
+      flowId = data.flow_id;
+      if (data.qr) $("qr-img").src = data.qr;
+      show("qr");
+      startQrPoll();
+    } catch (err) { handleError(err, btn); }
+    finally { busy(btn, false); }
+  });
+
+  function startQrPoll() {
+    stopQrPoll();
+    qrPoll = setInterval(async () => {
+      if (!flowId) return stopQrPoll();
+      let data;
+      try {
+        data = await api("/api/auth/qr/poll", { flow_id: flowId });
+      } catch (err) {
+        stopQrPoll(); handleError(err, null); show("phone"); return;
+      }
+      if (data.qr) $("qr-img").src = data.qr;       // token yangilangan bo'lsa
+      if (data.error) $("qr-hint").textContent = t("auth.err.telegram");
+      if (data.status === "needs_2fa") {
+        stopQrPoll(); $("password").value = ""; show("password");
+      } else if (data.status === "done") {
+        stopQrPoll(); finish();
+      }
+    }, 2000);
+  }
 
   function finish() {
     show("done");

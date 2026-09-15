@@ -72,7 +72,16 @@
     </header>
 
     <div class="messages" id="messages">
-      <div class="empty" id="empty-state">{{ t('web.chat.empty_state') }}</div>
+      <div class="empty" id="empty-state">
+        <div class="empty-icon" aria-hidden="true">✨</div>
+        <h2 class="empty-title">{{ t('web.chat.empty_title') }}</h2>
+        <p class="empty-text">{{ t('web.chat.empty_state') }}</p>
+        <div class="suggests" id="suggests">
+          <button type="button" class="suggest">{{ t('web.chat.suggest_1') }}</button>
+          <button type="button" class="suggest">{{ t('web.chat.suggest_2') }}</button>
+          <button type="button" class="suggest">{{ t('web.chat.suggest_3') }}</button>
+        </div>
+      </div>
     </div>
 
     <!-- panellar: kutayotgan amallar / auto-reply / rejalashtirilganlar -->

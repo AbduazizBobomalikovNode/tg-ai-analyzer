@@ -19,9 +19,16 @@ PRICES: dict[str, tuple[float, float]] = {
     "gemini-2.5-flash": (0.30, 2.50),
     "gemini-2.5-flash-lite": (0.10, 0.40),
     "gemini-embedding-001": (0.15, 0.0),
-    # DeepSeek
-    "deepseek-chat": (0.27, 1.10),
-    "deepseek-reasoner": (0.55, 2.19),
+    # DeepSeek — peak narxlar (off-peak yarmi: 01:00-04:00 va 06:00-10:00 UTC
+    # tashqarisi). Byudjet qopqog'i uchun ataylab qimmatrog'i olingan: kam
+    # baholash limitni ishlamay qoldiradi.
+    "deepseek-v4-flash": (0.44, 1.32),
+    "deepseek-v4-pro": (1.32, 3.96),
+    # Eski aliaslar — API ikkalasini ham v4-flash'ga yo'naltiradi. Javobdagi
+    # `model` maydoni konkret nomni qaytaradi, shuning uchun bular kamdan-kam
+    # ishlatiladi; narx v4-flash bilan bir xil.
+    "deepseek-chat": (0.44, 1.32),
+    "deepseek-reasoner": (0.44, 1.32),
 }
 
 

@@ -69,6 +69,7 @@ def _flow_out(flow: Any) -> dict[str, Any]:
         "flow_id": flow.id,
         "status": str(flow.status),
         "code_type": flow.code_type,
+        "next_type": flow.next_type,  # bo'sh = "qayta yuborish" tugmasi ko'rsatilmaydi
         "code_length": flow.code_length,
         "timeout": flow.timeout,
     }
@@ -123,6 +124,76 @@ async def _kick_sync(account_id: int) -> None:
         await enqueue("sync_account", account_id, True, job_id=job_id_account(account_id))
     except Exception as exc:  # navbat mavjud emas — cron keyin baribir oladi
         log.warning("auth.sync_enqueue_failed", account_id=account_id, error=str(exc)[:200])
+
+
+def _qr_data_uri(url: str) -> str:
+    """`tg://login?token=…` → SVG data URI.
+
+    Server tomonda chiziladi: brauzerga tashqi kutubxona qo'shmaymiz (CDN yo'q)
+    va natija `<img src>` bo'lib beriladi — `innerHTML` ishlatilmaydi, ya'ni
+    XSS yuzasi yo'q.
+    """
+    import base64
+    import io
+
+    import qrcode
+    from qrcode.image.svg import SvgPathImage
+
+    img = qrcode.make(url, image_factory=SvgPathImage, box_size=10, border=2)
+    buf = io.BytesIO()
+    img.save(buf)
+    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    return f"data:image/svg+xml;base64,{b64}"
+
+
+def _qr_out(flow: Any) -> dict[str, Any]:
+    out = _flow_out(flow)
+    if flow.status is FlowStatus.QR_PENDING and flow.qr_url:
+        out["qr"] = _qr_data_uri(flow.qr_url)
+    if flow.error:
+        out["error"] = flow.error
+    return out
+
+
+@router.post("/auth/qr", dependencies=[Depends(require_csrf)])
+async def auth_qr(request: Request) -> dict[str, Any]:
+    """QR login boshlash — telefon ham, kod ham kerak emas."""
+    if not limiter(request).check(client_ip(request)):
+        raise HTTPException(status_code=429, detail={"code": "auth.err.rate_limited"})
+    ident = identity_of(request)
+    try:
+        flow = await flows(request).start_qr(owner_user_id=ident.user_id if ident else None)
+    except AuthError as exc:
+        raise _auth_http(exc) from exc
+    return _qr_out(flow)
+
+
+@router.post("/auth/qr/poll", dependencies=[Depends(require_csrf)])
+async def auth_qr_poll(body: FlowIn, request: Request, response: Response) -> dict[str, Any]:
+    """Skanerlandimi? Frontend shu yerni so'rab turadi (rate limit yo'q — poll)."""
+    try:
+        flow = flows(request).get(body.flow_id)
+    except AuthError as exc:
+        raise _auth_http(exc) from exc
+    if flow.status is FlowStatus.DONE:
+        return await _finish(request, response, body.flow_id)
+    return _qr_out(flow)
+
+
+@router.post("/auth/resend", dependencies=[Depends(require_csrf)])
+async def auth_resend(body: FlowIn, request: Request) -> dict[str, Any]:
+    """Kodni qayta yuborish — Telegram odatda SMS'ga o'tkazadi.
+
+    IP shifti `/auth/phone` bilan bir xil: aks holda bu yangi oqim ochmasdan
+    cheksiz kod yuborish yo'liga aylanardi.
+    """
+    if not limiter(request).check(client_ip(request)):
+        raise HTTPException(status_code=429, detail={"code": "auth.err.rate_limited"})
+    try:
+        flow = await flows(request).resend(body.flow_id)
+    except AuthError as exc:
+        raise _auth_http(exc) from exc
+    return _flow_out(flow)
 
 
 @router.post("/auth/code", dependencies=[Depends(require_csrf)])

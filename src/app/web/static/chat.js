@@ -427,6 +427,16 @@
   $("btn-close-sidebar").addEventListener("click", closeSidebarMobile);
   function closeSidebarMobile() { if (window.innerWidth <= 860) el.sidebar.classList.remove("open"); }
 
+  // Bo'sh holatdagi taklif chiplari — savolni kiritish maydoniga qo'yadi.
+  // Delegatsiya: chiplar shablonda, lekin bo'sh holat qayta chizilishi mumkin.
+  document.addEventListener("click", (e) => {
+    const chip = e.target.closest(".suggest");
+    if (!chip) return;
+    el.input.value = chip.textContent.trim();
+    el.input.focus();
+    el.input.dispatchEvent(new Event("input"));  // textarea balandligi moslashsin
+  });
+
   // ── start ────────────────────────────────────────────────────────────────
   (async () => {
     updateCtxUI();

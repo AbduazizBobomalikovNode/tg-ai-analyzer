@@ -107,7 +107,22 @@ class _FakeClient:
     async def disconnect(self) -> None: ...
 
     async def send_code_request(self, phone: str) -> Any:
-        return SimpleNamespace(phone_code_hash="h", timeout=30, type=SimpleNamespace(length=5))
+        # `next_type` bor = Telegram resend'ga ruxsat beradi (odatda SMS)
+        return SimpleNamespace(
+            phone_code_hash="h",
+            timeout=30,
+            type=SimpleNamespace(length=5),
+            next_type=SimpleNamespace(),
+        )
+
+    async def __call__(self, request: Any) -> Any:
+        """Xom TL so'rov — `auth.ResendCodeRequest`."""
+        return SimpleNamespace(
+            phone_code_hash="h2",
+            timeout=60,
+            type=SimpleNamespace(length=5),
+            next_type=None,
+        )
 
     async def sign_in(self, *a: Any, **kw: Any) -> Any:
         if "password" in kw:
@@ -315,3 +330,25 @@ def test_content_endpoints_guarded(client: TestClient) -> None:
     assert r.status_code in (403, 422)  # CSRF (403) yoki validatsiya
     r = client.put("/api/accounts/1/chats/2/autoreply", json={"trigger": "nope"}, headers=H)
     assert r.status_code == 422
+
+
+def test_auth_resend_endpoint(client: TestClient) -> None:
+    """`/api/auth/resend` — CSRF talab qiladi va yangi kod holatini qaytaradi."""
+    r = client.post("/api/auth/phone", json={"phone": "+998901234567"}, headers=H)
+    assert r.status_code == 200
+    flow_id = r.json()["flow_id"]
+
+    # CSRF sarlavhasisiz — rad etiladi
+    assert client.post("/api/auth/resend", json={"flow_id": flow_id}).status_code == 403
+
+    r = client.post("/api/auth/resend", json={"flow_id": flow_id}, headers=H)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["flow_id"] == flow_id
+    assert "code_type" in body and "next_type" in body
+
+
+def test_auth_resend_unknown_flow(client: TestClient) -> None:
+    r = client.post("/api/auth/resend", json={"flow_id": "yo-q-bunday-flow"}, headers=H)
+    assert r.status_code == 400
+    assert r.json()["detail"]["code"] == "auth.err.flow_expired"

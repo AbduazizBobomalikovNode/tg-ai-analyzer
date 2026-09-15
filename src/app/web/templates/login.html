@@ -26,7 +26,21 @@
              placeholder="+998 90 123 45 67" required autofocus>
       <small class="hint">{{ t('web.login.phone_hint') }}</small>
       <button type="submit" class="btn primary" id="btn-phone">{{ t('web.login.send_code') }}</button>
+      <div class="or"><span>{{ t('web.login.or') }}</span></div>
+      <button type="button" class="btn full" id="btn-qr">{{ t('web.login.qr_start') }}</button>
     </form>
+
+    <!-- 1b. QR — telefon ham, kod ham kerak emas -->
+    <div id="step-qr" class="step" hidden>
+      <div class="qr-box"><img id="qr-img" alt="{{ t('web.login.qr_alt') }}" width="220" height="220"></div>
+      <ol class="qr-steps">
+        <li>{{ t('web.login.qr_step1') }}</li>
+        <li>{{ t('web.login.qr_step2') }}</li>
+        <li>{{ t('web.login.qr_step3') }}</li>
+      </ol>
+      <small class="hint" id="qr-hint">{{ t('web.login.qr_waiting') }}</small>
+      <button type="button" class="btn link" data-back>{{ t('web.login.back') }}</button>
+    </div>
 
     <!-- 2. kod -->
     <form id="step-code" class="step" hidden autocomplete="off">
@@ -35,6 +49,7 @@
              autocomplete="one-time-code" maxlength="8" placeholder="• • • • •" required>
       <small class="hint" id="code-hint"></small>
       <button type="submit" class="btn primary" id="btn-code">{{ t('web.login.verify') }}</button>
+      <button type="button" class="btn link" id="btn-resend" hidden></button>
       <button type="button" class="btn link" data-back>{{ t('web.login.back') }}</button>
     </form>
 
