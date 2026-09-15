@@ -320,7 +320,14 @@ class _FakeSession:
         self.sql: list[str] = []
 
     async def execute(self, stmt: Any) -> _FakeResult:
-        self.sql.append(str(stmt))
+        sql = str(stmt)
+        # HNSW sozlamasi (`search.tune_hnsw`) — natija qaytarmaydigan bitta
+        # `set_config`. U navbatdan hech narsa yemaydi va hisobga olinmaydi,
+        # aks holda har bir vektor kanalli test bitta bo'sh natija qo'shishga
+        # majbur bo'lardi (test niyati — kanallar soni, sozlama emas).
+        if "set_config('hnsw" in sql:
+            return _FakeResult([])
+        self.sql.append(sql)
         return _FakeResult(self.queue.pop(0) if self.queue else [])
 
 

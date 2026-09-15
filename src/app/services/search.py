@@ -25,7 +25,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import String, and_, func, literal, or_, select
+from sqlalchemy import text as sa_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -73,6 +74,36 @@ DEFAULT_RRF_WEIGHTS: tuple[float, float, float, float] = (W_TSV_UZ, W_TSV_RU, W_
 # uzun xabarda hech qachon oshmasdi; u yo'l olib tashlandi.
 STRICT_TRGM_THRESHOLD = 0.55
 TRGM_THRESHOLD = 0.7  # `strict_word_similarity` yo'q/bo'sh bo'lsa — zaxira yo'l
+
+# `strict_word_similarity(t, col) > 0.55` **funksiya chaqirig'i** — Postgres uni
+# indekslay olmaydi va har qatorda hisoblaydi (107 belgili matnda ≈30 µs, ya'ni
+# 35k xabarli chatda 4 ta so'z uchun ≈4.4 s; o'lchov: architecture-v2 §11.1).
+# pg_trgm ayni shartning **operator** shaklini beradi va u GIN bilan bajariladi:
+#   `t <<% col`  ≡  strict_word_similarity(t, col) > pg_trgm.strict_word_similarity_threshold (0.5)
+#   `t <% col`   ≡  word_similarity(t, col)        > pg_trgm.word_similarity_threshold (0.6)
+# Ikkala sukut ostona ham bizning ostonadan **past**, ya'ni operator — aniq
+# shartning nadto'plami: u indeks orqali nomzodlarni beradi, aniq `>` esa
+# ularni qirqadi. Natija bir xil, ish esa indeksda qoladi.
+STRICT_TRGM_OP = "<<%"
+TRGM_OP = "<%"
+#: Ball hisoblanadigan nomzodlar qopqog'i. Operator bilan ham gapiradigan
+#: chatda nomzod ko'p bo'lishi mumkin; ball esa har nomzodda yana bir marta
+#: `strict_word_similarity` degani. Qopqoqsiz kanal chat hajmi bilan chiziqli
+#: o'sadi. Nomzodlarning **hammasi** allaqachon 0.5 ostonadan yuqori, shuning
+#: uchun kesilgan dum — "eng yomon" emas, "yana bir xil darajadagi" qatorlar.
+TRGM_CANDIDATE_CAP = 2_000
+
+#: HNSW indeksi `chat_id` filtri haqida hech narsa bilmaydi: sukut bo'yicha u
+#: `ef_search` tagacha nomzod qaytaradi va ular **keyin** filtrlanadi. O'lchovda
+#: (300k xabar, 35k'lik chat) bu `LIMIT 40` ga 33 qator qaytardi — kichikroq
+#: chatda esa deyarli hech narsa qolmasdi. `iterative_scan` (pgvector ≥0.8)
+#: indeksni yetarli qator topilguncha davom ettiradi.
+HNSW_EF_SEARCH = 100
+HNSW_ITERATIVE_SCAN = "relaxed_order"
+_HNSW_TUNE_SQL = sa_text(
+    f"SELECT set_config('hnsw.ef_search', '{HNSW_EF_SEARCH}', true), "
+    f"set_config('hnsw.iterative_scan', '{HNSW_ITERATIVE_SCAN}', true)"
+)
 
 _URL_RE = re.compile(r"https?://\S+")
 _CYRILLIC_RE = re.compile(r"[Ѐ-ӿ]")
@@ -290,9 +321,10 @@ async def trigram_search(
         session,
         col,
         fn=func.strict_word_similarity,
+        op=STRICT_TRGM_OP,
         threshold=STRICT_TRGM_THRESHOLD,
         terms=folded,
-        chat_id=chat_id,
+        conds=[Message.chat_id == chat_id, *_alive()],
         limit=limit,
     )
     if hits:
@@ -303,10 +335,54 @@ async def trigram_search(
         session,
         col,
         fn=func.word_similarity,
+        op=TRGM_OP,
         threshold=TRGM_THRESHOLD,
         terms=folded,
-        chat_id=chat_id,
+        conds=[Message.chat_id == chat_id, *_alive()],
         limit=limit,
+    )
+
+
+def _trgm_candidates(op: str, col: Any, terms: Sequence[str]) -> Any:
+    """`t <<% col OR \u2026` \u2014 pg_trgm operatorlari (GIN bilan bajariladi)."""
+    preds = [literal(t, String).bool_op(op)(col) for t in terms]
+    return preds[0] if len(preds) == 1 else or_(*preds)
+
+
+def _trgm_stmt(
+    col: Any,
+    *,
+    fn: Any,
+    op: str,
+    threshold: float,
+    terms: Sequence[str],
+    conds: Sequence[Any],
+    limit: int,
+    with_chat: bool = False,
+    join: Any = None,
+) -> Any:
+    """Ikki qavatli trigram so'rovi: indeksli nomzodlar \u2192 ball \u2192 tartib.
+
+    Ichki qavat faqat **operator** bilan ishlaydi (GIN), `TRGM_CANDIDATE_CAP`
+    bilan chegaralangan. Tashqi qavat aynan shu nomzodlarda
+    `strict_word_similarity` ni hisoblaydi va aniq ostona bilan qirqadi.
+    Ilgari ikkalasi bitta qavatda edi \u2014 funksiya chat/akkauntdagi **har**
+    qatorda hisoblanardi.
+    """
+    cols = [Message.id.label("id"), Message.tg_msg_id.label("tg_msg_id")]
+    if with_chat:
+        cols.append(Message.chat_id.label("chat_id"))
+    inner = select(*cols, col.label("fold")).where(*conds, _trgm_candidates(op, col, terms))
+    if join is not None:
+        inner = inner.join(join[0], join[1])
+    sub = inner.limit(TRGM_CANDIDATE_CAP).subquery("trgm_cand")
+    sims = [fn(t, sub.c.fold) for t in terms]
+    expr = sims[0] if len(sims) == 1 else func.greatest(*sims)
+    out = [sub.c.id, sub.c.tg_msg_id]
+    if with_chat:
+        out.append(sub.c.chat_id)
+    return (
+        select(*out, expr.label("score")).where(expr > threshold).order_by(expr.desc()).limit(limit)
     )
 
 
@@ -315,23 +391,16 @@ async def _run_trgm(
     col: Any,
     *,
     fn: Any,
+    op: str,
     threshold: float,
     terms: Sequence[str],
-    chat_id: int,
+    conds: Sequence[Any],
     limit: int,
 ) -> list[Hit]:
-    sims = [fn(t, col) for t in terms]
-    expr = sims[0] if len(sims) == 1 else func.greatest(*sims)
-    score = expr.label("score")
-    stmt = (
-        select(Message.id, Message.tg_msg_id, score)
-        .where(Message.chat_id == chat_id, *_alive(), expr > threshold)
-        .order_by(score.desc())
-        .limit(limit)
-    )
+    stmt = _trgm_stmt(col, fn=fn, op=op, threshold=threshold, terms=terms, conds=conds, limit=limit)
     try:
         rows = (await session.execute(stmt)).all()
-    except Exception as exc:  # funksiya yo'q bo'lsa \u2014 kanal jimgina bo'sh
+    except Exception as exc:  # funksiya/operator yo'q bo'lsa \u2014 kanal jimgina bo'sh
         log.warning("search.trigram_failed", error=str(exc)[:200])
         return []
     return [Hit(int(r[0]), int(r[1]), float(r[2] or 0), "trigram") for r in rows]
@@ -375,6 +444,7 @@ async def vector_search(
         log.warning("search.embed_failed", error=str(exc)[:200])
         return []
     qvec = emb.vectors[0]
+    await tune_hnsw(session)
     dist = MessageEmbedding.vector.cosine_distance(qvec).label("dist")
     stmt = (
         select(Message.id, Message.tg_msg_id, dist)
@@ -588,15 +658,16 @@ async def _trigram_multi(
     folded = fold_terms(terms)[:4]
     if col is None or not folded:
         return []
-    sims = [func.strict_word_similarity(t, col) for t in folded]
-    expr = sims[0] if len(sims) == 1 else func.greatest(*sims)
-    score = expr.label("score")
-    stmt = (
-        select(Message.id, Message.tg_msg_id, Message.chat_id, score)
-        .join(Chat, Chat.id == Message.chat_id)
-        .where(*conds, *_alive(), expr > STRICT_TRGM_THRESHOLD)
-        .order_by(score.desc())
-        .limit(limit)
+    stmt = _trgm_stmt(
+        col,
+        fn=func.strict_word_similarity,
+        op=STRICT_TRGM_OP,
+        threshold=STRICT_TRGM_THRESHOLD,
+        terms=folded,
+        conds=[*conds, *_alive()],
+        limit=limit,
+        with_chat=True,
+        join=(Chat, Chat.id == Message.chat_id),
     )
     try:
         rows = (await session.execute(stmt)).all()
@@ -609,6 +680,7 @@ async def _trigram_multi(
 async def _vector_multi(
     session: AsyncSession, qvec: Sequence[float], *, conds: Sequence[Any], limit: int
 ) -> list[Hit]:
+    await tune_hnsw(session)
     dist = MessageEmbedding.vector.cosine_distance(list(qvec)).label("dist")
     stmt = (
         select(Message.id, Message.tg_msg_id, Message.chat_id, dist)
@@ -622,6 +694,20 @@ async def _vector_multi(
     return [
         Hit(int(r[0]), int(r[1]), 1.0 - float(r[3] or 0), "vector", chat_id=int(r[2])) for r in rows
     ]
+
+
+async def tune_hnsw(session: AsyncSession) -> None:
+    """Vektor kanalidan **oldin** HNSW skanini filtr bilan ishlashga sozlaydi.
+
+    `SET LOCAL` (bu yerda `set_config(..., true)` — bitta statement, bitta
+    round trip) tranzaksiya oxirida o'zi qaytadi, ya'ni boshqa so'rovlarga
+    ta'sir qilmaydi. Xato bo'lsa (pgvector <0.8, GUC yo'q) kanal baribir
+    ishlaydi — faqat eski, kam qamrovli xatti-harakat bilan.
+    """
+    try:
+        await session.execute(_HNSW_TUNE_SQL)
+    except Exception as exc:
+        log.debug("search.hnsw_tune_failed", error=str(exc)[:200])
 
 
 async def _query_vector(question: str, llm: LLM | None) -> list[float] | None:
@@ -765,6 +851,7 @@ async def node_search(
 
     vec: list[NodeHit] = []
     if qvec is not None:
+        await tune_hnsw(session)
         dist = RetrievalNodeEmbedding.vector.cosine_distance(qvec).label("dist")
         rows = (
             await session.execute(
@@ -1459,7 +1546,9 @@ __all__ = [
     "DEFAULT_MULTI_RRF_WEIGHTS",
     "DEFAULT_RRF_WEIGHTS",
     "ENTITY_MULTI_RRF_WEIGHTS",
+    "HNSW_EF_SEARCH",
     "STRICT_TRGM_THRESHOLD",
+    "TRGM_CANDIDATE_CAP",
     "TRGM_THRESHOLD",
     "ContextBundle",
     "Hit",
@@ -1489,5 +1578,6 @@ __all__ = [
     "search_context",
     "select_context",
     "trigram_search",
+    "tune_hnsw",
     "vector_search",
 ]

@@ -28,7 +28,9 @@ import hashlib
 import json
 import math
 import re
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
+from operator import mul as _mul
 from typing import TYPE_CHECKING, Any
 
 from app.llm import LLM, LLMError, Msg, Task
@@ -101,12 +103,46 @@ hamming = hamming64  # `textnorm` bilan yagona amalga oshirish
 def cosine(a: list[float], b: list[float]) -> float:
     if not a or not b or len(a) != len(b):
         return 0.0
-    dot = sum(x * y for x, y in zip(a, b, strict=True))
-    na = math.sqrt(sum(x * x for x in a))
-    nb = math.sqrt(sum(y * y for y in b))
+    ab = dot(a, b)
+    na = math.sqrt(dot(a, a))
+    nb = math.sqrt(dot(b, b))
     if na == 0.0 or nb == 0.0:
         return 0.0
-    return dot / (na * nb)
+    return ab / (na * nb)
+
+
+def unit(vec: Sequence[float]) -> list[float]:
+    """Vektorni birlik uzunlikka keltiradi; nol vektor — bo'sh ro'yxat.
+
+    Normallashtirilgan vektorlarda cosine **oddiy skalyar ko'paytma**, ya'ni
+    juftlik uchun uch o'tish o'rniga bitta. 400 ta 768-o'lchovli vektorda bu
+    farq sezilarli: `dedup`/`cluster_topics` 80k juftlikni ko'radi (o'lchov
+    `docs/architecture-v2.md` §11.1).
+    """
+    n = math.sqrt(dot(vec, vec))
+    return [x / n for x in vec] if n else []
+
+
+def unit_map(vectors: dict[int, list[float]], ids: Iterable[int]) -> dict[int, list[float]]:
+    """`{message_id: birlik vektor}` — faqat bir marta, kerakli id'lar uchun."""
+    out: dict[int, list[float]] = {}
+    for mid in ids:
+        vec = vectors.get(mid)
+        if not vec:
+            continue
+        u = unit(vec)
+        if u:
+            out[mid] = u
+    return out
+
+
+def dot(a: Sequence[float], b: Sequence[float]) -> float:
+    """Skalyar ko'paytma — birlik vektorlar uchun bu aynan cosine.
+
+    `map(operator.mul, …)` ataylab: generator ifodasiga nisbatan sezilarli
+    tezroq, chunki sikl C tomonda qoladi (numpy loyihaning bog'liqligi emas).
+    """
+    return float(sum(map(_mul, a, b)))
 
 
 def _absorb(keeper: Hit, dup: Hit) -> None:
@@ -170,20 +206,21 @@ def dedup_cosine(
     *,
     threshold: float = COSINE_DUP_THRESHOLD,
 ) -> list[Hit]:
+    # Normallashtirish **bir marta**: ilgari har juftlikda ikkala vektorning
+    # normi qayta hisoblanardi (juftlikka uch o'tish o'rniga bitta).
+    units = unit_map(vectors, (h.message_id for h in hits))
     kept: list[Hit] = []
+    #: Faqat vektori bor vakillar — taqqoslash shular bilan yuradi.
+    reps: list[tuple[Hit, list[float]]] = []
     for h in hits:
-        vec = vectors.get(h.message_id)
+        vec = units.get(h.message_id)
         if not vec:
             kept.append(h)
             continue
-        dup = None
-        for k in kept:
-            kv = vectors.get(k.message_id)
-            if kv and cosine(vec, kv) >= threshold:
-                dup = k
-                break
+        dup = next((k for k, kv in reps if dot(vec, kv) >= threshold), None)
         if dup is None:
             kept.append(h)
+            reps.append((h, vec))
         else:
             _absorb(dup, h)
     return kept
@@ -213,11 +250,16 @@ def cluster_topics(
 
     groups: list[list[int]] = [[i] for i in range(len(with_vec))]
     vecs = [vectors[h.message_id] for h in with_vec]
-    # juftlik masofalari bir marta hisoblanadi, birlashtirish o'rtachani yangilaydi
+    # Juftlik masofalari bir marta hisoblanadi, birlashtirish o'rtachani
+    # yangilaydi. Vektorlar avval **birlik** uzunlikka keltiriladi — shundan
+    # keyin cosine bitta skalyar ko'paytma (§11.1 o'lchovi: 400 hit uchun
+    # 5.5 s → 0.9 s).
+    units = [unit(v) for v in vecs]
     dist: dict[tuple[int, int], float] = {}
-    for i in range(len(vecs)):
-        for j in range(i + 1, len(vecs)):
-            dist[(i, j)] = 1.0 - cosine(vecs[i], vecs[j])
+    for i in range(len(units)):
+        ui = units[i]
+        for j in range(i + 1, len(units)):
+            dist[(i, j)] = 1.0 - dot(ui, units[j])
 
     def pair(a: int, b: int) -> float:
         return dist[(a, b)] if a < b else dist[(b, a)]
@@ -348,10 +390,13 @@ __all__ = [
     "dedup_cosine",
     "dedup_exact",
     "dedup_simhash",
+    "dot",
     "hamming",
     "label_clusters",
     "normalize",
     "parse_labels",
     "sanitize_label",
     "text_sha1",
+    "unit",
+    "unit_map",
 ]
