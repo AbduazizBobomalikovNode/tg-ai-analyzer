@@ -19,11 +19,20 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from sqlalchemy import select
 from telethon import errors as tg_errors
-from telethon.tl.types import Channel, Chat, User
+from telethon.tl.types import (
+    Channel,
+    Chat,
+    InputPeerChannel,
+    InputPeerChat,
+    InputPeerUser,
+    User,
+)
 
 from app.db.base import session_scope
-from app.db.models import Account, AccountStatus
+from app.db.models import Account, AccountStatus, ChatType
+from app.db.models import Chat as DbChat
 from app.logging import get_logger
 from app.mtproto.client import GuardedTelegramClient, build_client
 from app.services.session_store import load_session, revoke_session
@@ -31,6 +40,7 @@ from app.services.session_store import load_session, revoke_session
 log = get_logger(__name__)
 
 DIALOGS_TTL = 60.0  # soniya
+DIALOGS_LIMIT = 200  # `ingestion.refresh_chats` ham shu qiymatni ishlatadi (bitta manba)
 
 
 class PoolError(RuntimeError):
@@ -177,10 +187,24 @@ class ClientPool:
             return out
 
     async def input_peer(self, account_id: int, peer_id: int) -> Any:
-        """Peer'ning InputPeer'i (dialog keshidan; kerak bo'lsa yangilaydi)."""
+        """Peer'ning InputPeer'i.
+
+        Tartib: (1) xotira keshi, (2) `chats` jadvalidagi `access_hash`
+        (ingestion 200 dialogni yozadi — dialog keshi esa faqat oxirgi
+        `DIALOGS_LIMIT` tasini ko'radi), (3) `GetDialogs` bilan yangilash.
+        Hammasi o'qish; yangi TL metod yo'q.
+        """
         entry = await self._entry(account_id)
-        if peer_id not in entry.input_peers:
-            await self.dialogs(account_id, force=True)
+        peer = entry.input_peers.get(peer_id)
+        if peer is not None:
+            return peer
+
+        peer = await _input_peer_from_db(account_id, peer_id)
+        if peer is not None:
+            entry.input_peers[peer_id] = peer
+            return peer
+
+        await self.dialogs(account_id, limit=DIALOGS_LIMIT, force=True)
         peer = entry.input_peers.get(peer_id)
         if peer is None:
             raise PoolError("no_dialog", str(peer_id))
@@ -220,6 +244,39 @@ class ClientPool:
                 )
             )
         return entry.titles.get(peer_id, str(peer_id)), out
+
+
+def input_peer_from_row(row: Any) -> Any | None:
+    """`chats` yozuvidan InputPeer — tur + `tg_peer_id` + `access_hash`.
+
+    Peer turi TL turini belgilaydi: kanal/supergruh → `InputPeerChannel`,
+    oddiy guruh → `InputPeerChat` (access_hash kerak emas), shaxsiy →
+    `InputPeerUser`. Ma'lumot yetmasa `None` — chaqiruvchi dialoglarga tushadi.
+    """
+    peer_id = int(getattr(row, "tg_peer_id", 0) or 0)
+    if not peer_id:
+        return None
+    kind = str(getattr(row, "type", "") or "")
+    if kind == ChatType.GROUP:
+        return InputPeerChat(chat_id=peer_id)
+    access_hash = getattr(row, "access_hash", None)
+    if access_hash is None:
+        return None
+    if kind in (ChatType.CHANNEL, ChatType.SUPERGROUP):
+        return InputPeerChannel(channel_id=peer_id, access_hash=int(access_hash))
+    if kind == ChatType.PRIVATE:
+        return InputPeerUser(user_id=peer_id, access_hash=int(access_hash))
+    return None
+
+
+async def _input_peer_from_db(account_id: int, peer_id: int) -> Any | None:
+    async with session_scope() as db:
+        row = (
+            await db.execute(
+                select(DbChat).where(DbChat.account_id == account_id, DbChat.tg_peer_id == peer_id)
+            )
+        ).scalar_one_or_none()
+    return None if row is None else input_peer_from_row(row)
 
 
 def _title_of(ent: Any) -> str:

@@ -12,7 +12,9 @@ Xavfsizlik: faqat `tools.READ_TOOLS`; har natija `<untrusted_data>`; har chaqiru
 
 from __future__ import annotations
 
+import json
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -33,6 +35,11 @@ log = get_logger(__name__)
 
 MAX_CALLS_PER_TURN = 4
 FINAL_MAX_TOKENS = 3000
+# Bitta tool bir yugurishda shuncha marta chaqirilishi mumkin. O'lchov ko'rsatdi:
+# model qoniqmasa `search_messages` ni boshqa so'zlar bilan 4 martagacha
+# takrorlaydi va so'rov narxini ikki barobar oshiradi. Prompt ("adjust once")
+# buni to'xtatmadi — shuning uchun kod darajasidagi qopqoq.
+MAX_CALLS_PER_TOOL = 3
 
 
 @dataclass(slots=True)
@@ -49,6 +56,17 @@ class AgentOutcome:
     run_id: int | None = None
     result_tokens: int = 0  # tool natijalari (taxminiy)
     action_ids: list[int] = field(default_factory=list)  # taklif/bajarilgan yozish amallari
+
+
+async def _mark_failed(
+    session: AsyncSession, run: AgentRun, exc: Exception, *, tokens_in: int, tokens_out: int
+) -> None:
+    """LLM uzilganda run yarim bo'sh qolmasin — xato va tugash vaqti yoziladi."""
+    run.error = f"{type(exc).__name__}: {str(exc)[:400]}"[:500]
+    run.tokens_in = tokens_in
+    run.tokens_out = tokens_out
+    run.finished_at = datetime.now(UTC)
+    await session.flush()
 
 
 async def run_agent(
@@ -85,10 +103,19 @@ async def run_agent(
         llm=client,
         user_id=user_id,
     )
+    # Chat ro'yxati user turn'ida beriladi — system'da emas (kesh buzilmasin).
+    # Shu tufayli agent `list_chats` chaqirmasdan chat nomini aniqlaydi.
     note = runtime_note(
         now_iso=datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC"),
         locale=locale,
         pinned_chat=pinned_chat.title if pinned_chat else None,
+        chats=await T.chat_index(
+            session,
+            account_id,
+            pinned_chat_id=pinned_chat.id if pinned_chat else None,
+            limit=T.CHAT_INDEX_LIMIT,
+            compact=True,
+        ),
     )
     messages: list[Msg] = [
         Msg.system(AGENT_SYSTEM_PROMPT),
@@ -103,6 +130,8 @@ async def run_agent(
 
     tokens_in = tokens_out = 0
     used_result_tokens = 0
+    seen_calls: set[tuple[str, str]] = set()  # (tool, args) — takrorni to'sish
+    per_tool: Counter[str] = Counter()
     calls_log: list[dict[str, Any]] = []
     model = provider = ""
     final_text = ""
@@ -121,6 +150,7 @@ async def run_agent(
             )
         except LLMError as exc:
             log.warning("agent.llm_failed", run_id=run.id, iteration=it, error=str(exc)[:200])
+            await _mark_failed(session, run, exc, tokens_in=tokens_in, tokens_out=tokens_out)
             raise
         tokens_in += res.usage.tokens_in
         tokens_out += res.usage.tokens_out
@@ -134,7 +164,21 @@ async def run_agent(
         messages.append(Msg.assistant(res.text, res.tool_calls))
         for call in res.tool_calls[:MAX_CALLS_PER_TURN]:
             t0 = time.monotonic()
-            if call.name in W.WRITE_TOOL_NAMES:
+            # ── takroriy chaqiruvlar qopqog'i ──────────────────────────────
+            # Aynan bir xil (tool, args) — natija o'zgarmaydi, qayta bajarish
+            # DB/MTProto ishini ham, tokenni ham behuda sarflaydi.
+            sig = (call.name, json.dumps(call.arguments, sort_keys=True, default=str))
+            if sig in seen_calls:
+                result = T.ToolResult(
+                    "note: identical call already made in this run — use that result", ok=False
+                )
+            elif per_tool[call.name] >= MAX_CALLS_PER_TOOL:
+                result = T.ToolResult(
+                    f"note: {call.name} was already called {MAX_CALLS_PER_TOOL} times; "
+                    "answer with what you have or try a different tool",
+                    ok=False,
+                )
+            elif call.name in W.WRITE_TOOL_NAMES:
                 if not write_enabled:
                     result = T.ToolResult("error: writing is disabled for this account", ok=False)
                 else:
@@ -144,7 +188,9 @@ async def run_agent(
                 if result.meta.get("action_id"):
                     action_ids.append(int(result.meta["action_id"]))
             else:
+                per_tool[call.name] += 1
                 result = await T.run_tool(call.name, ctx, call.arguments)
+            seen_calls.add(sig)
             text = result.text
             # umumiy byudjet — oshsa keskin qisqartiramiz
             cost = est_tokens(text)
@@ -205,7 +251,14 @@ async def run_agent(
     if not final_text:
         # sikl tool bilan tugadi — tool'siz yakuniy chaqiruv
         messages.append(Msg.user("Answer now with the data you already have; do not call tools."))
-        res = await client.chat(Task.TOOLS, messages, tools=None, max_tokens=FINAL_MAX_TOKENS)
+        try:
+            res = await client.chat(Task.TOOLS, messages, tools=None, max_tokens=FINAL_MAX_TOKENS)
+        except LLMError as exc:
+            log.warning(
+                "agent.llm_failed", run_id=run.id, iteration=iterations, error=str(exc)[:200]
+            )
+            await _mark_failed(session, run, exc, tokens_in=tokens_in, tokens_out=tokens_out)
+            raise
         tokens_in += res.usage.tokens_in
         tokens_out += res.usage.tokens_out
         model, provider, finish = res.model, res.provider, res.finish_reason

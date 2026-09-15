@@ -175,11 +175,21 @@ async def embed_messages(ctx: dict[str, Any], limit: int | None = None) -> dict[
         except LLMError as exc:
             log.warning("worker.embed_failed", error=str(exc)[:200], batch=i // EMBED_BATCH)
             break
+        if len(res.vectors) != len(chunk):
+            # Moslik buzilsa vektorlar boshqa xabarga yozilib qolardi — batch tashlanadi.
+            log.error(
+                "worker.embed_misaligned",
+                batch=i // EMBED_BATCH,
+                expected=len(chunk),
+                got=len(res.vectors),
+                model=res.model,
+            )
+            continue
         async with session_scope() as db:
             db.add_all(
                 [
                     MessageEmbedding(message_id=int(mid), model=res.model, vector=vec)
-                    for (mid, _), vec in zip(chunk, res.vectors, strict=False)
+                    for (mid, _), vec in zip(chunk, res.vectors, strict=True)
                 ]
             )
         done += len(chunk)
