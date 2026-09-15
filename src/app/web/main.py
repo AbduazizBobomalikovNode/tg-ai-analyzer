@@ -15,6 +15,7 @@ klientini ushlaydi) → `api` servisi **bitta uvicorn worker** bilan ishlaydi.
 
 from __future__ import annotations
 
+import hmac
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -23,7 +24,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from app.config import get_settings
+from app.config import embed_dims_mismatch, get_settings
 from app.logging import get_logger, setup_logging
 from app.observability import http_middleware, init_sentry, metrics_payload
 from app.services.auth_flow import AuthFlowStore
@@ -49,6 +50,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.auth_flows = AuthFlowStore()
     app.state.auth_limiter = RateLimiter(s.web_auth_rate_per_ip, 600)
     init_sentry("api")
+    # L10: noto'g'ri `EMBED_DIMS` bilan jarayon baribir ko'tariladi (o'qish
+    # yo'llari ishlaydi), lekin embedding yozuvi butunlay yiqiladi — startupda
+    # bir marta ogohlantiramiz.
+    dims_error = embed_dims_mismatch(s)
+    if dims_error:
+        log.warning("web.embed_dims_mismatch", error=dims_error)
     log.info("web.start", env=s.env, secure_cookies=s.web_secure_cookies, version=s.app_version)
     try:
         yield
@@ -88,13 +95,20 @@ def create_app() -> FastAPI:
     async def health() -> dict[str, str]:
         return {"status": "ok", "env": s.env, "version": s.app_version}
 
+    @app.get("/healthz", include_in_schema=False)
+    async def healthz() -> dict[str, bool]:
+        """Konteyner HEALTHCHECK uchun — auth yo'q, hech qanday ma'lumot bermaydi."""
+        return {"ok": True}
+
     @app.get("/metrics", include_in_schema=False)
     async def metrics(request: Request) -> Response:
         # Prometheus scrape. METRICS_TOKEN bo'lsa — talab qilinadi (ochiq internetda qoldirmang).
         if s.metrics_token:
             auth = request.headers.get("authorization", "")
             token = request.query_params.get("token") or auth.removeprefix("Bearer ").strip()
-            if token != s.metrics_token:
+            # Doimiy vaqtli taqqoslash — oddiy `!=` tokenni belgima-belgi
+            # tiklash uchun vaqt kanalini ochadi.
+            if not hmac.compare_digest(token.encode(), s.metrics_token.encode()):
                 raise HTTPException(status_code=401)
         body, ctype = metrics_payload()
         return Response(content=body, media_type=ctype)

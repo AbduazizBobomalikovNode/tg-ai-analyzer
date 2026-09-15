@@ -19,6 +19,12 @@ PRICES: dict[str, tuple[float, float]] = {
     "gemini-2.5-flash": (0.30, 2.50),
     "gemini-2.5-flash-lite": (0.10, 0.40),
     "gemini-embedding-001": (0.15, 0.0),
+    # Rasm generatsiya. Gemini narxni **rasm boshiga** e'lon qiladi, bizning
+    # jadval esa token bo'yicha — shuning uchun output tokeni sifatida
+    # e'lon qilingan "rasm = 1290 output token" ekvivalenti ishlatiladi:
+    # $30/1M * 1290 = ~$0.039 / rasm. Matn kiritish oddiy flash narxida.
+    # `services/images.py` shu taxmin bilan `IMAGE_OUTPUT_TOKENS` yozadi.
+    "gemini-2.5-flash-image": (0.30, 30.0),
     # phase4/B — `gemini-embedding-2` uchun **taxmin** (arxitektura hujjatidagi
     # $0.20/M input; batch yarmi — `BATCH_PRICES`). Narx e'lon qilinganda
     # yangilang. MUHIM: kalit — API javobidagi **qaytgan** model nomi bo'lishi

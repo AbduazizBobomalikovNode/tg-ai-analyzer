@@ -65,17 +65,17 @@ def _render(request: Request, name: str, **extra: Any) -> HTMLResponse:
 
 @router.get("/", response_class=HTMLResponse)
 async def index(request: Request) -> Any:
-    return RedirectResponse("/chat" if identity_of(request) else "/login", status_code=302)
+    return RedirectResponse("/chat" if await identity_of(request) else "/login", status_code=302)
 
 
 @router.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request) -> Any:
-    return _render(request, "login.html", logged_in=identity_of(request) is not None)
+    return _render(request, "login.html", logged_in=await identity_of(request) is not None)
 
 
 @router.get("/chat", response_class=HTMLResponse)
 async def chat_page(request: Request) -> Any:
-    if identity_of(request) is None:
+    if await identity_of(request) is None:
         return RedirectResponse("/login", status_code=302)
     s = get_settings()
     return _render(
@@ -88,7 +88,7 @@ async def chat_page(request: Request) -> Any:
 
 @router.get("/dashboard", response_class=HTMLResponse)
 async def dashboard_page(request: Request) -> Any:
-    if identity_of(request) is None:
+    if await identity_of(request) is None:
         return RedirectResponse("/login", status_code=302)
     return _render(request, "dashboard.html")
 
@@ -99,7 +99,7 @@ async def dashboard_page(request: Request) -> Any:
 @router.get("/briefings", response_class=HTMLResponse)
 @router.get("/briefings/{day}", response_class=HTMLResponse)
 async def briefings_page(request: Request, day: str = "") -> Any:
-    if identity_of(request) is None:
+    if await identity_of(request) is None:
         return RedirectResponse("/login", status_code=302)
     # `day` faqat sahifa qobig'iga beriladi; ma'lumot /api/briefings dan keladi
     # va u yerda egalik tekshiriladi.

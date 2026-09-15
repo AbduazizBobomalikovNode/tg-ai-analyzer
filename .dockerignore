@@ -1,0 +1,29 @@
+# Konteyner konteksti — sir ham, ballast ham kirmasin.
+# MUHIM: `.env*` hech qachon image'ga tushmaydi (master key, session, tokenlar).
+.env
+.env.*
+*.env
+
+.git
+.gitignore
+.github
+
+data/
+tests/
+evals/runs/
+scratchpad/
+
+.venv
+venv
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+docs/
+*.md
+!README.md
+docker-compose*.yml
+Dockerfile
+.dockerignore

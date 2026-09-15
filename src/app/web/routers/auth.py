@@ -24,13 +24,16 @@ from app.logging import get_logger
 from app.services.accounts import link_account, list_accounts
 from app.services.auth_flow import AuthError, AuthFlowStore, FlowStatus
 from app.web.security import (
+    SESSION_COOKIE,
     RateLimiter,
     WebIdentity,
     clear_session_cookie,
     client_ip,
     identity_of,
+    read_session,
     require_csrf,
     require_identity,
+    revoke_sessions,
     set_session_cookie,
 )
 
@@ -86,7 +89,7 @@ def _auth_http(exc: AuthError) -> HTTPException:
 async def auth_phone(body: PhoneIn, request: Request) -> dict[str, Any]:
     if not limiter(request).check(client_ip(request)):
         raise HTTPException(status_code=429, detail={"code": "auth.err.rate_limited"})
-    ident = identity_of(request)
+    ident = await identity_of(request)
     try:
         flow = await flows(request).start(
             body.phone, owner_user_id=ident.user_id if ident else None
@@ -146,10 +149,36 @@ def _qr_data_uri(url: str) -> str:
     return f"data:image/svg+xml;base64,{b64}"
 
 
+# Oqim bo'yicha oxirgi chizilgan QR: `{flow_id: (qr_url, data_uri)}`.
+# Frontend har 2 soniyada `/auth/qr/poll` so'raydi, token esa ~1 daqiqada bir
+# marta yangilanadi — keshsiz har poll'da SVG qaytadan chizilardi (CPU va
+# ~10 KB base64 behuda). Kesh jarayon xotirasida, `AuthFlowStore` kabi
+# (`api` bitta uvicorn worker).
+_QR_CACHE: dict[str, tuple[str, str]] = {}
+_QR_CACHE_MAX = 64
+
+
+def qr_data_uri_cached(flow_id: str, url: str) -> str:
+    cached = _QR_CACHE.get(flow_id)
+    if cached is not None and cached[0] == url:
+        return cached[1]
+    if len(_QR_CACHE) >= _QR_CACHE_MAX:  # oqim bekor qilinmay qolsa ham o'smasin
+        _QR_CACHE.clear()
+    uri = _qr_data_uri(url)
+    _QR_CACHE[flow_id] = (url, uri)
+    return uri
+
+
+def _qr_forget(flow_id: str) -> None:
+    _QR_CACHE.pop(flow_id, None)
+
+
 def _qr_out(flow: Any) -> dict[str, Any]:
     out = _flow_out(flow)
     if flow.status is FlowStatus.QR_PENDING and flow.qr_url:
-        out["qr"] = _qr_data_uri(flow.qr_url)
+        out["qr"] = qr_data_uri_cached(flow.id, flow.qr_url)
+    else:
+        _qr_forget(flow.id)
     if flow.error:
         out["error"] = flow.error
     return out
@@ -160,7 +189,7 @@ async def auth_qr(request: Request) -> dict[str, Any]:
     """QR login boshlash — telefon ham, kod ham kerak emas."""
     if not limiter(request).check(client_ip(request)):
         raise HTTPException(status_code=429, detail={"code": "auth.err.rate_limited"})
-    ident = identity_of(request)
+    ident = await identity_of(request)
     try:
         flow = await flows(request).start_qr(owner_user_id=ident.user_id if ident else None)
     except AuthError as exc:
@@ -219,13 +248,23 @@ async def auth_password(body: PasswordIn, request: Request, response: Response) 
 @router.post("/auth/cancel", dependencies=[Depends(require_csrf)])
 async def auth_cancel(body: FlowIn, request: Request) -> dict[str, str]:
     await flows(request).cancel(body.flow_id)
+    _qr_forget(body.flow_id)
     return {"status": "cancelled"}
 
 
 @router.post("/auth/logout", dependencies=[Depends(require_csrf)])
-async def auth_logout(response: Response) -> dict[str, str]:
+async def auth_logout(request: Request, response: Response) -> dict[str, str]:
+    """Cookie'ni o'chiradi **va** server tomonda bekor qiladi.
+
+    Faqat cookie'ni o'chirish yetarli emas: nusxa olingan (o'g'irlangan) cookie
+    14 kun davomida amal qilardi. Redis'dagi `web:sess:revoked:<uid>` chegarasi
+    shu daqiqagacha berilgan hamma cookie'ni rad etadi. Redis yo'q bo'lsa
+    `revoked=false` qaytadi — fail-open, `security.is_revoked` hujjatiga qarang.
+    """
+    ident = read_session(request.cookies.get(SESSION_COOKIE))
     clear_session_cookie(response)
-    return {"status": "ok"}
+    revoked = await revoke_sessions(ident.user_id) if ident else False
+    return {"status": "ok", "revoked": "true" if revoked else "false"}
 
 
 @router.get("/me")

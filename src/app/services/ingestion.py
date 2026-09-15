@@ -601,6 +601,16 @@ async def _pull(
 ) -> int:
     """Telethon iteratori orqali batch'lab tortadi va yozadi. Qaytaradi: nechta xabar."""
     fetched = 0
+    # `synced_total` uchun yuguruvchi hisoblagich: ilgari har 100 xabarda
+    # butun chat bo'yicha `COUNT(*)` yugurardi (million qatorli chatda har
+    # batch = to'liq skan). Bir marta o'qiymiz, keyin upsert natijasini
+    # qo'shib boramiz (upsert — taxmin: mavjud qator qayta hisoblanadi, lekin
+    # bu faqat progress ko'rsatkichi; `_finish` da aniqlanmaydi ham).
+    # bir marta o'qiymiz, keyin har batchda upsert natijasini qo'shamiz.
+    # Qayta sinxronlashda upsert mavjud qatorni ham sanaydi, ya'ni raqam
+    # biroz oshib ketishi mumkin — u faqat progress ko'rsatkichi va keyingi
+    # sync boshidagi COUNT uni to'g'irlaydi.
+    counter = await _message_count(chat_id)
     batch: list[dict[str, Any]] = []
     # phase4/A: `mention_name` faqat Telegram entity'laridan olinadi — matn
     # bilan birga batch'gacha olib boriladi (`messages` da saqlanmaydi).
@@ -622,22 +632,52 @@ async def _pull(
         report.newest_id = max(report.newest_id or 0, int(m.id))
         report.oldest_id = min(report.oldest_id or int(m.id), int(m.id))
         if len(batch) >= BATCH:
-            report.inserted_or_updated += await upsert_messages(batch, tg_entities=batch_entities)
-            await _progress(chat_id, report, total_estimate)
+            written = await upsert_messages(batch, tg_entities=batch_entities)
+            report.inserted_or_updated += written
+            counter += written
+            await _progress(chat_id, report, total_estimate, synced_total=counter)
             batch = []
             batch_entities = {}
     if batch:
-        report.inserted_or_updated += await upsert_messages(batch, tg_entities=batch_entities)
+        written = await upsert_messages(batch, tg_entities=batch_entities)
+        report.inserted_or_updated += written
+        counter += written
     report.fetched += fetched
     if fetched:
         SYNC_MESSAGES.inc(fetched)
-    if backfill and fetched < budget:
-        report.done = True  # tarix boshiga yetildi (limitgacha yetmay tugadi)
-    await _progress(chat_id, report, total_estimate)
+    # ── "tarix boshiga yetildi" faqat Telegram **kalta batch** qaytarganda ──
+    # Ilgari shart `fetched < budget` edi va byudjet tugashini ham "tugadi"
+    # deb o'qirdi: keyingi `_finish` `synced_min_id = 1` sentinelini qo'yib,
+    # qolgan tarix abadiy yo'qolardi. Endi faqat oxirgi batch to'lmagan
+    # bo'lsa (yoki umuman xabar kelmasa) `done` qo'yiladi — byudjet aynan
+    # qolgan tarixga teng chiqqan holatda esa keyingi yugurish 0 xabar olib
+    # keladi va sentinel o'sha yerda qo'yiladi (bir ortiqcha so'rov — arzon).
+    chunk = min(BATCH, budget) or BATCH
+    if backfill and (fetched == 0 or (fetched < budget and fetched % chunk != 0)):
+        report.done = True
+    await _progress(chat_id, report, total_estimate, synced_total=counter)
     return fetched
 
 
-async def _progress(chat_id: int, report: SyncReport, total_estimate: int | None) -> None:
+async def _message_count(chat_id: int) -> int:
+    async with session_scope() as db:
+        return int(
+            (
+                await db.execute(select(func.count(Message.id)).where(Message.chat_id == chat_id))
+            ).scalar_one()
+            or 0
+        )
+
+
+async def _progress(
+    chat_id: int,
+    report: SyncReport,
+    total_estimate: int | None,
+    *,
+    synced_total: int | None = None,
+) -> None:
+    """Oraliq progress. `synced_total` — yuguruvchi hisoblagich (`_pull`); `None`
+    bo'lsa aniq `COUNT(*)` olinadi (endi faqat aniqlik kerak bo'lgan joyda)."""
     async with session_scope() as db:
         chat = await db.get(Chat, chat_id)
         if chat is None:
@@ -653,8 +693,12 @@ async def _progress(chat_id: int, report: SyncReport, total_estimate: int | None
         if total_estimate:
             chat.total_estimate = int(total_estimate)
         chat.synced_total = (
-            await db.execute(select(func.count(Message.id)).where(Message.chat_id == chat_id))
-        ).scalar_one()
+            int(synced_total)
+            if synced_total is not None
+            else (
+                await db.execute(select(func.count(Message.id)).where(Message.chat_id == chat_id))
+            ).scalar_one()
+        )
 
 
 async def _finish(
@@ -709,6 +753,38 @@ def snapshot_tiers(hour: int) -> list[tuple[timedelta, timedelta]]:
     return tiers
 
 
+def snapshot_candidates_stmt(
+    chat_id: int, now: datetime, lo: timedelta, hi: timedelta, limit: int
+) -> Any:
+    """Bitta yosh pog'onasi uchun nomzod postlar — **eng eski snapshot birinchi**.
+
+    `LIMIT` majburiy (`SNAPSHOT_MAX_MESSAGES_PER_RUN`): usiz bitta katta kanal
+    butun pog'onani bir yugurishda tortib, qolgan kanallarni ochlikda
+    qoldirardi. Tartib `max(captured_at)` bo'yicha (hech olinmagan — birinchi),
+    shuning uchun qopqoq hech bir postni abadiy chetda qoldirmaydi: keyingi
+    yugurishda o'shalar oldinga chiqadi.
+    """
+    last_snap = (
+        select(
+            MessageMetricSnapshot.message_id.label("mid"),
+            func.max(MessageMetricSnapshot.captured_at).label("last_at"),
+        )
+        .group_by(MessageMetricSnapshot.message_id)
+        .subquery()
+    )
+    return (
+        select(Message.id, Message.tg_msg_id)
+        .outerjoin(last_snap, last_snap.c.mid == Message.id)
+        .where(
+            Message.chat_id == chat_id,
+            Message.published_at <= now - lo,
+            Message.published_at > now - hi,
+        )
+        .order_by(last_snap.c.last_at.asc().nulls_first(), Message.id)
+        .limit(limit)
+    )
+
+
 async def snapshot_chat_metrics(chat_id: int, *, now: datetime | None = None) -> int:
     """Kanal postlari uchun views/forwards/reactions snapshot. Qaytaradi: nechta post."""
     now = now or datetime.now(UTC)
@@ -721,17 +797,20 @@ async def snapshot_chat_metrics(chat_id: int, *, now: datetime | None = None) ->
         account_id, peer_id = chat.account_id, chat.tg_peer_id
         ids: list[int] = []
         id_map: dict[int, int] = {}  # tg_msg_id → messages.id
+        # Bitta yugurishda olinadigan postlar qopqog'i: usiz bitta katta kanal
+        # butun pog'onasini (o'n minglab post) bir yugurishda tortib, qolgan
+        # kanallarni ochlikda qoldiradi. Tanlov **eng eski snapshot** dan
+        # boshlanadi (hech qachon olinmagan — birinchi), shuning uchun qopqoq
+        # hech bir postni abadiy chetda qoldirmaydi: navbat aylanadi.
+        budget = get_settings().snapshot_max_messages_per_run
         for lo, hi in tiers:
-            rows = await db.execute(
-                select(Message.id, Message.tg_msg_id).where(
-                    Message.chat_id == chat_id,
-                    Message.published_at <= now - lo,
-                    Message.published_at > now - hi,
-                )
-            )
+            if budget <= 0:
+                break
+            rows = await db.execute(snapshot_candidates_stmt(chat_id, now, lo, hi, budget))
             for mid, tg_id in rows.all():
                 ids.append(int(tg_id))
                 id_map[int(tg_id)] = int(mid)
+                budget -= 1
     if not ids:
         return 0
 

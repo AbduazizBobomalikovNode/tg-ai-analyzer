@@ -179,6 +179,11 @@ async def run_agent(
                     ok=False,
                 )
             elif call.name in W.WRITE_TOOL_NAMES:
+                # Yozish tool'i ham **bir xil** qopqoq ostida: ilgari hisob
+                # faqat o'qish shoxida oshardi, ya'ni model bitta raundda
+                # cheksiz taklif yasay olardi (har biri DB qatori + tasdiq
+                # so'rovi). `seen_calls` faqat aynan bir xil argumentni to'sadi.
+                per_tool[call.name] += 1
                 if not write_enabled:
                     result = T.ToolResult("error: writing is disabled for this account", ok=False)
                 else:

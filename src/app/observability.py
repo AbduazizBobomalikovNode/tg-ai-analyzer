@@ -115,22 +115,34 @@ def metrics_payload() -> tuple[bytes, str]:
     return generate_latest(), CONTENT_TYPE_LATEST
 
 
+def start_metrics_server(port: int | None = None) -> int:
+    """Worker jarayoni uchun Prometheus HTTP eksporti. `0` = o'chiq (default).
+
+    `api` dagi `/metrics` faqat **api** jarayonining hisoblagichlarini beradi;
+    ingest/cron/alert metrikalari worker jarayonida o'sadi va ilgari hech
+    qayerdan ko'rinmasdi. Port ochiq internetga chiqmasligi kerak (token yo'q) —
+    compose tarmog'i ichida qoldiring.
+    """
+    p = get_settings().worker_metrics_port if port is None else port
+    if not p:
+        return 0
+    from prometheus_client import start_http_server
+
+    start_http_server(int(p))
+    log.info("observability.metrics_server", port=int(p))
+    return int(p)
+
+
 # ─── Sentry (ixtiyoriy) ──────────────────────────────────────────────────────
 
 
 def _scrub(event: dict[str, Any], _hint: Any) -> dict[str, Any] | None:
-    from app.logging import _SECRET_KEYS
+    """Sentry `before_send` — maskalash **yagona** implementatsiyadan
+    (`app.logging.scrub`): rekursiv, kalit nomi bo'yicha va matn ichidagi
+    tanish sir shakllari bo'yicha."""
+    from app.logging import scrub
 
-    def walk(node: Any) -> Any:
-        if isinstance(node, dict):
-            return {
-                k: ("***" if str(k).lower() in _SECRET_KEYS else walk(v)) for k, v in node.items()
-            }
-        if isinstance(node, list):
-            return [walk(x) for x in node]
-        return node
-
-    return walk(event)  # type: ignore[no-any-return]
+    return scrub(event)  # type: ignore[no-any-return]
 
 
 def init_sentry(component: str) -> bool:

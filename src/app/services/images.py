@@ -28,6 +28,16 @@ MAX_PROMPT = 2000
 _PNG = b"\x89PNG\r\n\x1a\n"
 _JPEG = b"\xff\xd8\xff"
 
+# Rasm generatsiya narxi **rasm boshiga** e'lon qilinadi; `llm/pricing.py`
+# esa tokenda hisoblaydi. Gemini'ning o'z ekvivalenti: bitta rasm = 1290
+# output token ($30/1M → ≈ $0.039). Taxmin — narx o'zgarsa jadval bilan birga
+# shu son ham yangilanadi.
+IMAGE_OUTPUT_TOKENS = 1290
+# Prompt uchun taxminiy input tokenlar (4 belgi ≈ 1 token) — API bu chaqiruvda
+# usage qaytarmaydi, byudjet qopqog'i uchun kam baholamaslik muhim.
+_CHARS_PER_TOKEN = 4
+IMAGE_CONVERSATION = "Images"
+
 
 class ImageError(Exception):
     def __init__(self, code: str, detail: str = "") -> None:
@@ -113,19 +123,91 @@ async def generate(
     image_id = str(uuid.uuid4())
     path = image_path(image_id, mime)
     path.write_bytes(data)
+    provider_name, model_name = _image_model()
     row = GeneratedImage(
         id=image_id,
         user_id=user_id,
         account_id=account_id,
         prompt=prompt[:MAX_PROMPT],
-        model="",  # router hal qiladi; keyingi versiyada natijadan
+        model=model_name[:64],
         mime=mime,
         size_bytes=len(data),
     )
     session.add(row)
     await session.flush()
+    await _record_image_usage(
+        session,
+        user_id=user_id,
+        account_id=account_id,
+        prompt=full,
+        provider=provider_name,
+        model=model_name,
+    )
     log.info("image.generated", image_id=image_id, user_id=user_id, bytes=len(data))
     return ImageInfo(image_id, _url(image_id), mime, len(data), prompt, row.model)
+
+
+def _image_model() -> tuple[str, str]:
+    """(provider, model) — chaqiruvsiz, faqat router qarori."""
+    try:
+        from app.llm.router import Task, resolve
+
+        provider, model = resolve(Task.IMAGE)
+        return str(provider.name), str(model)
+    except Exception:  # router sozlanmagan bo'lsa xarajat yozuvi 0 bo'ladi
+        return "", ""
+
+
+async def _record_image_usage(
+    session: AsyncSession,
+    *,
+    user_id: int,
+    account_id: int | None,
+    prompt: str,
+    provider: str,
+    model: str,
+) -> None:
+    """Rasm xarajatini kunlik byudjet yo'liga qo'shadi (briefing/judge bilan bir uslub).
+
+    `IMAGE_MAX_PER_DAY` soni bo'yicha qopqoq edi, **pul** bo'yicha emas:
+    `limits.daily_usage` faqat `conversation_messages` ni ko'radi, rasm esa u
+    yerga tushmasdi. Endi har rasm egasining "Images" suhbatiga `assistant`
+    qatori bo'lib yoziladi. Tokenlar **taxmin** (API usage qaytarmaydi) —
+    `IMAGE_OUTPUT_TOKENS` izohiga qarang.
+    """
+    from sqlalchemy import select
+
+    from app.db.models import Conversation, ConversationMessage
+    from app.llm.pricing import estimate_cost
+
+    tokens_in = max(1, len(prompt) // _CHARS_PER_TOKEN)
+    tokens_out = IMAGE_OUTPUT_TOKENS
+    conv = (
+        await session.execute(
+            select(Conversation)
+            .where(Conversation.user_id == user_id, Conversation.title == IMAGE_CONVERSATION)
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if conv is None:
+        conv = Conversation(user_id=user_id, account_id=account_id, title=IMAGE_CONVERSATION)
+        session.add(conv)
+        await session.flush()
+    cost = estimate_cost(provider, model, tokens_in, tokens_out) or 0.0
+    session.add(
+        ConversationMessage(
+            conversation_id=conv.id,
+            role="assistant",
+            content="[image]",
+            model=model[:64],
+            provider=provider[:32],
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            task="image",
+            cost_usd=round(cost, 6) or None,
+        )
+    )
+    await session.flush()
 
 
 async def get_owned(

@@ -63,7 +63,9 @@ def test_scrub_masks_secrets() -> None:
     }
     out = O._scrub(event, None)
     assert out is not None
-    masked = "***"
+    # Sentry va structlog bitta implementatsiyani bo'lishadi (`app.logging.scrub`)
+    from app.logging import MASK as masked
+
     assert out["extra"]["session_string"] == masked
     assert out["extra"]["nested"][0]["password"] == masked
     assert out["extra"]["nested"][0]["ok"] == 1
@@ -203,11 +205,15 @@ def client(monkeypatch: pytest.MonkeyPatch) -> Any:
 def test_metrics_endpoint_and_token(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     r = client.get("/metrics")
     assert r.status_code == 200 and "tgai_http_requests_total" in r.text
-    monkeypatch.setattr(get_settings(), "metrics_token", "sekret")
+    # Endpoint modul-global `web_main.s` ni o'qiydi; `get_settings()` keshi
+    # boshqa testda tozalangan bo'lsa u boshqa obyektga aylanadi.
+    from app.web import main as web_main
+
+    monkeypatch.setattr(web_main.s, "metrics_token", "sekret")
     assert client.get("/metrics").status_code == 401
     assert client.get("/metrics?token=sekret").status_code == 200
     assert client.get("/metrics", headers={"Authorization": "Bearer sekret"}).status_code == 200
-    monkeypatch.setattr(get_settings(), "metrics_token", "")
+    monkeypatch.setattr(web_main.s, "metrics_token", "")
 
 
 def test_http_middleware_counts_requests(client: TestClient) -> None:
