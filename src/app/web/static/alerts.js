@@ -12,9 +12,15 @@
     return v;
   };
   const $ = (id) => document.getElementById(id);
-  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  // `md.js` dashboard'da yuklanmaydi (u faqat AI javoblari uchun), shuning uchun
+  // `TGAI.esc` bo'lmasa aynan o'sha tamoyildagi lokal nusxa ishlatiladi.
+  const esc = (window.TGAI && window.TGAI.esc) || ((s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])));
   const root = $("alerts");
   if (!root) return;
+
+  // account_id / chat_id — endi select'lar; nomlar shu yerda saqlanadi
+  // (jadvalda "#12" o'rniga chat sarlavhasi ko'rinsin).
+  const chatTitles = new Map();
 
   const H = { "X-Requested-With": "fetch", "Content-Type": "application/json" };
 
@@ -35,7 +41,9 @@
   }
 
   function ruleRow(r) {
-    const chat = r.chat_id == null ? t("web.alerts.chat_all") : "#" + r.chat_id;
+    const chat = r.chat_id == null
+      ? t("web.alerts.chat_all")
+      : (chatTitles.get(r.chat_id) || "#" + r.chat_id);
     return `<tr data-id="${r.id}">
       <td><b>${esc(r.label || r.pattern)}</b><div class="muted small">${esc(r.pattern)}</div></td>
       <td>${esc(t("web.alerts.kind_" + r.kind))}</td>
@@ -55,6 +63,63 @@
     const when = (e.created_at || "").replace("T", " ").slice(0, 16);
     return `<li><span class="muted small">${esc(when)}</span> <b>${esc(e.chat_title)}</b> ${link} — ${esc(e.text)}</li>`;
   }
+
+  /* ── select'lar: akkauntlar /api/me dan, chatlar /api/accounts/{id}/chats dan ──
+   * Ikkalasi ham faqat-o'qish endpoint; egalik serverda tekshiriladi
+   * (`_own_account`). Option matni `textContent` orqali qo'yiladi — chat
+   * sarlavhasi Telegram'dan kelgan ishonchsiz matn, `innerHTML` ga hech qachon
+   * tushmaydi; jadvalga chiqadigan nusxa esa `esc` dan o'tkaziladi.
+   */
+  function fillSelect(sel, items, { placeholder } = {}) {
+    sel.replaceChildren();
+    if (placeholder) {
+      const o = document.createElement("option");
+      o.value = "";
+      o.textContent = placeholder;
+      sel.appendChild(o);
+    }
+    for (const it of items) {
+      const o = document.createElement("option");
+      o.value = String(it.value);
+      o.textContent = it.label;
+      sel.appendChild(o);
+    }
+  }
+
+  async function loadChats() {
+    const sel = $("al-chat");
+    const accountId = Number($("al-account").value || 0);
+    chatTitles.clear();
+    if (!accountId) { fillSelect(sel, [], { placeholder: t("web.alerts.chat_all") }); return; }
+    try {
+      const data = await api(`/api/accounts/${accountId}/chats?limit=500`);
+      const items = (data.items || []).map((c) => {
+        chatTitles.set(c.id, c.title || "#" + c.id);  // xom matn — `ruleRow` esc qiladi
+        return { value: c.id, label: c.title || "#" + c.id };
+      });
+      fillSelect(sel, items, { placeholder: t("web.alerts.chat_all") });
+    } catch (err) {
+      note(err.message);
+    }
+  }
+
+  async function loadAccounts() {
+    const sel = $("al-account");
+    try {
+      const me = await api("/api/me");
+      const items = (me.accounts || []).map((a) => ({
+        value: a.id,
+        label: `${a.label || a.tg_account_id || "#" + a.id}${a.status !== "active" ? ` (${a.status})` : ""}`,
+      }));
+      fillSelect(sel, items, { placeholder: items.length ? "" : t("web.alerts.no_accounts") });
+      if (items.length) sel.value = String((me.accounts.find((a) => a.status === "active") || me.accounts[0]).id);
+    } catch (err) {
+      note(err.message);
+    }
+    await loadChats();
+  }
+
+  $("al-account").addEventListener("change", () => { loadChats().then(load); });
 
   async function load() {
     const tbl = $("alerts-tbl");
@@ -111,7 +176,7 @@
   $("alerts-form").addEventListener("submit", async (ev) => {
     ev.preventDefault();
     note("");
-    const chat = $("al-chat").value.trim();
+    const chat = String($("al-chat").value || "").trim();
     const payload = {
       account_id: Number($("al-account").value || 0),
       chat_id: chat ? Number(chat) : null,
@@ -132,5 +197,5 @@
     }
   });
 
-  load();
+  loadAccounts().then(load);
 })();

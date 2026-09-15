@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import math
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -305,3 +308,71 @@ def test_deepseek_strips_leaked_tool_markup() -> None:
     clean = "Javob: #843 da kv puli haqida yozilgan."
     assert _strip_tool_markup(clean) == clean
     assert _strip_tool_markup("") == ""
+
+
+# ─── phase4/B: Gemini embedding — o'lcham va normallashtirish ────────────────
+
+
+class _FakeEmbeddings:
+    """`client.aio.models` o'rnini bosadi: chaqiruv konfiguratsiyasini yozib oladi."""
+
+    def __init__(self, vectors: list[list[float]]) -> None:
+        self.vectors = vectors
+        self.calls: list[dict[str, Any]] = []
+
+    async def embed_content(self, *, model: str, contents: Any, config: Any) -> Any:
+        self.calls.append({"model": model, "contents": contents, "config": config})
+        return SimpleNamespace(
+            embeddings=[SimpleNamespace(values=v) for v in self.vectors],
+            metadata=SimpleNamespace(billable_character_count=7),
+        )
+
+
+def _gemini_with(vectors: list[list[float]]) -> tuple[Any, _FakeEmbeddings]:
+    from app.llm.gemini import GeminiProvider
+
+    provider = GeminiProvider(api_key="test-key")  # soxta kalit — tarmoqqa chiqmaydi
+    fake = _FakeEmbeddings(vectors)
+    provider._client = SimpleNamespace(aio=SimpleNamespace(models=fake))
+    return provider, fake
+
+
+def _norm(vec: list[float]) -> float:
+    return math.sqrt(sum(v * v for v in vec))
+
+
+def test_embed_passes_output_dimensionality_and_task_type() -> None:
+    provider, fake = _gemini_with([[3.0, 4.0]])
+    res = asyncio.run(
+        provider.embed(
+            ["salom"], model="gemini-embedding-001", dim=768, task_type="RETRIEVAL_QUERY"
+        )
+    )
+    cfg = fake.calls[0]["config"]
+    assert cfg.output_dimensionality == 768
+    assert cfg.task_type == "RETRIEVAL_QUERY"
+    assert res.model == "gemini-embedding-001"
+
+
+def test_embedding_001_vectors_are_normalized_client_side() -> None:
+    """Kesilgan vektor birlik uzunlikda emas — 001 uchun biz normallashtiramiz."""
+    provider, _ = _gemini_with([[3.0, 4.0], [0.0, 0.0]])
+    res = asyncio.run(provider.embed(["a", "b"], model="gemini-embedding-001", dim=2))
+    assert _norm(res.vectors[0]) == pytest.approx(1.0)
+    assert res.vectors[0] == pytest.approx([0.6, 0.8])
+    assert res.vectors[1] == [0.0, 0.0]  # nol vektor — bo'lish yo'q
+
+
+def test_embedding_2_vectors_are_left_untouched() -> None:
+    """embedding-2 o'zi normallashtiradi — ikkinchi marta bo'lish keraksiz."""
+    provider, _ = _gemini_with([[3.0, 4.0]])
+    res = asyncio.run(provider.embed(["a"], model="gemini-embedding-2", dim=2))
+    assert res.vectors[0] == [3.0, 4.0]
+
+
+def test_normalize_vectors_handles_model_prefix() -> None:
+    from app.llm.gemini import NORMALIZE_CLIENT_SIDE, normalize_vectors
+
+    assert NORMALIZE_CLIENT_SIDE == frozenset({"gemini-embedding-001"})
+    out = normalize_vectors("models/gemini-embedding-001", [[3.0, 4.0]])
+    assert _norm(out[0]) == pytest.approx(1.0)

@@ -1,4 +1,4 @@
-"""Yagona entrypoint: `python -m app.main {bot|check}`."""
+"""Yagona entrypoint: `python -m app.main {bot|check|reembed}`."""
 
 from __future__ import annotations
 
@@ -111,6 +111,45 @@ async def _check() -> int:
     return 0 if ok else 1
 
 
+async def _reembed(argv: list[str]) -> int:
+    """`python -m app.main reembed [--model X] [--account N]` — ishni navbatga qo'yadi.
+
+    Hech narsa o'chirilmaydi: ish yangi model uchun yetishmayotgan vektorlarni
+    to'ldiradi, eskilari joyida qoladi. Jarayonni worker loglari ko'rsatadi
+    (`worker.reembed.progress` / `worker.reembed.done`).
+    """
+    from app.llm import embed_model_name
+    from app.worker.queue import close_queue, enqueue
+    from app.worker.tasks import job_id_reembed
+
+    log = get_logger("reembed")
+    model = ""
+    account_id: int | None = None
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--model" and i + 1 < len(argv):
+            model = argv[i + 1].strip()
+            i += 2
+        elif argv[i] == "--account" and i + 1 < len(argv):
+            account_id = int(argv[i + 1])
+            i += 2
+        else:
+            print(f"Noma'lum argument: {argv[i]}. Format: reembed [--model X] [--account N]")
+            return 2
+    model = model or embed_model_name()
+    try:
+        job = await enqueue(
+            "reembed_all", account_id, model=model, job_id=job_id_reembed(account_id)
+        )
+    finally:
+        await close_queue()
+    if job is None:
+        log.warning("reembed.duplicate", model=model, account_id=account_id)
+        return 1
+    log.info("reembed.enqueued", model=model, account_id=account_id, job=job)
+    return 0
+
+
 def main() -> int:
     s = get_settings()
     setup_logging(s.log_level, json_output=s.is_prod)
@@ -124,8 +163,10 @@ def main() -> int:
         return 0
     if cmd == "check":
         return asyncio.run(_check())
+    if cmd == "reembed":
+        return asyncio.run(_reembed(sys.argv[2:]))
 
-    print(f"Noma'lum buyruq: {cmd}. Mavjud: bot, check", file=sys.stderr)
+    print(f"Noma'lum buyruq: {cmd}. Mavjud: bot, check, reembed", file=sys.stderr)
     return 2
 
 

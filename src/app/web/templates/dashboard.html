@@ -87,12 +87,16 @@
     <div class="card">
       <h3>{{ t('web.alerts.title') }}</h3>
       <p class="muted small">{{ t('web.alerts.hint') }}</p>
+      {# Semantik qoidaning qamrov cheklovi — vektorsiz (qisqa) xabar tushmaydi. #}
+      <p class="muted small">{{ t('web.alerts.semantic_note') }}</p>
       <form id="alerts-form" class="alerts-form" autocomplete="off">
+        {# phase4/B: raqam kiritish o'rniga select — ro'yxat /api/me va
+           /api/accounts/{id}/chats dan, alerts.js to'ldiradi (esc bilan). #}
         <label class="opt">{{ t('web.alerts.account') }}
-          <input id="al-account" type="number" min="1" step="1" value="1" required>
+          <select id="al-account" required></select>
         </label>
         <label class="opt">{{ t('web.alerts.chat') }}
-          <input id="al-chat" type="number" min="1" step="1" placeholder="{{ t('web.alerts.chat_all') }}">
+          <select id="al-chat"></select>
         </label>
         <label class="opt">{{ t('web.alerts.kind') }}
           <select id="al-kind">

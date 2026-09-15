@@ -41,6 +41,14 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch, tmp_path) -> Iterator[None]:
         "LLM_TASK_DEEP",
         "LLM_TASK_EMBED",
         "LLM_TASK_IMAGE",
+        # phase4/B — model override'lari test'lar orasida oqib ketmasin
+        "LLM_MODEL_ROUTE",
+        "LLM_MODEL_SEARCH",
+        "LLM_MODEL_TOOLS",
+        "LLM_MODEL_DEEP",
+        "LLM_MODEL_EMBED",
+        "EMBED_MODEL",
+        "EMBED_DIMS",
         *_CLAUDE_ENV,
     ):
         monkeypatch.delenv(key, raising=False)
@@ -292,3 +300,95 @@ def test_no_capable_provider_raises_loudly(monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_every_task_has_requirements() -> None:
     assert set(R.TASK_REQUIREMENTS) == set(R.Task)
+
+
+# ─── phase4/B: model override (LLM_MODEL_*) ──────────────────────────────────
+
+
+def test_model_override_replaces_model_but_not_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    use(monkeypatch, LLM_PROVIDER="gemini", LLM_MODEL_ROUTE="gemini-2.5-flash-lite-002")
+    provider, model = R.resolve(R.Task.ROUTE)
+    assert (provider.name, model) == ("gemini", "gemini-2.5-flash-lite-002")
+    # boshqa vazifalar tegilmaydi
+    assert R.resolve(R.Task.SEARCH)[1] == "gemini-2.5-flash"
+
+
+def test_model_override_is_provider_agnostic(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Provider DeepSeek bo'lsa ham override o'sha providerning modelini almashtiradi."""
+    use(monkeypatch, LLM_PROVIDER="deepseek", LLM_MODEL_DEEP="deepseek-v4-pro")
+    assert R.resolve(R.Task.DEEP) == (R.get_provider("deepseek"), "deepseek-v4-pro")
+
+
+def test_embed_override_lands_on_embed_capable_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    """LLM_PROVIDER=deepseek'da EMBED avval Gemini'ga tushadi, override esa u yerda tekshiriladi."""
+    use(monkeypatch, LLM_PROVIDER="deepseek", LLM_MODEL_EMBED="gemini-embedding-2")
+    provider, model = R.resolve(R.Task.EMBED)
+    assert (provider.name, model) == ("gemini", "gemini-embedding-2")
+    assert Capability.EMBED in provider.capabilities(model)
+
+
+def test_invalid_tools_override_raises_clearly(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tool'siz model TOOLS ga qo'yilsa — jimgina fallback emas, aniq xato."""
+    use(monkeypatch, LLM_PROVIDER="deepseek", LLM_MODEL_TOOLS="deepseek-reasoner")
+    with pytest.raises(LLMError, match="LLM_MODEL_TOOLS"):
+        R.resolve(R.Task.TOOLS)
+
+
+def test_invalid_embed_override_raises_clearly(monkeypatch: pytest.MonkeyPatch) -> None:
+    use(monkeypatch, LLM_PROVIDER="gemini", LLM_MODEL_EMBED="gemini-2.5-flash")
+    with pytest.raises(LLMError, match="LLM_MODEL_EMBED"):
+        R.resolve(R.Task.EMBED)
+
+
+def test_embed_model_name_follows_config_and_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert R.embed_model_name() == "gemini-embedding-001"
+    use(monkeypatch, EMBED_MODEL="gemini-embedding-2")
+    assert R.embed_model_name() == "gemini-embedding-2"
+    use(monkeypatch, LLM_MODEL_EMBED="gemini-embedding-2-preview")
+    assert R.embed_model_name() == "gemini-embedding-2-preview"
+
+
+def test_embed_dims_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert get_settings().embed_dims == get_settings().embed_dim
+    use(monkeypatch, EMBED_DIMS="1536")
+    assert get_settings().embed_dims == 1536
+
+
+# ─── phase4/B: eskirayotgan model ogohlantirishi ─────────────────────────────
+
+
+def test_retiring_note_with_fixed_clock() -> None:
+    from datetime import date
+
+    assert R.RETIRING["gemini-2.5-flash-lite"] == "2026-10-16"
+    # 45 kundan uzoq — jim
+    assert R.retiring_note("gemini-2.5-flash-lite", today=date(2026, 1, 1)) is None
+    # oyna ichida — ogohlantirish ma'lumoti
+    note = R.retiring_note("models/gemini-2.5-flash-lite", today=date(2026, 9, 15))
+    assert note == {"model": "gemini-2.5-flash-lite", "retires": "2026-10-16", "days_left": 31}
+    # sana o'tib ketgan bo'lsa ham ogohlantiriladi (manfiy kun)
+    passed = R.retiring_note("gemini-2.5-flash-lite", today=date(2026, 11, 1))
+    assert passed is not None and passed["days_left"] < 0
+    # ro'yxatda yo'q model
+    assert R.retiring_note("gemini-2.5-flash", today=date(2026, 9, 15)) is None
+
+
+def test_retiring_warning_fires_once() -> None:
+    from datetime import date
+
+    assert R.warn_retiring_once("gemini-2.5-flash-lite", today=date(2026, 9, 15)) is not None
+    assert R.warn_retiring_once("gemini-2.5-flash-lite", today=date(2026, 9, 15)) is None
+    R.reset()
+    assert R.warn_retiring_once("gemini-2.5-flash-lite", today=date(2026, 9, 15)) is not None
+
+
+def test_resolve_route_marks_retiring_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ROUTE default eskirish ro'yxatida — resolve uni belgilab qo'yadi."""
+    use(monkeypatch, LLM_PROVIDER="gemini")
+    assert R.resolve(R.Task.ROUTE)[1] == "gemini-2.5-flash-lite"
+    # ogohlantirish bir marta yozilgan (ikkinchi chaqiruvda takrorlanmaydi)
+    assert "gemini-2.5-flash-lite" in R._retiring_warned
+
+
+def test_every_task_with_override_has_env_name() -> None:
+    assert set(R.MODEL_OVERRIDE_ENV) == set(R.Task) - {R.Task.IMAGE}

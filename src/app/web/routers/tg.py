@@ -121,15 +121,21 @@ def _chat_out(c: Chat) -> dict[str, Any]:
 
 @router.get("/{account_id}/chats")
 async def chats(
-    account_id: int, ident: Annotated[WebIdentity, Depends(require_identity)]
+    account_id: int,
+    ident: Annotated[WebIdentity, Depends(require_identity)],
+    limit: Annotated[int, Query(ge=0, le=1000)] = 0,
 ) -> dict[str, Any]:
+    """Akkauntning chat registri. `limit` — UI select'lari uchun (0 = hammasi)."""
     await _own_account(ident.user_id, account_id)
     async with session_scope() as db:
-        rows = await db.execute(
+        stmt = (
             select(Chat)
             .where(Chat.account_id == account_id)
             .order_by(Chat.last_message_at.desc().nulls_last(), Chat.id)
         )
+        if limit:
+            stmt = stmt.limit(limit)
+        rows = await db.execute(stmt)
         items = [_chat_out(c) for c in rows.scalars().all()]
     running = sum(1 for c in items if c["sync_state"] == "running")
     return {"items": items, "running": running}

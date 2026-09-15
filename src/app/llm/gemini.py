@@ -14,6 +14,8 @@ Rollarni moslash:
 from __future__ import annotations
 
 import json
+import math
+import warnings
 from typing import Any
 
 from google import genai
@@ -23,7 +25,10 @@ from app.config import get_settings
 from app.llm.base import (
     EMBED_DOCUMENT,
     BaseProvider,
+    BatchState,
+    BatchStatus,
     Capability,
+    CapabilityError,
     ChatResult,
     EmbedResult,
     EmbedTaskType,
@@ -42,6 +47,38 @@ log = get_logger(__name__)
 # 2.5 avlodning barcha modellari >= 1M kontekst
 _LONG_CONTEXT_PREFIXES = ("gemini-2.5", "gemini-3", "gemini-1.5")
 
+# phase4/B — `output_dimensionality` bilan **kesilgan** vektor endi birlik
+# uzunlikda emas. `gemini-embedding-001` da normallashtirish mijoz tomonida
+# qilinadi (Google hujjati shuni talab qiladi); `gemini-embedding-2` o'zi
+# normallashtirib qaytaradi, ikkinchi marta bo'lish keraksiz.
+#
+# Nega muhim: pgvector'da cosine masofa normani hisobga oladi, lekin bizda
+# `1 - cosine_distance` ostonalari (alert `threshold`, rerank) birlik vektor
+# nazarda tutib sozlangan — normallashtirilmagan qator ular bilan mos kelmaydi.
+NORMALIZE_CLIENT_SIDE = frozenset({"gemini-embedding-001"})
+
+
+def _base_model(model: str) -> str:
+    """`models/gemini-embedding-001` → `gemini-embedding-001`."""
+    return model.split("/")[-1].strip().lower()
+
+
+def l2_normalize(vec: list[float]) -> list[float]:
+    """Birlik uzunlikka keltiradi; nol vektor o'zgarishsiz qaytadi."""
+    norm = math.sqrt(sum(v * v for v in vec))
+    return [v / norm for v in vec] if norm > 0 else vec
+
+
+def normalize_vectors(model: str, vectors: list[list[float]]) -> list[list[float]]:
+    """`NORMALIZE_CLIENT_SIDE` dagi modellar uchun L2 normallashtirish.
+
+    Batch yo'li ham shu funksiyadan o'tishi kerak — aks holda jonli va batch
+    yo'llari bir xil modelda ikki xil fazoga yozardi.
+    """
+    if _base_model(model) not in NORMALIZE_CLIENT_SIDE:
+        return vectors
+    return [l2_normalize(v) for v in vectors]
+
 
 class GeminiProvider(BaseProvider):
     name = "gemini"
@@ -54,7 +91,10 @@ class GeminiProvider(BaseProvider):
 
     def capabilities(self, model: str) -> frozenset[Capability]:
         if "embedding" in model or "embed" in model:
-            return frozenset({Capability.EMBED})
+            # BATCH_EMBED — `batches.create_embeddings` (4-bosqich/C, quyidagi
+            # "Batch" bo'limi). SDK eski bo'lsa metod yo'q: `_batches()` aniq
+            # `CapabilityError` beradi, jimgina ishlamay qolish yo'q.
+            return frozenset({Capability.EMBED, Capability.BATCH_EMBED})
 
         caps = {
             Capability.CHAT,
@@ -143,7 +183,7 @@ class GeminiProvider(BaseProvider):
                 raise LLMError(self.name, str(exc), status=_status_of(exc)) from exc
 
         resp: Any = await self._with_retry("embed", _call)
-        vectors = [list(e.values or []) for e in (resp.embeddings or [])]
+        vectors = normalize_vectors(model, [list(e.values or []) for e in (resp.embeddings or [])])
         if not vectors:
             raise LLMError(self.name, "embedding bo'sh qaytdi")
 
@@ -176,6 +216,144 @@ class GeminiProvider(BaseProvider):
             if inline is not None and getattr(inline, "data", None):
                 return bytes(inline.data)
         raise LLMError(self.name, "javobda rasm topilmadi")
+
+    # ══ Batch embedding (4-bosqich/C) ════════════════════════════════════════
+    #
+    # SDK: `google-genai` >= 2.23. Uch qism (site-packages yo'llari — sinovda
+    # tekshirilgan, `python:3.12-slim` + google-genai 2.23.0):
+    #
+    #   google/genai/batches.py:2960  AsyncBatches.create_embeddings(model, src, config)
+    #       → HTTP `{model}:asyncBatchEmbedContent` (batches.py:~3040)
+    #   google/genai/batches.py:827   _EmbedContentBatch_to_mldev — `contents`
+    #       ro'yxati `requests[]` massiviga, `config` (task_type /
+    #       output_dimensionality) esa **har bir** so'rovga ko'chiriladi.
+    #       Ya'ni bitta `EmbedContentBatch` = N ta so'rov, bitta config.
+    #   google/genai/types.py         BatchJobDestination.inlined_embed_content_responses:
+    #       "The responses will be in the same order as the input requests."
+    #
+    # Tartib kafolati shu bitta jumlaga tayanadi — shuning uchun chaqiruvchi
+    # (`services/embed_batches.py`) uzunlikni **qat'iy** tekshiradi va mos
+    # kelmasa hech narsa yozmaydi (0-bosqich qoidasi).
+    #
+    # `create_embeddings` SDK'da `ExperimentalWarning` beradi — u har submit'da
+    # log'ni ifloslantiradi, mazmuni esa bizga ma'lum; shuning uchun bostiriladi.
+
+    def _batches(self) -> Any:
+        b = getattr(self._client.aio, "batches", None)
+        if b is None or not hasattr(b, "create_embeddings"):
+            raise CapabilityError(
+                self.name,
+                "batch embedding uchun google-genai >= 2.23 kerak "
+                "(`batches.create_embeddings` topilmadi)",
+            )
+        return b
+
+    async def embed_batch_submit(
+        self,
+        texts: list[str],
+        *,
+        model: str,
+        dim: int,
+        task_type: EmbedTaskType = EMBED_DOCUMENT,
+        tag: str = "",
+    ) -> str:
+        self.require(model, Capability.BATCH_EMBED)
+        if not texts:
+            raise LLMError(self.name, "batch embedding: bo'sh matn ro'yxati")
+        batches = self._batches()
+
+        src = types.EmbeddingsBatchJobSource(
+            inlined_requests=types.EmbedContentBatch(
+                contents=list(texts),  # type: ignore[arg-type]
+                config=types.EmbedContentConfig(output_dimensionality=dim, task_type=task_type),
+            )
+        )
+        config = (
+            types.CreateEmbeddingsBatchJobConfig(display_name=tag[:120])
+            if tag
+            else types.CreateEmbeddingsBatchJobConfig()
+        )
+
+        async def _call() -> Any:
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    return await batches.create_embeddings(model=model, src=src, config=config)
+            except Exception as exc:
+                raise LLMError(self.name, str(exc), status=_status_of(exc)) from exc
+
+        job: Any = await self._with_retry("embed_batch_submit", _call)
+        name = str(getattr(job, "name", "") or "")
+        if not name:
+            raise LLMError(self.name, "batch job yaratildi, lekin nomi qaytmadi")
+        log.info("gemini.batch.submitted", job=name, items=len(texts), model=model, tag=tag)
+        return name
+
+    async def embed_batch_poll(self, job: str) -> BatchStatus:
+        resp = await self._batch_get(job, "embed_batch_poll")
+        return _batch_status(resp, job)
+
+    async def embed_batch_fetch(self, job: str) -> EmbedResult:
+        resp = await self._batch_get(job, "embed_batch_fetch")
+        status = _batch_status(resp, job)
+        if status.state is not BatchState.SUCCEEDED:
+            raise LLMError(
+                self.name,
+                f"batch {job} tugamagan/muvaffaqiyatsiz: {status.raw_state} {status.error}",
+            )
+
+        dest = getattr(resp, "dest", None)
+        responses = getattr(dest, "inlined_embed_content_responses", None)
+        if responses is None:
+            # Faylli chiqish faqat faylli kirishda bo'ladi; biz doim inline
+            # yuboramiz, shuning uchun bu yerga tushish = SDK/API shakli
+            # o'zgargan. Jimgina bo'sh qaytarish o'rniga aniq xato.
+            raise LLMError(
+                self.name,
+                f"batch {job}: inline javob yo'q "
+                f"(dest.file_name={getattr(dest, 'file_name', None)!r})",
+            )
+
+        vectors: list[list[float]] = []
+        tokens = 0
+        for i, item in enumerate(responses):
+            err = getattr(item, "error", None)
+            if err is not None:
+                raise LLMError(
+                    self.name,
+                    f"batch {job}: #{i} elementda xato: {getattr(err, 'message', err)}",
+                )
+            single = getattr(item, "response", None)
+            emb = getattr(single, "embedding", None)
+            values = list(getattr(emb, "values", None) or [])
+            if not values:
+                raise LLMError(self.name, f"batch {job}: #{i} elementda vektor bo'sh")
+            vectors.append(values)
+            tokens += int(getattr(single, "token_count", 0) or 0)
+
+        # Sinxron yo'l bilan **bir xil** normallashtirish (phase4/B,
+        # `normalize_vectors`) — aks holda bitta modelning batch va jonli
+        # qatorlari `message_embeddings` da ikki xil masshtabda aralashardi
+        # va cosine ostonalari (alert `threshold`, rerank) buzilardi.
+        return EmbedResult(
+            vectors=normalize_vectors(status.model, vectors),
+            model=status.model,
+            provider=self.name,
+            usage=Usage(tokens_in=tokens),
+        )
+
+    async def _batch_get(self, job: str, op: str) -> Any:
+        batches = self._batches()
+
+        async def _call() -> Any:
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    return await batches.get(name=job)
+            except Exception as exc:
+                raise LLMError(self.name, str(exc), status=_status_of(exc)) from exc
+
+        return await self._with_retry(op, _call)
 
 
 # ─── konvertorlar ────────────────────────────────────────────────────────────
@@ -278,6 +456,43 @@ def _parse_chat(resp: Any, *, model: str) -> ChatResult:
             cached_tokens=int(getattr(u, "cached_content_token_count", 0) or 0),
         ),
         finish_reason=finish,
+    )
+
+
+# `types.JobState` (google/genai/types.py) → normallashtirilgan holat.
+# QUEUED/PENDING/UPDATING — hali ishlamagan; PAUSED ham kutish (o'zi tiklanadi).
+# PARTIALLY_SUCCEEDED — biz uchun **failed**: yarim to'plamni yozib bo'lmaydi,
+# chunki qaysi element tushib qolgani tartibdan bilinmaydi (invariant: qat'iy
+# moslik). Bunday job qayta yuboriladi.
+_BATCH_STATES: dict[str, BatchState] = {
+    "JOB_STATE_UNSPECIFIED": BatchState.PENDING,
+    "JOB_STATE_QUEUED": BatchState.PENDING,
+    "JOB_STATE_PENDING": BatchState.PENDING,
+    "JOB_STATE_UPDATING": BatchState.RUNNING,
+    "JOB_STATE_PAUSED": BatchState.RUNNING,
+    "JOB_STATE_RUNNING": BatchState.RUNNING,
+    "JOB_STATE_SUCCEEDED": BatchState.SUCCEEDED,
+    "JOB_STATE_PARTIALLY_SUCCEEDED": BatchState.FAILED,
+    "JOB_STATE_FAILED": BatchState.FAILED,
+    "JOB_STATE_CANCELLING": BatchState.RUNNING,
+    "JOB_STATE_CANCELLED": BatchState.CANCELLED,
+    "JOB_STATE_EXPIRED": BatchState.EXPIRED,
+}
+
+
+def _batch_status(resp: Any, job: str) -> BatchStatus:
+    raw = getattr(resp, "state", None)
+    raw_name = str(getattr(raw, "value", None) or getattr(raw, "name", None) or raw or "")
+    err = getattr(resp, "error", None)
+    return BatchStatus(
+        job=str(getattr(resp, "name", None) or job),
+        # Noma'lum holat → RUNNING: "tugadi" deb hisoblash xavfliroq
+        # (elementlar qayta yuborilmay muzlab qolardi).
+        state=_BATCH_STATES.get(raw_name.upper(), BatchState.RUNNING),
+        raw_state=raw_name,
+        # Narx qoidasi: API **qaytargan** nom ("models/…" prefiksisiz).
+        model=_base_model(str(getattr(resp, "model", "") or "")),
+        error=str(getattr(err, "message", "") or "") if err is not None else "",
     )
 
 

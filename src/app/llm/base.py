@@ -29,6 +29,7 @@ class Capability(StrEnum):
     TOOLS = "tools"  # function calling
     JSON_MODE = "json_mode"
     EMBED = "embed"
+    BATCH_EMBED = "batch_embed"  # asinxron (arzon) embedding batch job
     IMAGE_GEN = "image_gen"
     LONG_CONTEXT = "long_context"  # >= 200k token
     EXPLICIT_CACHE = "explicit_cache"  # boshqariladigan context caching
@@ -119,6 +120,45 @@ class EmbedResult:
     usage: Usage
 
 
+# ─── batch (asinxron) embedding — 4-bosqich/C ────────────────────────────────
+#
+# Gemini Batch API sinxron narxning **yarmini** oladi, evaziga javob soatlar
+# ichida keladi (SLA 24 soat). Indekslash — fon ishi, kechikish muhim emas;
+# shuning uchun `embed_messages` / `embed_nodes` uchun bu to'g'ridan-to'g'ri
+# 50% chegirma. Qidiruv tomoni (`RETRIEVAL_QUERY`) **hech qachon** batch
+# bo'lmaydi — u user kutib turgan yo'l.
+
+
+class BatchState(StrEnum):
+    """Provider holatlarining normallashtirilgan ko'rinishi."""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    EXPIRED = "expired"
+    CANCELLED = "cancelled"
+
+    @property
+    def done(self) -> bool:
+        return self is not BatchState.PENDING and self is not BatchState.RUNNING
+
+
+@dataclass(slots=True)
+class BatchStatus:
+    job: str
+    state: BatchState
+    #: provider qaytargan xom holat (`JOB_STATE_...`) — loglar uchun
+    raw_state: str = ""
+    #: API qaytargan model nomi (narx qoidasi: so'ralgani emas, qaytgani)
+    model: str = ""
+    error: str = ""
+
+    @property
+    def done(self) -> bool:
+        return self.state.done
+
+
 class LLMError(RuntimeError):
     def __init__(self, provider: str, message: str, *, status: int | None = None) -> None:
         self.provider = provider
@@ -176,6 +216,36 @@ class BaseProvider(ABC):
     ) -> EmbedResult:
         """Provider `task_type` ni qo'llamasa — e'tiborsiz qoldiradi (xato emas)."""
         raise CapabilityError(self.name, "embedding qo'llab-quvvatlanmaydi")
+
+    # ── batch embedding ──────────────────────────────────────────────────────
+    #
+    # Uch bosqich ataylab ajratilgan: submit qaytarishi bilan jarayon o'lishi
+    # mumkin, job esa serverda qoladi. Shuning uchun `job` nomi **DB'da**
+    # saqlanadi (`embed_batches`) va poll/fetch boshqa cron yugurishida,
+    # boshqa jarayonda bo'ladi. Provider obyektida hech qanday holat yo'q.
+
+    async def embed_batch_submit(
+        self,
+        texts: list[str],
+        *,
+        model: str,
+        dim: int,
+        task_type: EmbedTaskType = EMBED_DOCUMENT,
+        tag: str = "",
+    ) -> str:
+        """Batch job yaratadi va uning **nomini** qaytaradi (`batches/…`)."""
+        raise CapabilityError(self.name, "batch embedding qo'llab-quvvatlanmaydi")
+
+    async def embed_batch_poll(self, job: str) -> BatchStatus:
+        raise CapabilityError(self.name, "batch embedding qo'llab-quvvatlanmaydi")
+
+    async def embed_batch_fetch(self, job: str) -> EmbedResult:
+        """Tugagan jobning vektorlari — **kirish tartibida**.
+
+        `list[list[float]]` emas, `EmbedResult`: chaqiruvchiga API qaytargan
+        model nomi ham kerak (narx qoidasi, `pricing.py`).
+        """
+        raise CapabilityError(self.name, "batch embedding qo'llab-quvvatlanmaydi")
 
     async def generate_image(self, prompt: str, *, model: str) -> bytes:
         raise CapabilityError(self.name, "rasm generatsiya qo'llab-quvvatlanmaydi")

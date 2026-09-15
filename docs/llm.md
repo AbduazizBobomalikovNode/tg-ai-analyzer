@@ -53,3 +53,37 @@ user turn'ida.
 
 Xarajat bahosi — `llm/pricing.py` (ro'yxat narxi, taxmin). Har javobda
 `tokens_in/out`, `latency_ms`, `cost_usd`; dashboard model/strategiya kesimida.
+
+## Model override va embedding modelini almashtirish (phase4/B)
+
+`LLM_TASK_*` provider bilan modelni birga beradi; `LLM_MODEL_*` esa **faqat
+modelni** almashtiradi, providerni router qanday tanlagan bo'lsa shundayligicha
+qoldiradi:
+
+| Env | Nima |
+|---|---|
+| `LLM_MODEL_ROUTE` / `_SEARCH` / `_TOOLS` / `_DEEP` / `_EMBED` | shu `Task` uchun model nomi |
+| `EMBED_MODEL` | embedding modeli (eski nom: `GEMINI_MODEL_EMBED`) |
+| `EMBED_DIMS` | Gemini `output_dimensionality`; DB ustuni bilan bir xil bo'lishi shart |
+
+Model provider imkoniyatiga mos kelmasa (`LLM_MODEL_TOOLS` ga tool'siz model)
+router **aniq xato** tashlaydi — jimgina eski modelga qaytmaydi. `gemini-2.5-flash-lite`
+2026-10-16 da eskiradi: 45 kun qolganda startupda `llm.model_retiring`
+ogohlantirishi chiqadi, vorisga o'tish esa `LLM_MODEL_ROUTE` orqali (default
+o'zgarmaydi — model almashtirish sifatni tebratadi, avval o'lchang).
+
+`gemini-embedding-001` da kesilgan (`output_dimensionality < 3072`) vektor
+birlik uzunlikda emas — adapter uni **mijoz tomonida** L2 normallashtiradi
+(`gemini.NORMALIZE_CLIENT_SIDE`). `gemini-embedding-2` o'zi normallashtiradi.
+
+Modelni almashtirish: `EMBED_MODEL` ni yangilang va
+
+```bash
+docker compose run --rm bot python -m app.main reembed --model gemini-embedding-2
+```
+
+Bu `worker.reembed_all` ni navbatga qo'yadi. Ish **hech narsa o'chirmaydi**:
+yangi model qatorlari eskilari bilan yonma-yon yoziladi va qidiruv joriy
+modelni filtrlaydi, shuning uchun to'xtatib qo'yilgan re-embed ham indeksni
+buzmaydi; orqaga qaytish — `EMBED_MODEL` ni eski qiymatga qaytarish.
+Jarayon loglarda: `worker.reembed.progress` / `worker.reembed.done`.

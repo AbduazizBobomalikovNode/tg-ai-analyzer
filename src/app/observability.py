@@ -10,6 +10,8 @@
     tgai_sync_messages_total, tgai_floodwait_total, tgai_snapshot_posts_total
     tgai_deep_runs_total{status}, tgai_deep_rounds, tgai_deep_candidates,
     tgai_deep_cost_usd_total, tgai_deep_latency_seconds
+    tgai_alert_scans_total, tgai_alert_events_total{kind}, tgai_alert_pushes_total{status}
+    tgai_briefing_builds_total{status}, tgai_briefing_pushes_total{status}
   api: `GET /metrics` (`METRICS_TOKEN` bo'lsa `?token=`/Bearer talab qilinadi).
   worker jarayoni alohida — uning metrikalari heartbeat + DB orqali (`/api/stats`).
 * Heartbeat — worker har cron/ish oxirida Redis'ga `tgai:hb:<name>` = ISO vaqt
@@ -71,6 +73,16 @@ DEEP_LATENCY = Histogram(
     buckets=(5, 10, 20, 30, 60, 90, 120, 180),
 )
 WRITE_ACTIONS = Counter("tgai_write_actions_total", "Yozish amallari", ["tool", "status"])
+# Alertlar va briefing (3-bosqich) — worker jarayonida o'sadi, shuning uchun
+# ular `/metrics` da faqat worker eksportida ko'rinadi (api jarayonida 0).
+ALERT_SCANS = Counter("tgai_alert_scans_total", "Alert qoidasi skanerlashlari")
+ALERT_EVENTS = Counter("tgai_alert_events_total", "Yaratilgan alert hodisalari", ["kind"])
+# status = ok | failed (jim soat/egasiz — push umuman qurilmaydi)
+ALERT_PUSHES = Counter("tgai_alert_pushes_total", "Alert push'lari", ["status"])
+# status = ok | empty | error
+BRIEFING_BUILDS = Counter("tgai_briefing_builds_total", "Briefing qurishlari", ["status"])
+# status = sent | skipped | error
+BRIEFING_PUSHES = Counter("tgai_briefing_pushes_total", "Briefing push'lari", ["status"])
 SYNC_MESSAGES = Counter("tgai_sync_messages_total", "Sinxronlangan xabarlar")
 FLOODWAIT = Counter("tgai_floodwait_total", "FloodWait hodisalari")
 SNAPSHOT_POSTS = Counter("tgai_snapshot_posts_total", "Snapshot olingan postlar")

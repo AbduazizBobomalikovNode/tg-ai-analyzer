@@ -2,6 +2,8 @@ from app.llm.base import (
     EMBED_DOCUMENT,
     EMBED_QUERY,
     BaseProvider,
+    BatchState,
+    BatchStatus,
     Capability,
     CapabilityError,
     ChatResult,
@@ -24,9 +26,12 @@ from app.llm.router import (
     close_all,
     default_model,
     effective_provider,
+    embed_model_name,
     get_provider,
     reset,
     resolve,
+    retiring_note,
+    warn_retiring_once,
 )
 
 __all__ = [
@@ -36,6 +41,8 @@ __all__ = [
     "PROVIDERS",
     "TASK_REQUIREMENTS",
     "BaseProvider",
+    "BatchState",
+    "BatchStatus",
     "Capability",
     "CapabilityError",
     "ChatResult",
@@ -52,8 +59,11 @@ __all__ = [
     "close_all",
     "default_model",
     "effective_provider",
+    "embed_model_name",
     "get_provider",
     "reset",
     "resolve",
+    "retiring_note",
     "sanitize_json_schema",
+    "warn_retiring_once",
 ]
