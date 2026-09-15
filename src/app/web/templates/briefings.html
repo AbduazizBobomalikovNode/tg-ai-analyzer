@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}{{ t('web.brief.title') }} · {{ t('web.title') }}{% endblock %}
+{% block body_class %}page-dash{% endblock %}
+{% block content %}
+<div class="dash">
+  <header class="dash-head">
+    <div class="brand small">
+      <span class="brand-logo" aria-hidden="true">📰</span>
+      <span class="brand-name">{{ t('web.title') }}</span>
+      <span class="muted">· {{ t('web.brief.title') }}</span>
+    </div>
+    <div class="dash-actions">
+      <a class="btn ghost small" href="/dashboard">← {{ t('web.dash.title') }}</a>
+      <nav class="lang-switch">
+        {% for l in langs %}<a href="?lang={{ l }}" class="{% if l == lang %}active{% endif %}">{{ l|upper }}</a>{% endfor %}
+      </nav>
+    </div>
+  </header>
+
+  <section class="grid2">
+    <div class="card">
+      <h3>{{ t('web.brief.list') }}</h3>
+      <ul class="review" id="brief-list"></ul>
+    </div>
+    <div class="card">
+      <h3 id="brief-day">{{ t('web.brief.today') }}</h3>
+      <div id="brief-body" class="md"></div>
+      <p class="muted small" id="brief-meta"></p>
+    </div>
+  </section>
+
+  <section class="card">
+    <h3>{{ t('web.brief.settings') }}</h3>
+    <form id="brief-settings" class="kv">
+      <label class="opt">{{ t('web.brief.enabled') }}
+        <input type="checkbox" id="b-enabled">
+      </label>
+      <label class="opt">{{ t('web.brief.hour') }}
+        <input type="number" id="b-hour" min="0" max="23" value="8">
+      </label>
+      <label class="opt">{{ t('web.brief.tz') }}
+        <input type="text" id="b-tz" value="Asia/Tashkent" maxlength="64">
+      </label>
+      <label class="opt">{{ t('web.brief.quiet_from') }}
+        <input type="time" id="b-qfrom">
+      </label>
+      <label class="opt">{{ t('web.brief.quiet_to') }}
+        <input type="time" id="b-qto">
+      </label>
+      <button class="btn small" type="submit">{{ t('web.brief.save') }}</button>
+      <span class="muted small" id="brief-saved"></span>
+    </form>
+    <p class="muted small">{{ t('web.brief.quiet_note') }}</p>
+  </section>
+</div>
+<script>window.TGAI_BRIEF_DAY = "{{ day }}";</script>
+{% endblock %}
+{% block scripts %}<script src="/static/briefings.js"></script>{% endblock %}
