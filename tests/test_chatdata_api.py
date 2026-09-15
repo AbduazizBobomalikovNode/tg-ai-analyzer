@@ -298,9 +298,7 @@ def test_message_search_is_rate_limited(api: TestClient, monkeypatch: pytest.Mon
     monkeypatch.setattr(S, "hybrid_search_multi", fake_multi)
     monkeypatch.setattr(CD, "_msg_search_limiter", sec.RateLimiter(2, 60.0))
     api.cookies.set(sec.SESSION_COOKIE, sec.issue_session(USER_ID))
-    codes = [
-        api.get(f"/api/accounts/{ACC_ID}/messages/search?q=a").status_code for _ in range(3)
-    ]
+    codes = [api.get(f"/api/accounts/{ACC_ID}/messages/search?q=a").status_code for _ in range(3)]
     assert codes == [200, 200, 429]
 
 
@@ -332,9 +330,7 @@ def test_stats_shape(api: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_digests_are_capped(api: TestClient) -> None:
     day = datetime(2026, 9, 1, tzinfo=UTC)
-    api.state["rows"] = [
-        SimpleNamespace(day=day, digest=f"d{i}", msg_count=i) for i in range(200)
-    ]
+    api.state["rows"] = [SimpleNamespace(day=day, digest=f"d{i}", msg_count=i) for i in range(200)]
     api.cookies.set(sec.SESSION_COOKIE, sec.issue_session(USER_ID))
     r = api.get(f"/api/accounts/{ACC_ID}/chats/{CHAT_ID}/digests?days=14")
     assert r.status_code == 200
@@ -384,3 +380,105 @@ def test_avatar_served_with_etag_and_private_cache(
     assert r.headers["cache-control"] == "private, max-age=86400"
     assert r.headers["etag"] == '"999"'
     assert r.content == b"\xff\xd8\xffdata"
+
+
+# ─── bitta xabar (sitata hover kartasi, ui/R2b) ──────────────────────────────
+
+
+def _message(**kw: Any) -> Any:
+    base: dict[str, Any] = {
+        "id": 99,
+        "chat_id": CHAT_ID,
+        "tg_msg_id": 4321,
+        "sender_id": 12345,
+        "published_at": datetime(2026, 9, 1, 10, 30, tzinfo=UTC),
+        "text": "Salom\nikkinchi qator",
+    }
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+class _OneResult:
+    """`scalar_one_or_none()` beradigan minimal natija (bitta xabar so'rovi)."""
+
+    def __init__(self, row: Any) -> None:
+        self._row = row
+
+    def scalar_one_or_none(self) -> Any:
+        return self._row
+
+
+@pytest.fixture
+def msg_api(monkeypatch: pytest.MonkeyPatch):
+    from app.web import main as web_main
+
+    state: dict[str, Any] = {"owner": USER_ID, "chat": _chat(), "msg": _message()}
+
+    class _Session:
+        async def get(self, model: Any, ident: int) -> Any:
+            if getattr(model, "__name__", "") == "Account":
+                return SimpleNamespace(id=ident, user_id=state["owner"])
+            return None
+
+        async def execute(self, stmt: Any) -> Any:
+            return _OneResult(state["msg"])
+
+    class _MsgScope:
+        async def __aenter__(self) -> Any:
+            return _Session()
+
+        async def __aexit__(self, *exc: Any) -> None: ...
+
+    async def owned(session: Any, user_id: int, chat_id: int) -> Any:
+        return state["chat"] if state["owner"] == user_id else None
+
+    monkeypatch.setattr(CD, "session_scope", lambda: _MsgScope())
+    monkeypatch.setattr(CD.AV, "get_owned_chat", owned)
+    with TestClient(web_main.app) as c:
+        c.state = state  # type: ignore[attr-defined]
+        yield c
+
+
+MSG_PATH = f"/api/accounts/{ACC_ID}/chats/{CHAT_ID}/messages/4321"
+
+
+def test_message_detail_requires_login(msg_api: TestClient) -> None:
+    msg_api.cookies.clear()
+    assert msg_api.get(MSG_PATH).status_code == 401
+
+
+def test_message_detail_checks_ownership(msg_api: TestClient) -> None:
+    msg_api.state["owner"] = 99
+    msg_api.cookies.set(sec.SESSION_COOKIE, sec.issue_session(USER_ID))
+    assert msg_api.get(MSG_PATH).status_code == 404
+
+
+def test_message_detail_shape_and_link(msg_api: TestClient) -> None:
+    """Hover kartasi uchun: matn bir qatorga yig'iladi va `link` beriladi."""
+    msg_api.cookies.set(sec.SESSION_COOKIE, sec.issue_session(USER_ID))
+    r = msg_api.get(MSG_PATH)
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["chat_id"] == CHAT_ID and data["tg_msg_id"] == 4321
+    assert data["chat_title"] == "Toshkent yangiliklari"
+    assert "\n" not in data["text"], "matn bir qatorga yig'ilishi kerak"
+    assert data["link"] == "https://t.me/tashnews/4321"
+    assert data["date"].startswith("2026-09-01")
+    # telefon raqami/`sender_id` xom holda chiqmaydi — faqat `user:<id>` yorlig'i
+    assert data["sender"] == "user:12345"
+
+
+def test_message_detail_caps_the_text(msg_api: TestClient) -> None:
+    """Javob hajmi chegaralangan — hover kartasi butun postni tortmaydi."""
+    msg_api.state["msg"] = _message(text="x" * 5000)
+    msg_api.cookies.set(sec.SESSION_COOKIE, sec.issue_session(USER_ID))
+    r = msg_api.get(MSG_PATH)
+    assert r.status_code == 200
+    assert len(r.json()["text"]) == CD.CITATION_TEXT_CHARS
+
+
+def test_message_detail_missing_message_is_404(msg_api: TestClient) -> None:
+    msg_api.state["msg"] = None
+    msg_api.cookies.set(sec.SESSION_COOKIE, sec.issue_session(USER_ID))
+    r = msg_api.get(MSG_PATH)
+    assert r.status_code == 404 and r.json()["detail"]["code"] == "chat.err.not_found"

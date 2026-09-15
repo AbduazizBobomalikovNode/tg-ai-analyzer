@@ -10,7 +10,7 @@ oqimsiz javob bir-biridan farq qilmaydi, faqat yetkazib berish usuli boshqa.
 Nega SSE va nega `POST`: hodisalar ketma-ket va bir tomonlama (`plan` →
 `search` → `cluster` → `rerank` → `token` → `coverage` → `done`), lekin
 `EventSource` POST qila olmaydi — frontend `fetch` + `ReadableStream` bilan
-o'qiydi (`web/static/chat.js`). Shu sababli CSRF himoyasi ham odatdagidek
+o'qiydi (`web/static/pages/ask/deep.js`). Shu sababli CSRF himoyasi ham odatdagidek
 (`X-Requested-With`) ishlaydi.
 """
 

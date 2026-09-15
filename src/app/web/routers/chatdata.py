@@ -5,6 +5,7 @@ GET /api/accounts/{id}/messages/search?q=&chat_id=&limit=  lokal gibrid qidiruv
 GET /api/accounts/{id}/chats/{chat_id}                     bitta chat + sync holati
 GET /api/accounts/{id}/chats/{chat_id}/stats?days=         analytics.chat_stats + series
 GET /api/accounts/{id}/chats/{chat_id}/digests?days=       kunlik digest'lar (level 1)
+GET /api/accounts/{id}/chats/{chat_id}/messages/{tg_msg_id} bitta xabar (sitata kartasi)
 
 Router **prefikssiz** va `routers/tg.py` ichidan `include_router` bilan
 ulanadi (`/api/accounts` prefiksi o'sha yerdan keladi) — `web/main.py` ga
@@ -451,3 +452,48 @@ async def chat_detail(
             "error": chat.sync_error,
         }
     return data
+
+
+# ─── bitta xabar (sitata hover kartasi, ui/R2b) ──────────────────────────────
+
+
+#: Hover kartasidagi matn qopqog'i. `MSG_TEXT_CHARS` (300) qidiruv qatori
+#: uchun; bu yerda karta biroz kengroq, lekin baribir chegaralangan.
+CITATION_TEXT_CHARS = 600
+
+
+@router.get("/{account_id}/chats/{chat_id}/messages/{tg_msg_id}")
+async def message_detail(
+    account_id: int,
+    chat_id: int,
+    tg_msg_id: int,
+    ident: Annotated[WebIdentity, Depends(require_identity)],
+) -> dict[str, Any]:
+    """Bitta xabar — `/ask` dagi sitata chipining hover kartasi uchun.
+
+    **Faqat lokal DB**, MTProto yo'q: karta ochilishi jonli so'rov keltirib
+    chiqarmaydi (bir javobda o'nlab sitata bo'lishi mumkin). Sinxronlanmagan
+    xabar topilmaydi — UI o'sha holatda faqat "Telegram'da ochish" ni
+    ko'rsatadi.
+
+    Matn — Telegram kontenti, ya'ni **ishonchsiz**: faqat ko'rsatish uchun,
+    promptga bu yo'ldan hech qachon kirmaydi.
+    """
+    async with session_scope() as db:
+        chat = await _own_chat(db, ident.user_id, account_id, chat_id)
+        msg = (
+            await db.execute(
+                select(Message).where(Message.chat_id == chat.id, Message.tg_msg_id == tg_msg_id)
+            )
+        ).scalar_one_or_none()
+        if msg is None:
+            raise HTTPException(status_code=404, detail={"code": "chat.err.not_found"})
+        return {
+            "chat_id": chat.id,
+            "chat_title": chat.title,
+            "tg_msg_id": int(msg.tg_msg_id),
+            "date": msg.published_at.isoformat() if msg.published_at else None,
+            "sender": _sender_of(msg, chat),
+            "text": (msg.text or "").replace("\n", " ")[:CITATION_TEXT_CHARS],
+            "link": _msg_link(chat, int(msg.tg_msg_id)),
+        }
