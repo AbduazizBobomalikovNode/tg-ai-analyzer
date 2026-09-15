@@ -166,11 +166,25 @@ def wired(monkeypatch: pytest.MonkeyPatch) -> Any:
         kw["result"].user_message_id = 54
         kw["result"].run_id = 9
 
+    # Server pog'onalari sukut bo'yicha **o'chiq**: to'liq sikl testlari
+    # MTProto'ga bormasin. Eskalatsiya testlari `state["server"]` ni almashtiradi.
+    state["escalations"] = []
+    state["server"] = DS.ServerOutcome()
+
+    async def fake_escalate(_factory: Any, **kw: Any) -> DS.ServerOutcome:
+        state["escalations"].append(kw)
+        return state["server"]
+
+    async def fake_earliest(session: Any, chat_ids: Any) -> Any:
+        return state.get("earliest")
+
     monkeypatch.setattr(DS, "load_run_context", fake_ctx)
     monkeypatch.setattr(LIM, "check_daily_budget", no_budget)
     monkeypatch.setattr(DS, "_hydrate", identity)
     monkeypatch.setattr(S, "fetch_vectors", no_vectors)
     monkeypatch.setattr(DS, "_persist", fake_persist)
+    monkeypatch.setattr(DS, "escalate", fake_escalate)
+    monkeypatch.setattr(DS, "earliest_synced_at", fake_earliest)
     return state
 
 
@@ -434,6 +448,372 @@ async def test_fan_out_logs_and_survives_node_search_failure(
     )
     assert [h.message_id for h in merged] == [1]  # leksik kanal saqlanadi
     assert "deep.node_search_failed" in logged
+
+
+# ─── 2b. Server pog'onalari (3-bosqich) ──────────────────────────────────────
+
+
+def _plan(**kw: Any) -> DS.DeepPlan:
+    base: dict[str, Any] = {"subqueries": ["a", "b", "c"], "chats": [1]}
+    return DS.DeepPlan(**{**base, "intent": "lookup", **kw})
+
+
+def test_parse_plan_validates_server_scope() -> None:
+    for raw, expected in (
+        ('{"server_scope":"discover"}', "discover"),
+        ('{"server_scope":"GLOBAL"}', "global"),
+        ('{"server_scope":"none"}', "none"),
+        ('{"server_scope":"everything"}', DS.DEFAULT_SERVER_SCOPE),  # noma'lum → sukut
+        ('{"server_scope":7}', DS.DEFAULT_SERVER_SCOPE),
+        ("{}", DS.DEFAULT_SERVER_SCOPE),
+    ):
+        assert DS.parse_plan(raw, question="q", known_chats=[]).server_scope == expected
+    assert DS.parse_server_scope("nonsense", default="global") == "global"
+
+
+def test_needs_server_condition_a_gap_chat() -> None:
+    gap = _chat(2, title="Arxiv", min_id=500)
+    need, reason = DS.needs_server(_plan(), local_hits=50, gap_chats=[gap], earliest=None)
+    assert need is True and reason == "gaps"
+
+
+def test_needs_server_condition_b_too_few_local_hits() -> None:
+    need, reason = DS.needs_server(_plan(), local_hits=3, gap_chats=[], earliest=None)
+    assert need is True and reason == "few_local"
+    # chegaradan yuqorida — chiqilmaydi
+    assert DS.needs_server(_plan(), local_hits=50, gap_chats=[], earliest=None) == (False, "")
+
+
+def test_needs_server_condition_c_window_reaches_before_sync() -> None:
+    plan = _plan(intent="person", since=datetime(2020, 1, 1, tzinfo=UTC))
+    earliest = datetime(2026, 1, 1, tzinfo=UTC)
+    need, reason = DS.needs_server(plan, local_hits=50, gap_chats=[], earliest=earliest)
+    assert need is True and reason == "window"
+    # oyna indeks ichida — chiqish shart emas
+    inside = _plan(intent="person", since=datetime(2026, 6, 1, tzinfo=UTC))
+    assert DS.needs_server(inside, local_hits=50, gap_chats=[], earliest=earliest)[0] is False
+    # boshqa intent'da bu shart ishlamaydi (summary/trend lokal indeksga tayanadi)
+    summary = _plan(intent="summary", since=datetime(2020, 1, 1, tzinfo=UTC))
+    assert DS.needs_server(summary, local_hits=50, gap_chats=[], earliest=earliest)[0] is False
+
+
+def test_needs_server_condition_d_planner_scope() -> None:
+    for scope in ("global", "discover"):
+        need, reason = DS.needs_server(
+            _plan(server_scope=scope), local_hits=999, gap_chats=[], earliest=None
+        )
+        assert need is True and reason == "plan"
+
+
+def test_needs_server_scope_none_overrides_everything() -> None:
+    plan = _plan(server_scope="none", since=datetime(2020, 1, 1, tzinfo=UTC))
+    gap = _chat(2, title="Arxiv", min_id=500)
+    need, reason = DS.needs_server(plan, local_hits=0, gap_chats=[gap], earliest=None)
+    assert need is False and reason == "scope_none"
+
+
+def test_global_scope_follows_the_chat_kind() -> None:
+    chats = {1: _chat(1, title="Kanal"), 2: _chat(2, title="Guruh")}
+    chats[2].type = ChatType.SUPERGROUP
+    assert DS.global_scope_for(_plan(chats=[1]), chats) == "channels"
+    assert DS.global_scope_for(_plan(chats=[2]), chats) == "groups"
+    assert DS.global_scope_for(_plan(chats=[1, 2]), chats) == "all"
+    assert DS.global_scope_for(_plan(chats=None), chats) == "all"
+
+
+def test_person_username_only_for_person_intent() -> None:
+    assert DS.person_username(_plan(intent="person", entities=["Nurbek", "@nurbek"])) == "@nurbek"
+    assert DS.person_username(_plan(intent="person", entities=["Nurbek"])) is None
+    assert DS.person_username(_plan(intent="lookup", entities=["@nurbek"])) is None
+
+
+def _fake_tg(monkeypatch: pytest.MonkeyPatch, **answers: Any) -> dict[str, list[Any]]:
+    """`tg_search` server funksiyalarini soxtalashtiradi (MTProto yo'q)."""
+    seen: dict[str, list[Any]] = {"chat": [], "global": [], "discover": []}
+
+    def _answer(key: str, default: Any) -> Any:
+        found = answers.get(key, default)
+        return found() if callable(found) else found
+
+    async def chat(account_id: int, chat_id: int, query: str, **kw: Any) -> Any:
+        seen["chat"].append({"chat_id": chat_id, "query": query, **kw})
+        return _answer("chat", DS.TG.ServerHits(calls=1))
+
+    async def glob(account_id: int, query: str, **kw: Any) -> Any:
+        seen["global"].append({"query": query, **kw})
+        return _answer("global", DS.TG.ServerHits(calls=1))
+
+    async def discover(account_id: int, query: str, **kw: Any) -> Any:
+        seen["discover"].append({"query": query, **kw})
+        return _answer("discover", DS.TG.ServerHits(calls=1))
+
+    async def persist(session: Any, account_id: int, hits: Any) -> int:
+        return 0
+
+    monkeypatch.setattr(DS.TG, "server_search_chat", chat)
+    monkeypatch.setattr(DS.TG, "server_search_global", glob)
+    monkeypatch.setattr(DS.TG, "server_discover", discover)
+    monkeypatch.setattr(DS.TG, "persist_server_hits", persist)
+    return seen
+
+
+def _server_hit(mid: int, *, peer: int | None = 100, db_id: int | None = None) -> Any:
+    return DS.TG.ServerHit(
+        tg_msg_id=mid,
+        tg_peer_id=peer,
+        date=datetime(2026, 9, 3, tzinfo=UTC),
+        sender="Nurbek",
+        text=f"serverdan kelgan xabar {mid}",
+        chat_title="Arxiv",
+        chat_id=2 if db_id else None,
+        link=f"https://t.me/ielts/{mid}",
+        message_id=db_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_escalate_runs_rungs_in_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tartib: gap-chatlar (top 2 subquery) → global. Discover so'ralmagan — yo'q."""
+    seen = _fake_tg(monkeypatch)
+    gap = _chat(2, title="Arxiv", min_id=500)
+
+    out = await DS.escalate(
+        factory,
+        account_id=1,
+        plan=_plan(intent="person", entities=["@nurbek"]),
+        gap_chats=[gap],
+        chats_by_id={1: _chat(1, title="Ish"), 2: gap},
+        events=None,
+        max_calls=6,
+    )
+
+    assert out.rungs == ["chat", "global"] and out.used is True
+    assert [c["query"] for c in seen["chat"]] == ["a", "b"]  # faqat top 2
+    assert seen["chat"][0]["from_user"] == "@nurbek"  # person → from_user
+    assert [c["query"] for c in seen["global"]] == ["a"]  # eng yaxshi subquery
+    assert seen["discover"] == []
+    assert out.calls == 3
+
+
+@pytest.mark.asyncio
+async def test_escalate_respects_the_call_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = _fake_tg(monkeypatch)
+    gaps = [_chat(2, title="A", min_id=5), _chat(3, title="B", min_id=5)]
+
+    out = await DS.escalate(
+        factory,
+        account_id=1,
+        plan=_plan(),
+        gap_chats=gaps,
+        chats_by_id={c.id: c for c in gaps},
+        events=None,
+        max_calls=2,
+    )
+
+    assert out.calls == 2 and len(seen["chat"]) == 2
+    assert seen["global"] == []  # byudjet tugadi — global pog'ona umuman yo'q
+    assert out.rungs == ["chat"]
+
+
+@pytest.mark.asyncio
+async def test_escalate_skips_a_rate_limited_bucket(monkeypatch: pytest.MonkeyPatch) -> None:
+    limited = DS.TG.ServerHits(rate_limited="search", error_text="error: rate_limited:search")
+    seen = _fake_tg(monkeypatch, chat=limited, **{"global": limited})
+    gap = _chat(2, title="Arxiv", min_id=500)
+
+    out = await DS.escalate(
+        factory,
+        account_id=1,
+        plan=_plan(),
+        gap_chats=[gap],
+        chats_by_id={2: gap},
+        events=None,
+        max_calls=6,
+    )
+
+    assert out.skipped == ["search"]  # bir marta yoziladi, takrorlanmaydi
+    assert len(seen["chat"]) == 1  # to'lgan bucket'da pog'ona darhol tashlanadi
+    assert out.calls == 0 and out.rungs == [] and out.used is False
+
+
+@pytest.mark.asyncio
+async def test_escalate_discover_only_with_explicit_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen = _fake_tg(monkeypatch)
+    gap = _chat(2, title="Arxiv", min_id=500)
+    common = {
+        "account_id": 1,
+        "gap_chats": [gap],
+        "chats_by_id": {2: gap},
+        "events": None,
+        "max_calls": 6,
+    }
+
+    await DS.escalate(factory, plan=_plan(server_scope="gaps"), **common)
+    assert seen["discover"] == []  # aniq so'ralmagan — ochiq kanallarga chiqilmaydi
+    before = (len(seen["chat"]), len(seen["global"]))
+
+    out = await DS.escalate(factory, plan=_plan(server_scope="discover"), **common)
+    assert [c["query"] for c in seen["discover"]] == ["a"]
+    assert out.rungs == ["discover"]
+    # discover rejimida lokal chat/global pog'onalari o'tkazib yuboriladi
+    assert (len(seen["chat"]), len(seen["global"])) == before
+
+
+@pytest.mark.asyncio
+async def test_escalate_marks_unknown_chats_as_external(monkeypatch: pytest.MonkeyPatch) -> None:
+    found = DS.TG.ServerHits(hits=[_server_hit(11, db_id=900), _server_hit(12, peer=999)], calls=1)
+    _fake_tg(monkeypatch, **{"global": found})
+
+    out = await DS.escalate(
+        factory,
+        account_id=1,
+        plan=_plan(),
+        gap_chats=[],
+        chats_by_id={},
+        events=None,
+        max_calls=6,
+    )
+
+    assert out.external == 1  # ikkinchisi lokal `chats` da yo'q
+    assert 900 in out.server_ids
+    external_id = next(i for i in out.server_ids if i < 0)
+    assert out.external_links[external_id] == "https://t.me/ielts/12"
+
+
+@pytest.mark.asyncio
+async def test_escalate_emits_server_search_events(monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_tg(monkeypatch)
+    gap = _chat(2, title="Arxiv", min_id=500)
+    events: list[DS.DeepEvent] = []
+
+    async def sink(e: DS.DeepEvent) -> None:
+        events.append(e)
+
+    await DS.escalate(
+        factory,
+        account_id=1,
+        plan=_plan(subqueries=["a"]),
+        gap_chats=[gap],
+        chats_by_id={2: gap},
+        events=sink,  # type: ignore[arg-type]
+        max_calls=6,
+    )
+
+    assert [e.kind for e in events] == ["search", "search"]
+    assert all(e.data["level"] == "server" for e in events)
+    assert [e.data["rung"] for e in events] == ["chat", "global"]
+
+
+@pytest.mark.asyncio
+async def test_run_escalates_when_local_is_thin(
+    monkeypatch: pytest.MonkeyPatch, wired: dict[str, Any]
+) -> None:
+    """Lokal hitlar chegaradan kam — server pog'onasi chaqiriladi va hisobga tushadi."""
+    use_multi(monkeypatch, lambda q: [_hit(1)])
+    wired["server"] = DS.ServerOutcome(
+        hits=[_hit(30, text="serverdan")],
+        calls=2,
+        rungs=["global"],
+        skipped=["discover"],
+        external=1,
+        server_ids={30},
+    )
+    result = await DS.run_deep_search(factory, 1, 10, "to'lov?", locale="uz", llm=FakeLLM())  # type: ignore[arg-type]
+
+    assert wired["escalations"], "server pog'onasi chaqirilmadi"
+    cov = result.coverage
+    assert cov.server_rungs_used is True and cov.server_calls == 2
+    assert cov.server_hits == 1 and cov.server_skipped == ["discover"]
+    assert cov.external_hits == 1
+    assert "Telegram server qidiruvi" in result.answer
+
+
+@pytest.mark.asyncio
+async def test_run_does_not_escalate_when_local_is_enough(
+    monkeypatch: pytest.MonkeyPatch, wired: dict[str, Any]
+) -> None:
+    use_multi(monkeypatch, lambda q: [_hit(i) for i in range(1, 30)])
+    result = await DS.run_deep_search(factory, 1, 10, "to'lov?", locale="uz", llm=FakeLLM())  # type: ignore[arg-type]
+
+    assert wired["escalations"] == []
+    assert result.coverage.server_rungs_used is False
+    assert result.coverage.server_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_run_never_escalates_with_scope_none(
+    monkeypatch: pytest.MonkeyPatch, wired: dict[str, Any]
+) -> None:
+    use_multi(monkeypatch, lambda q: [_hit(1)])  # bitta hit — aks holda chiqardi
+    llm = FakeLLM(plan='{"intent":"lookup","chats":[1],"subqueries":["a"],"server_scope":"none"}')
+    await DS.run_deep_search(factory, 1, 10, "to'lov?", locale="uz", llm=llm)  # type: ignore[arg-type]
+    assert wired["escalations"] == []
+
+
+@pytest.mark.asyncio
+async def test_server_hits_reach_evidence_with_the_tag(
+    monkeypatch: pytest.MonkeyPatch, wired: dict[str, Any]
+) -> None:
+    use_multi(monkeypatch, lambda q: [_hit(1)])
+    wired["server"] = DS.ServerOutcome(
+        hits=[_hit(30, text="serverdan kelgan dalil")],
+        calls=1,
+        rungs=["global"],
+        external=1,
+        server_ids={30},
+        external_links={30: "https://t.me/ielts/130"},
+    )
+    llm = FakeLLM()
+    await DS.run_deep_search(factory, 1, 10, "to'lov?", locale="uz", llm=llm)  # type: ignore[arg-type]
+
+    envelope = llm.user_turn(DEEP_SYNTH_PROMPT)
+    assert "#130 [" in envelope and "[server external]" in envelope
+    assert envelope.count("<untrusted_data") == 1  # yagona konvert buzilmadi
+
+
+def test_evidence_marks_server_and_external() -> None:
+    ev = DS.to_evidence(
+        [_hit(1), _hit(2), _hit(3)],
+        [],
+        link_prefixes={1: "https://t.me/c/1/"},
+        server_ids={2, 3},
+        external_links={3: "https://t.me/ielts/103"},
+    )
+    assert (ev[0].server, ev[0].external) == (False, False)
+    assert (ev[1].server, ev[1].external) == (True, False)
+    assert (ev[2].server, ev[2].external) == (True, True)
+    assert ev[2].link == "https://t.me/ielts/103"  # tashqi havola ustun
+
+    envelope, _ = DS.build_evidence_envelope(ev, [])
+    assert "[server]" in envelope and "[server external]" in envelope
+    assert envelope.count("[server external]") == 1
+
+
+def test_coverage_carries_server_numbers() -> None:
+    server = DS.ServerOutcome(
+        hits=[_hit(30), _hit(31)], calls=4, rungs=["chat"], skipped=["discover"], external=2
+    )
+    cov = DS.build_coverage(
+        scanned_hits=[_hit(1)],
+        messages_scanned=5,
+        chats_total=3,
+        searched_chats=[_chat(1, title="Ish")],
+        evidence=[],
+        clusters=[],
+        rounds=1,
+        truncated=False,
+        marginal_stop=False,
+        server=server,
+    )
+    assert cov.server_rungs_used is True and cov.server_calls == 4
+    assert cov.server_hits == 2 and cov.external_hits == 2
+    assert cov.server_skipped == ["discover"]
+    assert cov.to_dict()["server_calls"] == 4
+    for locale in ("uz", "ru", "en"):
+        text = DS.render_coverage(cov, locale=locale)
+        assert "4" in text and "discover" in text
 
 
 # ─── 3. Dalil konverti va sitatalar ──────────────────────────────────────────

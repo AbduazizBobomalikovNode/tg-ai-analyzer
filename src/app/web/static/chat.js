@@ -225,6 +225,19 @@
     if (cov.gaps && cov.gaps.length) {
       html += `<div class="cov-gaps">⚠️ ${esc(t("web.deep.gaps"))}: ${esc(cov.gaps.slice(0, 8).join(", "))}${cov.gaps.length > 8 ? ` (+${cov.gaps.length - 8})` : ""}</div>`;
     }
+    // Server pog'onalari — halol hisob: nechta so'rov ketdi, nechta topildi,
+    // qaysi shift to'ldi. Tekshirilmagan (tashqi) topilmalar alohida.
+    if (cov.server_rungs_used) {
+      const srv = [
+        `${esc(t("web.deep.cov_server_calls"))}: <b>${cov.server_calls || 0}</b>`,
+        `${esc(t("web.deep.cov_server_hits"))}: <b>${cov.server_hits || 0}</b>`,
+      ];
+      if (cov.external_hits) srv.push(`${esc(t("web.deep.cov_external"))}: <b>${cov.external_hits}</b>`);
+      html += `<div class="cov-rows">${esc(t("web.deep.cov_server"))} — ${srv.join(" · ")}</div>`;
+    }
+    if (cov.server_skipped && cov.server_skipped.length) {
+      html += `<div class="cov-gaps">⚠️ ${esc(t("web.deep.server_skipped"))}: ${esc(cov.server_skipped.join(", "))}</div>`;
+    }
     if (cov.truncated) html += `<div class="cov-gaps">⚠️ ${esc(t("web.deep.truncated"))}</div>`;
     wrap.innerHTML = html;
     wrap.hidden = false;
@@ -299,7 +312,7 @@
 
     const reader = res.body.getReader();
     const dec = new TextDecoder();
-    let buf = "", answer = "", total = 0, searched = 0, failed = null;
+    let buf = "", answer = "", total = 0, searched = 0, served = 0, failed = null;
     for (;;) {
       const { value, done } = await reader.read();
       if (done) break;
@@ -311,6 +324,7 @@
         if (!ev) continue;
         const d = ev.data || {};
         if (ev.kind === "plan") { total = (d.subqueries || []).length; step("web.deep.step_search", { n: 0, m: total }); }
+        else if (ev.kind === "search" && d.level === "server") { served++; step("web.deep.step_server", { n: served }); }
         else if (ev.kind === "search") { searched++; step("web.deep.step_search", { n: searched, m: total || searched }); }
         else if (ev.kind === "cluster") { renderChips(chips, d.clusters); step("web.deep.step_cluster", { n: (d.clusters || []).length }); }
         else if (ev.kind === "rerank") { step("web.deep.step_rank", { n: d.kept || 0 }); }

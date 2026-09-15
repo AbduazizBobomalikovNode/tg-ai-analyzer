@@ -50,7 +50,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, cast
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -71,6 +71,7 @@ from app.services import cluster as C
 from app.services import limits as LIM
 from app.services import rerank as RR
 from app.services import search as S
+from app.services import tg_search as TG
 from app.services import tools as T
 from app.services import untrusted as U
 from app.services.prompts_deep import (
@@ -110,6 +111,22 @@ MAX_ENTITIES = 10
 EVIDENCE_TEXT_CHARS = 400
 LEVELS = (0, 1, 2)
 INTENTS = ("lookup", "summary", "trend", "compare", "person")
+
+# ─── server pog'onalari (3-bosqich) ──────────────────────────────────────────
+# Lokal indeks har doim birinchi. Serverga chiqish — qamrov yetmaganda, kodda
+# hisoblangan shart bo'yicha (modeldan so'ralmaydi, u faqat `server_scope`
+# bilan **maslahat** bera oladi).
+SERVER_SCOPES = ("none", "gaps", "global", "discover")
+DEFAULT_SERVER_SCOPE = "gaps"
+SERVER_MIN_LOCAL_HITS = 8  # `.env` bekor qiladi: DEEP_SERVER_MIN_LOCAL_HITS
+SERVER_MAX_CALLS = 6  # `.env` bekor qiladi: DEEP_SERVER_MAX_CALLS
+SERVER_RRF_WEIGHT = 0.9  # lokal kanal 1.0 — server reytingsiz, faqat kalit so'z
+SERVER_SUBQUERIES_PER_CHAT = 2
+SERVER_GAP_CHATS_MAX = 3
+SERVER_LIMIT = 20
+# Tashqi (lokal `chats` da yo'q) hit uchun sintetik, **manfiy** `message_id`:
+# lokal id fazasiga urilmaydi va `_hydrate` uni DB'dan topmaydi.
+EXTERNAL_ID_BASE = -1_000_000
 
 _JSON_RE = re.compile(r"\{.*\}", re.S)
 _CITE_RE = re.compile(r"#(\d{1,12})")
@@ -151,6 +168,9 @@ class DeepPlan:
     levels: list[int] = field(default_factory=lambda: list(LEVELS))
     use_hyde: bool = False
     hyde_text: str = ""
+    # `none | gaps | global | discover` — modelning **maslahati**, majburiyat
+    # emas: chiqish yoki chiqmaslikni `needs_server()` kodda hal qiladi.
+    server_scope: str = DEFAULT_SERVER_SCOPE
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -162,6 +182,7 @@ class DeepPlan:
             "entities": list(self.entities),
             "levels": list(self.levels),
             "use_hyde": self.use_hyde,
+            "server_scope": self.server_scope,
         }
 
 
@@ -178,6 +199,11 @@ class DeepEvidence:
     link: str = ""
     cluster: int = 0
     taint: bool = True
+    # Telegram serveridan kelgan (lokal indeksda topilmagan) — `[server]`
+    server: bool = False
+    # Lokal `chats` da yo'q chatdan (discover) — lokal indeks bilan
+    # solishtirilmagan, faqat `t.me` havolasi bor: `[server external]`
+    external: bool = False
 
     def to_citation(self) -> dict[str, Any]:
         return {
@@ -199,7 +225,11 @@ class Coverage:
     range_from: datetime | None = None
     range_to: datetime | None = None
     gaps: list[str] = field(default_factory=list)
-    server_rungs_used: bool = False  # 2-bosqichda har doim False (faqat lokal indeks)
+    server_rungs_used: bool = False
+    server_calls: int = 0  # bajarilgan MTProto so'rovlari
+    server_hits: int = 0  # serverdan kelgan (dedupdan oldingi) topilmalar
+    server_skipped: list[str] = field(default_factory=list)  # to'lgan bucket'lar
+    external_hits: int = 0  # lokal `chats` da yo'q chatdan — tekshirilmagan
     rounds: int = 1
     confidence: str = "low"
     truncated: bool = False
@@ -216,6 +246,10 @@ class Coverage:
             },
             "gaps": list(self.gaps),
             "server_rungs_used": self.server_rungs_used,
+            "server_calls": self.server_calls,
+            "server_hits": self.server_hits,
+            "server_skipped": list(self.server_skipped),
+            "external_hits": self.external_hits,
             "rounds": self.rounds,
             "confidence": self.confidence,
             "truncated": self.truncated,
@@ -470,7 +504,20 @@ def parse_plan(raw: str, *, question: str, known_chats: Sequence[int]) -> DeepPl
 
     plan.use_hyde = bool(data.get("use_hyde")) and plan.intent == "lookup"
     plan.use_hyde = plan.use_hyde and len(question.split()) < HYDE_MAX_WORDS
+    plan.server_scope = parse_server_scope(data.get("server_scope"))
     return plan
+
+
+def parse_server_scope(value: Any, *, default: str = DEFAULT_SERVER_SCOPE) -> str:
+    """`none|gaps|global|discover` — boshqa hamma narsa sukutga tushadi.
+
+    `discover` **ataylab tor**: u ochiq kanallarni qidiradi, ya'ni egasining
+    arxividan tashqariga chiqadi. Model uni aniq so'ramasa hech qachon
+    ishlatilmaydi.
+    """
+    if isinstance(value, str) and value.strip().lower() in SERVER_SCOPES:
+        return value.strip().lower()
+    return default
 
 
 async def plan_query(
@@ -663,6 +710,250 @@ async def fan_out(
     return fused[:MAX_CANDIDATES]
 
 
+# ─── 2b. Telegram server pog'onalari ─────────────────────────────────────────
+# "Burchakdan burchakka": lokal indeks sinxronlangan tarixni ko'radi, Telegram
+# serveri esa **sinxronlanmaganini** ham. Chiqish sharti kodda hisoblanadi —
+# model faqat `server_scope` bilan maslahat beradi.
+
+
+@dataclass(slots=True)
+class ServerOutcome:
+    """Server pog'onalarining natijasi — qamrovga **rost** raqamlar beradi."""
+
+    hits: list[S.Hit] = field(default_factory=list)
+    calls: int = 0
+    rungs: list[str] = field(default_factory=list)
+    skipped: list[str] = field(default_factory=list)  # to'lgan bucket nomlari
+    external: int = 0
+    reason: str = ""
+    server_ids: set[int] = field(default_factory=set)
+    external_links: dict[int, str] = field(default_factory=dict)
+
+    @property
+    def used(self) -> bool:
+        return bool(self.rungs)
+
+
+def needs_server(
+    plan: DeepPlan,
+    *,
+    local_hits: int,
+    gap_chats: Sequence[Chat],
+    earliest: datetime | None,
+    min_local_hits: int = SERVER_MIN_LOCAL_HITS,
+) -> tuple[bool, str]:
+    """Serverga chiqish kerakmi? `(kerak, sabab)` — to'rtta shart, kodda.
+
+    (a) qidirilgan chatlardan birida bo'shliq bor (`synced_min_id != 1`);
+    (b) lokal topilma `min_local_hits` dan kam;
+    (c) aniq savol (`lookup`/`person`) va reja oynasi eng eski sinxronlangan
+        xabardan **oldinga** cho'zilgan — lokal indeks u yerni ko'rmaydi;
+    (d) planner/reflect `server_scope` ni `global`/`discover` qilib qo'ygan.
+
+    `server_scope == "none"` — hamma shartni bekor qiladi (model "kerak emas"
+    dedi va bu arzon tomon, shuning uchun unga ishoniladi).
+    """
+    if plan.server_scope == "none":
+        return False, "scope_none"
+    if plan.server_scope in ("global", "discover"):
+        return True, "plan"
+    if gap_chats:
+        return True, "gaps"
+    if local_hits < min_local_hits:
+        return True, "few_local"
+    if plan.intent in ("lookup", "person") and plan.since is not None:
+        if earliest is None or plan.since < earliest:
+            return True, "window"
+    return False, ""
+
+
+async def earliest_synced_at(session: AsyncSession, chat_ids: Sequence[int]) -> datetime | None:
+    """Maqsad chatlardagi eng eski sinxronlangan xabar sanasi (shart (c) uchun)."""
+    if not chat_ids:
+        return None
+    stmt = select(func.min(Message.published_at)).where(Message.chat_id.in_(list(chat_ids)))
+    found: datetime | None = (await session.execute(stmt)).scalar()
+    return found
+
+
+def global_scope_for(plan: DeepPlan, chats_by_id: dict[int, Chat]) -> str:
+    """`plan.chats` turlaridan `SearchGlobal` scope'i (aralash bo'lsa — `all`)."""
+    kinds = {chats_by_id[c].type for c in (plan.chats or []) if c in chats_by_id}
+    if not kinds:
+        return "all"
+    if kinds == {ChatType.CHANNEL}:
+        return "channels"
+    if kinds <= {ChatType.GROUP, ChatType.SUPERGROUP}:
+        return "groups"
+    if kinds == {ChatType.PRIVATE}:
+        return "users"
+    return "all"
+
+
+def person_username(plan: DeepPlan) -> str | None:
+    """`intent=person` va entity'larda `@username` bo'lsa — `from_user` uchun."""
+    if plan.intent != "person":
+        return None
+    for ent in plan.entities:
+        name = ent.strip()
+        if name.startswith("@") and len(name) > 2:
+            return name
+    return None
+
+
+def _to_local_hits(
+    found: Sequence[TG.ServerHit], outcome: ServerOutcome, *, rank_base: int
+) -> list[S.Hit]:
+    """`ServerHit` → `search.Hit`. Saqlanmagani **manfiy** sintetik id oladi."""
+    out: list[S.Hit] = []
+    for i, h in enumerate(found):
+        mid = h.message_id
+        if mid is None:  # lokal `chats` da yo'q → tashqi, sitata faqat havola bilan
+            mid = EXTERNAL_ID_BASE - (rank_base + i)
+            outcome.external += 1
+            outcome.external_links[mid] = h.link
+        outcome.server_ids.add(mid)
+        out.append(
+            S.Hit(
+                message_id=mid,
+                tg_msg_id=int(h.tg_msg_id),
+                score=1.0 / (i + 1),
+                source="tg_server",
+                chat_id=int(h.chat_id or 0),
+                chat_title=h.chat_title,
+                sender=h.sender,
+                date=h.date,
+                text=S.compact_text(h.text or "", max_chars=S.MAX_MSG_CHARS),
+            )
+        )
+    return out
+
+
+async def _absorb(
+    session_factory: SessionFactory,
+    account_id: int,
+    result: TG.ServerHits,
+    outcome: ServerOutcome,
+) -> list[S.Hit]:
+    """Bitta rung natijasini yutadi: saqlash + `S.Hit` ga aylantirish."""
+    outcome.calls += result.calls
+    if result.rate_limited and result.rate_limited not in outcome.skipped:
+        outcome.skipped.append(result.rate_limited)
+    if result.error_text and not result.rate_limited:
+        log.info("deep.server_rung_error", error=result.error_text[:160])
+    if not result.hits:
+        return []
+    async with session_factory() as session:
+        await TG.persist_server_hits(session, account_id, result.hits)
+    return _to_local_hits(result.hits, outcome, rank_base=len(outcome.hits))
+
+
+async def escalate(
+    session_factory: SessionFactory,
+    *,
+    account_id: int,
+    plan: DeepPlan,
+    gap_chats: Sequence[Chat],
+    chats_by_id: dict[int, Chat],
+    events: EventSink | None,
+    max_calls: int = SERVER_MAX_CALLS,
+) -> ServerOutcome:
+    """Pog'onalar **tartibda**: gap-chatlar → global → discover (aniq so'ralsa).
+
+    Har pog'ona `max_calls` va `MethodBuckets` bilan chegaralangan. To'lgan
+    bucket — xato emas: o'sha pog'ona **o'tkazib yuboriladi** va qamrovga
+    `server_skipped` bo'lib yoziladi (kutish yo'q, retry yo'q).
+    """
+    outcome = ServerOutcome()
+    if max_calls <= 0 or not plan.subqueries:
+        return outcome
+    subqueries = list(plan.subqueries)
+    from_user = person_username(plan)
+
+    def budget_left() -> bool:
+        return outcome.calls < max_calls
+
+    # ── 1-pog'ona: bo'shliqli chatlar ichida (messages.Search) ──────────────
+    if plan.server_scope != "discover":
+        stop = False
+        for chat in list(gap_chats)[:SERVER_GAP_CHATS_MAX]:
+            if stop:
+                break
+            for sq in subqueries[:SERVER_SUBQUERIES_PER_CHAT]:
+                if not budget_left():
+                    stop = True
+                    break
+                res = await TG.server_search_chat(
+                    account_id,
+                    int(chat.id),
+                    sq,
+                    from_user=from_user,
+                    since=plan.since,
+                    until=plan.until,
+                    limit=SERVER_LIMIT,
+                    chat_title=chat.title,
+                )
+                got = await _absorb(session_factory, account_id, res, outcome)
+                if got:
+                    outcome.hits.extend(got)
+                if "chat" not in outcome.rungs and res.calls:
+                    outcome.rungs.append("chat")
+                await _emit(
+                    events,
+                    "search",
+                    subquery=sq,
+                    hits=len(got),
+                    level="server",
+                    rung="chat",
+                    chat=chat.title,
+                )
+                if res.rate_limited:
+                    stop = True
+                    break
+
+    # ── 2-pog'ona: akkaunt kirgan barcha chatlar (messages.SearchGlobal) ────
+    if plan.server_scope != "discover" and budget_left():
+        scope = global_scope_for(plan, chats_by_id)
+        res = await TG.server_search_global(
+            account_id,
+            subqueries[0],
+            scope=scope,
+            since=plan.since,
+            until=plan.until,
+            limit=SERVER_LIMIT,
+        )
+        got = await _absorb(session_factory, account_id, res, outcome)
+        outcome.hits.extend(got)
+        if res.calls:
+            outcome.rungs.append("global")
+        await _emit(
+            events, "search", subquery=subqueries[0], hits=len(got), level="server", rung="global"
+        )
+
+    # ── 3-pog'ona: ochiq kanallar — FAQAT aniq so'ralganda ──────────────────
+    if plan.server_scope == "discover" and budget_left():
+        res = await TG.server_discover(account_id, subqueries[0])
+        got = await _absorb(session_factory, account_id, res, outcome)
+        outcome.hits.extend(got)
+        if res.calls:
+            outcome.rungs.append("discover")
+        if res.note:
+            log.info("deep.discover_note", note=res.note[:160])
+        await _emit(
+            events, "search", subquery=subqueries[0], hits=len(got), level="server", rung="discover"
+        )
+
+    log.info(
+        "deep.server_rungs",
+        rungs=outcome.rungs,
+        calls=outcome.calls,
+        hits=len(outcome.hits),
+        external=outcome.external,
+        skipped=outcome.skipped,
+    )
+    return outcome
+
+
 # ─── 3. Dedup + klaster + rerank ─────────────────────────────────────────────
 
 
@@ -749,7 +1040,9 @@ async def reflect(
     *,
     stats: dict[str, Any],
     asked: Sequence[str],
-) -> tuple[bool, list[str]]:
+    server_scope: str = DEFAULT_SERVER_SCOPE,
+) -> tuple[bool, list[str], str]:
+    """`(needs_more, new_subqueries, server_scope)` — oxirgisi 2-raund uchun."""
     prompt = build_reflect_prompt(question, clusters, stats=stats, asked=asked)
     taint.assert_clean("reflect", prompt)
     try:
@@ -761,8 +1054,10 @@ async def reflect(
         )
     except LLMError as exc:
         log.warning("deep.reflect_failed", error=str(exc)[:200])
-        return False, []
-    return parse_reflect(res.text)
+        return False, [], server_scope
+    needs, subs = parse_reflect(res.text)
+    scope = parse_server_scope(_json_obj(res.text).get("server_scope"), default=server_scope)
+    return needs, subs, scope
 
 
 def marginal_yield(clusters: Sequence[C.Cluster], seen_ids: set[int]) -> float:
@@ -782,15 +1077,28 @@ def to_evidence(
     clusters: Sequence[C.Cluster],
     *,
     link_prefixes: dict[int, str] | None = None,
+    server_ids: set[int] | None = None,
+    external_links: dict[int, str] | None = None,
 ) -> list[DeepEvidence]:
-    """Rerank tartibini saqlab, har hitni klasteriga va `t.me` havolasiga bog'laydi."""
+    """Rerank tartibini saqlab, har hitni klasteriga va `t.me` havolasiga bog'laydi.
+
+    `server_ids` / `external_links` — server pog'onalaridan kelgan hitlar:
+    birinchisi `[server]`, ikkinchisi qo'shimcha `external` belgisini beradi
+    (lokal `chats` da yo'q chat — havoladan boshqa hech narsa tekshirilmagan).
+    """
     prefixes = link_prefixes or {}
+    from_server = server_ids or set()
+    ext = external_links or {}
     cluster_of: dict[int, int] = {}
     for i, c in enumerate(clusters):
         for h in c.hits:
             cluster_of.setdefault(h.message_id, i)
     out: list[DeepEvidence] = []
     for h in ranked:
+        external = h.message_id in ext
+        link = ext.get(h.message_id) or (
+            f"{prefixes.get(h.chat_id, '')}{h.tg_msg_id}" if prefixes.get(h.chat_id) else ""
+        )
         out.append(
             DeepEvidence(
                 tg_msg_id=h.tg_msg_id,
@@ -799,10 +1107,10 @@ def to_evidence(
                 date=h.date,
                 sender=h.sender,
                 text=S.compact_text(h.text or "", max_chars=EVIDENCE_TEXT_CHARS),
-                link=f"{prefixes.get(h.chat_id, '')}{h.tg_msg_id}"
-                if prefixes.get(h.chat_id)
-                else "",
+                link=link,
                 cluster=cluster_of.get(h.message_id, 0),
+                server=h.message_id in from_server or external,
+                external=external,
             )
         )
     return out
@@ -842,7 +1150,12 @@ def build_evidence_envelope(
         for e in by_cluster[idx]:
             when = e.date.strftime("%Y-%m-%d %H:%M") if e.date else "?"
             head = f"{U.attr(e.chat_title)} | {when} | {U.attr(e.sender)}"
-            line = f"#{e.tg_msg_id} [{head}] {U.neutralize(e.text)}"
+            # Manba belgisi: `[server]` — Telegram serveridan (lokal indeksda
+            # yo'q edi), `external` — lokal arxivda umuman bo'lmagan chatdan.
+            tag = ""
+            if e.server:
+                tag = " [server external]" if e.external else " [server]"
+            line = f"#{e.tg_msg_id} [{head}]{tag} {U.neutralize(e.text)}"
             if total + len(line) > max_chars:
                 dropped += 1
                 continue
@@ -934,9 +1247,11 @@ def build_coverage(
     rounds: int,
     truncated: bool,
     marginal_stop: bool,
+    server: ServerOutcome | None = None,
 ) -> Coverage:
     dates = [h.date for h in scanned_hits if h.date]
     gaps = [c.title for c in searched_chats if (c.synced_min_id or 0) != 1]
+    srv = server or ServerOutcome()
     cov = Coverage(
         chats_searched=len(searched_chats),
         chats_total=chats_total,
@@ -944,7 +1259,11 @@ def build_coverage(
         range_from=min(dates) if dates else None,
         range_to=max(dates) if dates else None,
         gaps=sorted(gaps)[:50],
-        server_rungs_used=False,
+        server_rungs_used=srv.used,
+        server_calls=srv.calls,
+        server_hits=len(srv.hits),
+        server_skipped=list(srv.skipped),
+        external_hits=srv.external,
         rounds=rounds,
         truncated=truncated,
         marginal_stop=marginal_stop,
@@ -968,6 +1287,9 @@ _COVERAGE_LABELS: dict[str, dict[str, str]] = {
         "rounds": "raund",
         "truncated": "byudjet tugadi — dalillarning bir qismi tashlandi",
         "confidence": "ishonch",
+        "server": "Telegram server qidiruvi",
+        "server_skipped": "shift to'ldi, o'tkazib yuborildi",
+        "external": "tashqi (lokal indeksda yo'q) topilma",
     },
     "ru": {
         "title": "Охват",
@@ -978,6 +1300,9 @@ _COVERAGE_LABELS: dict[str, dict[str, str]] = {
         "rounds": "раунд",
         "truncated": "бюджет исчерпан — часть свидетельств отброшена",
         "confidence": "уверенность",
+        "server": "Поиск на сервере Telegram",
+        "server_skipped": "лимит исчерпан, шаг пропущен",
+        "external": "внешние (не из локального индекса) находки",
     },
     "en": {
         "title": "Coverage",
@@ -988,6 +1313,9 @@ _COVERAGE_LABELS: dict[str, dict[str, str]] = {
         "rounds": "round",
         "truncated": "budget exhausted — some evidence was dropped",
         "confidence": "confidence",
+        "server": "Telegram server search",
+        "server_skipped": "rate limit reached, rung skipped",
+        "external": "external (not in the local index) hits",
     },
 }
 
@@ -1012,6 +1340,13 @@ def render_coverage(cov: Coverage, *, locale: str = "uz") -> str:
         shown = ", ".join(cov.gaps[:8])
         more = f" (+{len(cov.gaps) - 8})" if len(cov.gaps) > 8 else ""
         out += f"\n\n⚠️ {lab['gaps']}: {shown}{more}"
+    if cov.server_rungs_used:
+        srv = f"\n\n{lab['server']}: {cov.server_calls} · {cov.server_hits}"
+        if cov.external_hits:
+            srv += f" · {cov.external_hits} {lab['external']}"
+        out += srv
+    if cov.server_skipped:
+        out += f"\n\n⚠️ {lab['server_skipped']}: {', '.join(cov.server_skipped)}"
     if cov.truncated:
         out += f"\n\n⚠️ {lab['truncated']}"
     return out
@@ -1161,6 +1496,72 @@ async def run_deep_search(
     ranked: list[S.Hit] = []
     plan = DeepPlan(subqueries=[question[:200]])
     asked: list[str] = []
+    server_out = ServerOutcome()
+    server_calls_max = int(s.deep_server_max_calls or 0) if s.deep_server_rungs_enabled else 0
+    server_min_local = int(s.deep_server_min_local_hits)
+
+    async def maybe_escalate(current: list[S.Hit]) -> list[S.Hit]:
+        """Lokal qamrov yetmasa — server pog'onalari; aks holda hech narsa qilmaydi.
+
+        Chiqish sharti **kodda** (`needs_server`), model faqat `server_scope`
+        bilan maslahat beradi. Byudjet butun yugurish bo'yicha yig'iladi.
+        """
+        left = server_calls_max - server_out.calls
+        if left <= 0 or plan.server_scope == "none":
+            return current
+        target_ids = plan.chats or sorted(chats_by_id)
+        gap_chats = [
+            chats_by_id[c]
+            for c in target_ids
+            if c in chats_by_id and (chats_by_id[c].synced_min_id or 0) != 1
+        ]
+        earliest: datetime | None = None
+        quick = (
+            plan.server_scope in ("global", "discover")
+            or bool(gap_chats)
+            or len(current) < server_min_local
+        )
+        if not quick and plan.intent in ("lookup", "person") and plan.since is not None:
+            # Faqat (c) sharti uchun DB'ga boramiz — boshqasi xotirada hal bo'ladi.
+            async with session_factory() as session:
+                earliest = await earliest_synced_at(session, target_ids)
+        need, reason = needs_server(
+            plan,
+            local_hits=len(current),
+            gap_chats=gap_chats,
+            earliest=earliest,
+            min_local_hits=server_min_local,
+        )
+        if not need:
+            return current
+        out = await escalate(
+            session_factory,
+            account_id=account_id,
+            plan=plan,
+            gap_chats=gap_chats,
+            chats_by_id=chats_by_id,
+            events=events,
+            max_calls=left,
+        )
+        server_out.reason = server_out.reason or reason
+        server_out.calls += out.calls
+        server_out.external += out.external
+        server_out.hits.extend(out.hits)
+        server_out.server_ids |= out.server_ids
+        server_out.external_links.update(out.external_links)
+        for rung in out.rungs:
+            if rung not in server_out.rungs:
+                server_out.rungs.append(rung)
+        for bucket in out.skipped:
+            if bucket not in server_out.skipped:
+                server_out.skipped.append(bucket)
+        if not out.hits:
+            return current
+        async with session_factory() as session:
+            hydrated = await _hydrate(session, out.hits)
+        # Server kanali alohida RRF ro'yxati: reyting yo'q, faqat kalit so'z →
+        # og'irligi lokaldan past (0.9), lekin **yo'qotilmaydi**.
+        return S.rrf(current, hydrated, weights=(1.0, SERVER_RRF_WEIGHT))[:MAX_CANDIDATES]
 
     try:
         async with asyncio.timeout(hard_wall):
@@ -1189,6 +1590,7 @@ async def run_deep_search(
                 meter=meter,
                 events=events,
             )
+            candidates = await maybe_escalate(candidates)
             deduped, clusters = await dedup_and_cluster(
                 session_factory, candidates, meter=meter, locale=locale, events=events
             )
@@ -1208,9 +1610,17 @@ async def run_deep_search(
                     "chats": len({h.chat_id for h in deduped if h.chat_id}),
                     "kept": len(ranked),
                 }
-                needs_more, extra = await reflect(
-                    meter, taint, question, clusters, stats=stats, asked=asked
+                needs_more, extra, new_scope = await reflect(
+                    meter,
+                    taint,
+                    question,
+                    clusters,
+                    stats=stats,
+                    asked=asked,
+                    server_scope=plan.server_scope,
                 )
+                rescope = new_scope != plan.server_scope
+                plan.server_scope = new_scope
                 if needs_more and extra and elapsed() < soft_wall:
                     seen_ids = {h.message_id for h in deduped}
                     more = await fan_out(
@@ -1222,6 +1632,8 @@ async def run_deep_search(
                         events=events,
                     )
                     merged = S.rrf(candidates, more)[:MAX_CANDIDATES]
+                    if rescope:  # reflect yangi `server_scope` berdi
+                        merged = await maybe_escalate(merged)
                     d2, c2 = await dedup_and_cluster(
                         session_factory, merged, meter=meter, locale=locale, events=events
                     )
@@ -1246,7 +1658,11 @@ async def run_deep_search(
 
     # ── sintez (qattiq devordan tashqarida — bor narsa bilan javob beramiz) ──
     evidence = to_evidence(
-        ranked, clusters, link_prefixes={c.id: c.link_prefix or "" for c in chat_rows}
+        ranked,
+        clusters,
+        link_prefixes={c.id: c.link_prefix or "" for c in chat_rows},
+        server_ids=server_out.server_ids,
+        external_links=server_out.external_links,
     )
     taint.add(evidence)
     answer, kept, res = await synthesize(
@@ -1273,6 +1689,7 @@ async def run_deep_search(
         rounds=rounds_used,
         truncated=truncated,
         marginal_stop=marginal_stop,
+        server=server_out,
     )
 
     # Javobni oqim bo'lib beramiz (fasadda streaming yo'q) — keyin qamrov.
@@ -1419,6 +1836,10 @@ __all__ = [
     "MAX_CANDIDATES",
     "MAX_ROUNDS",
     "RERANK_KEEP",
+    "SERVER_MAX_CALLS",
+    "SERVER_MIN_LOCAL_HITS",
+    "SERVER_RRF_WEIGHT",
+    "SERVER_SCOPES",
     "SOFT_WALL_S",
     "Coverage",
     "DeepEvent",
@@ -1427,16 +1848,23 @@ __all__ = [
     "DeepResult",
     "DeepSearchError",
     "RunContext",
+    "ServerOutcome",
     "build_coverage",
     "build_evidence_envelope",
     "build_plan_prompt",
     "build_reflect_prompt",
     "confidence_of",
+    "earliest_synced_at",
+    "escalate",
     "fan_out",
+    "global_scope_for",
     "load_run_context",
     "marginal_yield",
+    "needs_server",
     "parse_plan",
     "parse_reflect",
+    "parse_server_scope",
+    "person_username",
     "render_coverage",
     "run_deep_search",
     "stream_deep_search",

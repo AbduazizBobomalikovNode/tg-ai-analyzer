@@ -27,6 +27,7 @@ from app.llm import LLM, ToolSpec
 from app.logging import get_logger
 from app.mtproto.ratelimit import MethodBuckets
 from app.services import search as S
+from app.services import tg_search as TS
 from app.services import untrusted as U
 from app.services.analytics import chat_stats, msg_link
 from app.services.digests import digests_for_window
@@ -372,94 +373,42 @@ async def list_scheduled_messages(ctx: ToolContext, args: dict[str, Any]) -> Too
 # semantik emas (faqat kalit so'z) va har chaqiruv real MTProto so'rovi.
 
 
-def _entity_name(obj: Any) -> str:
-    """Telethon entity nomi — qo'shimcha so'rovsiz (`m.sender` / `m.chat` keshi)."""
-    if obj is None:
-        return ""
-    title = getattr(obj, "title", None)
-    if title:
-        return str(title)
-    parts = [getattr(obj, "first_name", None), getattr(obj, "last_name", None)]
-    name = " ".join(p for p in parts if p)
-    return name or (getattr(obj, "username", None) or "")
+# Entity yordamchilari yagona manbada — `services/tg_search.py` (ikki yo'l,
+# tool va deep search, bitta koddan o'tadi).
+_entity_name = TS.entity_name
+_peer_id_of = TS.peer_id_of
+_entity_index = TS.entity_index
+_who_of = TS.who_of
+_chat_of = TS.chat_of
+_tg_link = TS.tg_link
 
 
-def _peer_id_of(peer: Any) -> int | None:
-    """`PeerUser/PeerChat/PeerChannel` (yoki InputPeer*) → raqamli id."""
-    for attr in ("user_id", "chat_id", "channel_id"):
-        val = getattr(peer, attr, None)
-        if val:
-            return int(val)
-    return None
-
-
-def _entity_index(res: Any) -> dict[int, Any]:
-    """Javob bilan **birga kelgan** users/chats — qo'shimcha RPC yo'q.
-
-    `get_sender()` / `get_chat()` chaqirilmaydi: ular allowlist'da yo'q
-    metodlarga borishi mumkin (CLAUDE.md).
-    """
-    index: dict[int, Any] = {}
-    for ent in list(getattr(res, "users", None) or []) + list(getattr(res, "chats", None) or []):
-        ident = getattr(ent, "id", None)
-        if ident:
-            index[int(ident)] = ent
-    return index
-
-
-def _who_of(m: Any, index: dict[int, Any]) -> str:
-    """Muallif nomi; entity kelmagan bo'lsa `user:<id>` (— emas)."""
-    pid = _peer_id_of(getattr(m, "from_id", None))
-    if pid is None:  # kanal nomidan yozilgan post
-        pid = _peer_id_of(getattr(m, "peer_id", None))
-    if pid is None:
-        return "—"
-    return _entity_name(index.get(pid)) or f"user:{pid}"
-
-
-def _chat_of(m: Any, index: dict[int, Any]) -> tuple[str, Any, int | None]:
-    pid = _peer_id_of(getattr(m, "peer_id", None))
-    ent = index.get(pid) if pid else None
-    return (_entity_name(ent) or (f"chat:{pid}" if pid else "—")), ent, pid
-
-
-def _tg_link(entity: Any, chat_id: int | None, msg_id: Any) -> str:
-    uname = getattr(entity, "username", None)
-    if uname:
-        return f"https://t.me/{uname}/{msg_id}"
-    return f"https://t.me/c/{chat_id}/{msg_id}" if chat_id else ""
-
-
-def _raw_line(
-    m: Any,
-    index: dict[int, Any],
+def _hit_line(
+    h: TS.ServerHit,
     *,
     chat_title: str | None = None,
     with_chat: bool = False,
     with_link: bool = False,
-    snippet: int = 400,
 ) -> str:
-    """Xom TL xabari → bitta qator. Manba — javobdagi entity ro'yxatlari."""
-    when = getattr(m, "date", None)
-    ts = when.strftime("%Y-%m-%d %H:%M") if when else "?"
-    body = S.compact_text(getattr(m, "message", "") or "", max_chars=snippet)
-    if not body:
-        media = getattr(m, "media", None)
-        body = f"[{type(media).__name__.removeprefix('MessageMedia').lower()}]" if media else ""
-    title, ent, cid = _chat_of(m, index)
-    where = f' in "{chat_title}"' if chat_title else (f' in "{title}"' if with_chat else "")
-    link = ""
-    if with_link and (url := _tg_link(ent, cid, getattr(m, "id", 0))):
-        link = f" {url}"
-    return f"[{ts}] #{getattr(m, 'id', '?')} {_who_of(m, index)}{where}: {body}{link}"
+    """`ServerHit` → bitta qator. Manba — javobdagi entity ro'yxatlari."""
+    ts = h.date.strftime("%Y-%m-%d %H:%M") if h.date else "?"
+    title = chat_title or h.chat_title
+    where = f' in "{title}"' if (chat_title or with_chat) else ""
+    link = f" {h.link}" if with_link and h.link else ""
+    return f"[{ts}] #{h.tg_msg_id} {h.sender}{where}: {h.text}{link}"
 
 
 # ─── shift (bucket) ──────────────────────────────────────────────────────────
 
-BUCKET_HISTORY = "history"
-BUCKET_SEARCH = "search"
-BUCKET_RESOLVE = "resolve"
-BUCKET_DISCOVER = "discover"
+BUCKET_HISTORY = TS.BUCKET_HISTORY
+BUCKET_SEARCH = TS.BUCKET_SEARCH
+BUCKET_RESOLVE = TS.BUCKET_RESOLVE
+BUCKET_DISCOVER = TS.BUCKET_DISCOVER
+
+
+def bucket_guard(account_id: int, bucket: str) -> str | None:
+    """`tg_search` uchun ommaviy nom — hisob shu modulning `_buckets` nusxasida."""
+    return _tg_guard(account_id, bucket)
 
 
 def _tg_guard(account_id: int, bucket: str) -> str | None:
@@ -480,23 +429,9 @@ def _tg_guard(account_id: int, bucket: str) -> str | None:
 
 # ─── umumiy TL yordamchilari ────────────────────────────────────────────────
 
-# `filter` argumenti → `InputMessagesFilter*` klass nomi
-_FILTERS: dict[str, str] = {
-    "url": "InputMessagesFilterUrl",
-    "pinned": "InputMessagesFilterPinned",
-    "mentions": "InputMessagesFilterMyMentions",
-    "poll": "InputMessagesFilterPoll",
-    "photo": "InputMessagesFilterPhotos",
-    "document": "InputMessagesFilterDocument",
-    "voice": "InputMessagesFilterVoice",
-    "video": "InputMessagesFilterVideo",
-}
-
-
-def _msg_filter(name: str, tlt: Any) -> Any | None:
-    cls_name = _FILTERS.get(name.strip().lower())
-    cls = getattr(tlt, cls_name, None) if cls_name else None
-    return cls() if cls is not None else None
+# `filter` argumenti → `InputMessagesFilter*` klass nomi (yagona manba: tg_search)
+_FILTERS = TS.FILTERS
+_msg_filter = TS.msg_filter
 
 
 def _bad_filter(name: str) -> ToolResult:
@@ -530,28 +465,13 @@ async def _run_tg_request(
     """TL so'rovni yuboradi. Xato — modelga **matn**, istisno emas.
 
     `explain` — Telegram cheklovlari (xato emas, holat) uchun tushunarli matn:
-    `{"ChannelForumMissingError": "this chat is not a forum"}`.
+    `{"ChannelForumMissingError": "this chat is not a forum"}`. Yuborishning
+    o'zi `tg_search.send_request` da — FloodWait retry qilinmaydi.
     """
-    from telethon import errors as tg_errors
-
-    from app.mtproto.pool import PoolError, pool
-
-    try:
-        client = await pool.get(ctx.account_id)
-        return await client(request), None
-    except tg_errors.FloodWaitError as exc:
-        # Retry yo'q (CLAUDE.md: retry-storm taqiqlangan) — modelga aytamiz.
-        log.warning("tools.tg_flood", account_id=ctx.account_id, seconds=exc.seconds)
-        return None, ToolResult(
-            f"error: flood_wait {exc.seconds}s — try search_messages (local)", ok=False
-        )
-    except PoolError as exc:
-        return None, ToolResult(f"error: {exc.code}", ok=False)
-    except Exception as exc:  # RPC xatosi — matn, istisno emas
-        hint = (explain or {}).get(type(exc).__name__)
-        if hint:
-            return None, ToolResult(f"error: {hint}", ok=False)
-        return None, ToolResult(f"error: {type(exc).__name__}: {str(exc)[:200]}", ok=False)
+    res, err = await TS.send_request(ctx.account_id, request, explain=explain)
+    if err is not None:
+        return None, ToolResult(err, ok=False)
+    return res, None
 
 
 def _input_peer_of_entity(ent: Any, tlt: Any) -> Any | None:
@@ -622,14 +542,17 @@ def _input_channel_of(peer: Any, tlt: Any) -> Any | None:
 # ─── server qidiruvi ─────────────────────────────────────────────────────────
 
 
-def _search_args(args: dict[str, Any], tlt: Any) -> tuple[dict[str, Any], ToolResult | None]:
-    """Umumiy qidiruv argumentlari: query, limit, filter, since/until."""
+def _search_args(args: dict[str, Any]) -> tuple[dict[str, Any], ToolResult | None]:
+    """Umumiy qidiruv argumentlari: query, limit, filter, since/until.
+
+    Filtr **nomi** validatsiya qilinadi; TL obyektiga aylantirish
+    `tg_search` ichida (ikki yo'l bitta koddan o'tadi).
+    """
     query = str(args.get("query") or "").strip()
     if not query:
         return {}, ToolResult("error: `query` is required", ok=False)
     flt_name = str(args.get("filter") or "").strip()
-    flt = _msg_filter(flt_name, tlt) if flt_name else tlt.InputMessagesFilterEmpty()
-    if flt is None:
+    if flt_name and flt_name.lower() not in _FILTERS:
         return {}, _bad_filter(flt_name)
     since = _parse_date(args.get("since"))
     until = _parse_date(args.get("until"), end_of_day=True)
@@ -641,7 +564,6 @@ def _search_args(args: dict[str, Any], tlt: Any) -> tuple[dict[str, Any], ToolRe
             return {}, ToolResult(f"error: `{label}` must be an ISO date (YYYY-MM-DD)", ok=False)
     return {
         "q": query,
-        "filter": flt,
         "filter_name": flt_name.lower(),
         "limit": max(1, min(int(args.get("limit") or 15), TG_SEARCH_LIMIT_MAX)),
         "min_date": since,
@@ -661,16 +583,37 @@ def _search_head(scope: str, opts: dict[str, Any], hits: int) -> str:
     return " ".join(bits)
 
 
-async def search_telegram(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
-    """Bitta chat ichida Telegram serverida qidirish (messages.Search — READ)."""
-    from telethon.tl import functions as tlf
-    from telethon.tl import types as tlt
+def _render_hits(
+    result: TS.ServerHits,
+    opts: dict[str, Any],
+    scope: str,
+    *,
+    chat_title: str | None = None,
+    with_chat: bool = False,
+) -> ToolResult:
+    """`ServerHits` → model uchun matn. Tool'lar shu yerda yagona formatni oladi."""
+    if result.error_text is not None:
+        return ToolResult(result.error_text, ok=False)
+    lines = [_hit_line(h, chat_title=chat_title, with_chat=with_chat) for h in result.hits]
+    if not lines:
+        return ToolResult(
+            f'no matches for "{opts["q"]}" ({scope}) on Telegram server',
+            meta={"query": opts["q"], "hits": 0, "source": "telegram"},
+        )
+    return ToolResult(
+        _clip(_search_head(scope, opts, len(lines)) + "\n" + "\n".join(lines)),
+        meta={"query": opts["q"], "hits": len(lines), "source": "telegram"},
+    )
 
+
+async def search_telegram(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    """Bitta chat ichida Telegram serverida qidirish (messages.Search — READ).
+
+    Yupqa o'ramchi: xom TL mantiqi `tg_search.server_search_chat` da.
+    """
     from app.mtproto.pool import PoolError, pool
 
-    if (err := _tg_guard(ctx.account_id, BUCKET_SEARCH)) is not None:
-        return ToolResult(err, ok=False)
-    opts, bad = _search_args(args, tlt)
+    opts, bad = _search_args(args)
     if bad is not None:
         return bad
     chat = await _resolve_chat(ctx, args)
@@ -694,97 +637,49 @@ async def search_telegram(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     except PoolError as exc:
         return ToolResult(f"error: {exc.code}", ok=False)
 
-    res, failed = await _run_tg_request(
-        ctx,
-        tlf.messages.SearchRequest(
-            peer=peer,
-            q=opts["q"],
-            filter=opts["filter"],
-            min_date=opts["min_date"],
-            max_date=opts["max_date"],
-            offset_id=0,
-            add_offset=0,
-            limit=opts["limit"],
-            max_id=0,
-            min_id=0,
-            hash=0,
-            from_id=from_id,
-            top_msg_id=topic_id,
-        ),
+    result = await TS.server_search_chat(
+        ctx.account_id,
+        int(chat.id),
+        opts["q"],
+        from_peer=from_id,
+        topic_id=topic_id,
+        filter=opts["filter_name"] or None,
+        since=opts["min_date"],
+        until=opts["max_date"],
+        limit=opts["limit"],
+        peer=peer,
+        chat_title=chat.title,
     )
-    if failed is not None:
-        return failed
-    index = _entity_index(res)
-    msgs = list(getattr(res, "messages", None) or [])
-    lines = [_raw_line(m, index, chat_title=chat.title) for m in msgs]
-    scope = f'chat="{chat.title}"'
-    if not lines:
-        return ToolResult(
-            f'no matches for "{opts["q"]}" ({scope}) on Telegram server',
-            meta={"query": opts["q"], "hits": 0, "source": "telegram"},
-        )
-    return ToolResult(
-        _clip(_search_head(scope, opts, len(lines)) + "\n" + "\n".join(lines)),
-        meta={"query": opts["q"], "hits": len(lines), "source": "telegram"},
-    )
+    return _render_hits(result, opts, f'chat="{chat.title}"', chat_title=chat.title)
 
 
-_GLOBAL_SCOPES = {
-    "all": {},
-    "channels": {"broadcasts_only": True},
-    "groups": {"groups_only": True},
-    "users": {"users_only": True},
-}
+_GLOBAL_SCOPES = TS.GLOBAL_SCOPES
 
 
 async def search_global(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     """Akkaunt kirgan barcha chatlar bo'ylab qidirish (messages.SearchGlobal — READ)."""
-    from telethon.tl import functions as tlf
-    from telethon.tl import types as tlt
-
-    if (err := _tg_guard(ctx.account_id, BUCKET_SEARCH)) is not None:
-        return ToolResult(err, ok=False)
-    opts, bad = _search_args(args, tlt)
+    opts, bad = _search_args(args)
     if bad is not None:
         return bad
     scope_name = str(args.get("scope") or "all").strip().lower()
-    flags = _GLOBAL_SCOPES.get(scope_name)
-    if flags is None:
+    if scope_name not in _GLOBAL_SCOPES:
         return ToolResult(
             "error: unknown scope; use one of: " + ", ".join(_GLOBAL_SCOPES), ok=False
         )
     archived = bool(args.get("archived"))
 
-    res, failed = await _run_tg_request(
-        ctx,
-        tlf.messages.SearchGlobalRequest(
-            q=opts["q"],
-            filter=opts["filter"],
-            min_date=opts["min_date"],
-            max_date=opts["max_date"],
-            offset_rate=0,
-            offset_peer=tlt.InputPeerEmpty(),
-            offset_id=0,
-            limit=opts["limit"],
-            folder_id=1 if archived else None,
-            **flags,
-        ),
+    result = await TS.server_search_global(
+        ctx.account_id,
+        opts["q"],
+        scope=scope_name,
+        archived=archived,
+        filter=opts["filter_name"] or None,
+        since=opts["min_date"],
+        until=opts["max_date"],
+        limit=opts["limit"],
     )
-    if failed is not None:
-        return failed
-    index = _entity_index(res)
-    msgs = list(getattr(res, "messages", None) or [])
-    lines = [_raw_line(m, index, with_chat=True) for m in msgs]
     scope = f"scope={scope_name} chats" + (" (archived folder)" if archived else "")
-    if not lines:
-        return ToolResult(
-            f'no matches for "{opts["q"]}" ({scope}) on Telegram server',
-            meta={"query": opts["q"], "hits": 0, "source": "telegram"},
-        )
-    return ToolResult(
-        _clip(_search_head(scope, opts, len(lines)) + "\n" + "\n".join(lines)),
-        meta={"query": opts["q"], "hits": len(lines), "source": "telegram"},
-    )
+    return _render_hits(result, opts, scope, with_chat=True)
 
 
 # ─── a'zolar ro'yxati ────────────────────────────────────────────────────────
@@ -1197,13 +1092,8 @@ def _calendar_supports_query() -> bool:
 
 async def search_calendar(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     """Qaysi kunlarda mavzu bo'lgan — kun bo'yicha sanoq (GetSearchResultsCalendar)."""
-    from telethon.tl import functions as tlf
-    from telethon.tl import types as tlt
-
     from app.mtproto.pool import PoolError, pool
 
-    if (err := _tg_guard(ctx.account_id, BUCKET_SEARCH)) is not None:
-        return ToolResult(err, ok=False)
     query = str(args.get("query") or "").strip()
     flt_name = str(args.get("filter") or "").strip()
     if not query and not flt_name:
@@ -1212,8 +1102,7 @@ async def search_calendar(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
             'request with neither. Pass e.g. filter="photo" (or url/voice/video/…), or a keyword.',
             ok=False,
         )
-    flt = _msg_filter(flt_name, tlt) if flt_name else tlt.InputMessagesFilterEmpty()
-    if flt is None:
+    if flt_name and flt_name.lower() not in _FILTERS:
         return _bad_filter(flt_name)
     if query and not _calendar_supports_query():
         return ToolResult(
@@ -1230,20 +1119,11 @@ async def search_calendar(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     except PoolError as exc:
         return ToolResult(f"error: {exc.code}", ok=False)
 
-    kwargs: dict[str, Any] = {"peer": peer, "filter": flt, "offset_id": 0, "offset_date": None}
-    if query:
-        kwargs["q"] = query
-    res, failed = await _run_tg_request(ctx, tlf.messages.GetSearchResultsCalendarRequest(**kwargs))
-    if failed is not None:
-        return failed
-
-    periods = list(getattr(res, "periods", None) or [])
-    rows: list[tuple[Any, int]] = []
-    for p in periods:
-        when = getattr(p, "date", None)
-        rows.append((when.date() if when else None, int(getattr(p, "count", 0) or 0)))
-    rows = [r for r in rows if r[0] is not None]
-    rows.sort(key=lambda r: r[0], reverse=True)  # yangisidan eskisiga
+    rows, total, err = await TS.calendar_rows(
+        ctx.account_id, int(chat.id), filter=flt_name or None, query=query or None, peer=peer
+    )
+    if err is not None:
+        return ToolResult(err, ok=False)
     if not rows:
         return ToolResult(
             f'no matching days in "{chat.title}"', meta={"chat": chat.title, "days": 0}
@@ -1253,7 +1133,7 @@ async def search_calendar(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         f'chat="{chat.title}" calendar'
         + (f' query="{query}"' if query else "")
         + (f" filter={flt_name.lower()}" if flt_name else "")
-        + f" total={getattr(res, 'count', '?')} days={len(rows)}"
+        + f" total={total if total is not None else '?'} days={len(rows)}"
         + (f" (showing {len(shown)} newest)" if len(shown) < len(rows) else "")
     )
     body = "\n".join(f"{d}  {c}" for d, c in shown)
@@ -1345,43 +1225,25 @@ async def list_forum_topics(ctx: ToolContext, args: dict[str, Any]) -> ToolResul
 
 async def saved_messages_search(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     """Foydalanuvchining "Saved Messages" ichida qidirish (messages.Search, peer=self)."""
-    from telethon.tl import functions as tlf
-    from telethon.tl import types as tlt
-
-    if (err := _tg_guard(ctx.account_id, BUCKET_SEARCH)) is not None:
-        return ToolResult(err, ok=False)
-    opts, bad = _search_args(args, tlt)
+    opts, bad = _search_args(args)
     if bad is not None:
         return bad
-
-    res, failed = await _run_tg_request(
-        ctx,
-        tlf.messages.SearchRequest(
-            peer=tlt.InputPeerSelf(),
-            q=opts["q"],
-            filter=opts["filter"],
-            min_date=opts["min_date"],
-            max_date=opts["max_date"],
-            offset_id=0,
-            add_offset=0,
-            limit=opts["limit"],
-            max_id=0,
-            min_id=0,
-            hash=0,
-        ),
+    result = await TS.server_search_saved(
+        ctx.account_id,
+        opts["q"],
+        filter=opts["filter_name"] or None,
+        since=opts["min_date"],
+        until=opts["max_date"],
+        limit=opts["limit"],
     )
-    if failed is not None:
-        return failed
-    index = _entity_index(res)
-    lines = [
-        _raw_line(m, index, chat_title="Saved Messages")
-        for m in list(getattr(res, "messages", None) or [])
-    ]
-    if not lines:
+    if result.error_text is not None:
+        return ToolResult(result.error_text, ok=False)
+    if not result.hits:
         return ToolResult(
             f'no matches for "{opts["q"]}" in Saved Messages',
             meta={"query": opts["q"], "hits": 0, "source": "telegram"},
         )
+    lines = [_hit_line(h, chat_title="Saved Messages") for h in result.hits]
     return ToolResult(
         _clip(_search_head('chat="Saved Messages"', opts, len(lines)) + "\n" + "\n".join(lines)),
         meta={"query": opts["q"], "hits": len(lines), "source": "telegram"},
@@ -1408,18 +1270,7 @@ def _channel_line(ch: Any) -> str:
     )
 
 
-def _flood_note(flood: Any) -> str:
-    wait_till = getattr(flood, "wait_till", None)
-    when = (
-        datetime.fromtimestamp(int(wait_till), tz=UTC).strftime("%Y-%m-%d %H:%M UTC")
-        if wait_till
-        else "unknown time"
-    )
-    return (
-        f"free full-text post-search slots exhausted (remains=0, resets at {when}); "
-        "not spending Stars. Use a #hashtag query, or fall back to search_global / "
-        "search_messages (local)"
-    )
+_flood_note = TS.flood_note
 
 
 async def discover_channels(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
@@ -1433,14 +1284,14 @@ async def discover_channels(ctx: ToolContext, args: dict[str, Any]) -> ToolResul
     from telethon.tl import functions as tlf
     from telethon.tl import types as tlt
 
-    if (err := _tg_guard(ctx.account_id, BUCKET_DISCOVER)) is not None:
-        return ToolResult(err, ok=False)
     query = str(args.get("query") or "").strip()
     similar_to = str(args.get("similar_to") or "").strip()
     limit = max(1, min(int(args.get("limit") or 10), DISCOVER_LIMIT_MAX))
     blocks: list[str] = []
 
     if similar_to or not query:
+        if (err := _tg_guard(ctx.account_id, BUCKET_DISCOVER)) is not None:
+            return ToolResult(err, ok=False)
         channel = None
         if similar_to:
             peer, err_text = await _peer_for_selector(ctx, similar_to)
@@ -1467,47 +1318,17 @@ async def discover_channels(ctx: ToolContext, args: dict[str, Any]) -> ToolResul
         )
 
     if query:
-        flood, failed = await _run_tg_request(
-            ctx, tlf.channels.CheckSearchPostsFloodRequest(query=query)
-        )
-        if failed is not None:
-            return failed
-        free = bool(getattr(flood, "query_is_free", False))
-        remains = int(getattr(flood, "remains", 0) or 0)
-        request: Any | None = None
-        if free or remains > 0:
-            # `allow_paid_stars` ATAYLAB berilmaydi (default None = yubormaslik)
-            request = tlf.channels.SearchPostsRequest(
-                query=query,
-                offset_rate=0,
-                offset_peer=tlt.InputPeerEmpty(),
-                offset_id=0,
-                limit=limit,
-            )
-        elif query.startswith("#"):
-            request = tlf.channels.SearchPostsRequest(
-                hashtag=query.lstrip("#"),
-                offset_rate=0,
-                offset_peer=tlt.InputPeerEmpty(),
-                offset_id=0,
-                limit=limit,
-            )
-        if request is None:
-            blocks.append(_flood_note(flood))
+        found = await TS.server_discover(ctx.account_id, query, limit=limit)
+        if found.error_text is not None:
+            return ToolResult(found.error_text, ok=False)
+        if found.note is not None:
+            blocks.append(found.note)
         else:
-            res, failed = await _run_tg_request(ctx, request)
-            if failed is not None:
-                return failed
-            index = _entity_index(res)
-            posts = [
-                _raw_line(m, index, with_chat=True, with_link=True, snippet=POST_SNIPPET_CHARS)
-                for m in list(getattr(res, "messages", None) or [])
-            ]
-            mode = "hashtag" if request.hashtag else "free text"
+            posts = [_hit_line(h, with_chat=True, with_link=True) for h in found.hits]
             blocks.append(
-                f'public posts for "{query}" ({mode}, {len(posts)}):\n' + "\n".join(posts)
+                f'public posts for "{query}" ({found.mode}, {len(posts)}):\n' + "\n".join(posts)
                 if posts
-                else f'no public posts found for "{query}" ({mode})'
+                else f'no public posts found for "{query}" ({found.mode})'
             )
 
     if not blocks:
