@@ -1,9 +1,12 @@
 from app.llm.base import (
+    EMBED_DOCUMENT,
+    EMBED_QUERY,
     BaseProvider,
     Capability,
     CapabilityError,
     ChatResult,
     EmbedResult,
+    EmbedTaskType,
     LLMError,
     Msg,
     Role,
@@ -27,6 +30,8 @@ from app.llm.router import (
 )
 
 __all__ = [
+    "EMBED_DOCUMENT",
+    "EMBED_QUERY",
     "LLM",
     "PROVIDERS",
     "TASK_REQUIREMENTS",
@@ -35,6 +40,7 @@ __all__ = [
     "CapabilityError",
     "ChatResult",
     "EmbedResult",
+    "EmbedTaskType",
     "LLMError",
     "Msg",
     "Role",

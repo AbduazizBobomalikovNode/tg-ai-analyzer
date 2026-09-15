@@ -17,7 +17,7 @@ import random
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from app.logging import get_logger
 
@@ -103,6 +103,14 @@ class ChatResult:
     reasoning: str | None = None
 
 
+# Embedding vazifasi: indekslashda hujjat, qidiruvda so'rov (asimmetrik retrieval).
+# Gemini buni hisobga oladi va vektorlarni boshqa fazoga tushiradi — ikkalasi ham
+# default bilan yuborilsa bepul aniqlik yo'qoladi (arxitektura v2, 5.3-band).
+EmbedTaskType = Literal["RETRIEVAL_DOCUMENT", "RETRIEVAL_QUERY"]
+EMBED_DOCUMENT: EmbedTaskType = "RETRIEVAL_DOCUMENT"
+EMBED_QUERY: EmbedTaskType = "RETRIEVAL_QUERY"
+
+
 @dataclass(slots=True)
 class EmbedResult:
     vectors: list[list[float]]
@@ -158,7 +166,15 @@ class BaseProvider(ABC):
         json_mode: bool = False,
     ) -> ChatResult: ...
 
-    async def embed(self, texts: list[str], *, model: str, dim: int) -> EmbedResult:
+    async def embed(
+        self,
+        texts: list[str],
+        *,
+        model: str,
+        dim: int,
+        task_type: EmbedTaskType = EMBED_DOCUMENT,
+    ) -> EmbedResult:
+        """Provider `task_type` ni qo'llamasa — e'tiborsiz qoldiradi (xato emas)."""
         raise CapabilityError(self.name, "embedding qo'llab-quvvatlanmaydi")
 
     async def generate_image(self, prompt: str, *, model: str) -> bytes:

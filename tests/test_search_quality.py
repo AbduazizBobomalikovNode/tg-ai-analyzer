@@ -24,6 +24,7 @@ from app.mtproto.pool import MessageInfo
 from app.services import chat_service as cs
 from app.services import evaluation as ev
 from app.services import search as S
+from app.services.textnorm import uz_fold
 
 NOW = datetime(2026, 8, 18, 12, 0, tzinfo=UTC)
 
@@ -72,6 +73,74 @@ def test_rrf_merges_and_marks_both() -> None:
     fused = S.rrf(fts, vec)
     assert fused[0].message_id == 2 and fused[0].source == "both"
     assert {h.message_id for h in fused} == {1, 2, 3}
+
+
+# ─── 1-bosqich: fold, og'irlikli RRF, ustuvor byudjet ────────────────────────
+
+
+def test_fold_terms_matches_index_fold() -> None:
+    """So'rov varianti indeks bilan bir xil fold'da bo'lmasa — hech narsa topilmaydi."""
+    assert S.fold_terms(["O'zbek", "G`ALABA"]) == [uz_fold("o'zbek"), uz_fold("g`alaba")]
+    assert S.fold_terms(["тўлов"]) == [uz_fold("тўлов")]  # kirill → lotin
+    assert S.fold_terms(["a", "  "]) == []  # 2 belgidan qisqa tushib qoladi
+    assert len(S.fold_terms([f"term{i}" for i in range(50)])) == 12  # qopqoq
+
+
+def test_keywords_use_shared_stopword_list() -> None:
+    kw = S.keywords("Bu hafta kanalda crypto haqida nima yozildi?")
+    assert "crypto" in kw and "haqida" not in kw and "nima" not in kw
+
+
+def test_rrf_weights_change_the_winner() -> None:
+    a = [S.Hit(1, 101, 1.0, "tsv_uz")]
+    b = [S.Hit(2, 102, 1.0, "vector")]
+    equal = S.rrf(a, b)
+    assert equal[0].message_id == 1  # teng og'irlikda kirish tartibi barqaror
+    weighted = S.rrf(a, b, weights=(0.5, 2.0))
+    assert weighted[0].message_id == 2
+    assert weighted[0].score > weighted[1].score
+
+
+def test_rrf_accepts_list_of_lists() -> None:
+    a = [S.Hit(1, 101, 1.0, "tsv_uz")]
+    b = [S.Hit(2, 102, 1.0, "vector")]
+    assert [h.message_id for h in S.rrf([a, b])] == [h.message_id for h in S.rrf(a, b)]
+
+
+def test_rrf_default_weights_are_the_documented_four() -> None:
+    assert S.DEFAULT_RRF_WEIGHTS == (1.0, 1.0, 0.6, 1.2)
+
+
+def test_rrf_ignores_empty_channels() -> None:
+    fts = [S.Hit(1, 101, 5.0, "tsv_uz"), S.Hit(2, 102, 4.0, "tsv_uz")]
+    fused = S.rrf(fts, [], [], [], weights=S.DEFAULT_RRF_WEIGHTS)
+    assert [h.message_id for h in fused] == [1, 2]
+
+
+def test_rrf_carries_hydrated_fields() -> None:
+    h = S.Hit(1, 101, 1.0, "tsv_uz", chat_id=9, chat_title="T", sender="u", text="matn")
+    out = S.rrf([h])[0]
+    assert out.text == "matn" and out.chat_title == "T" and out.chat_id == 9
+
+
+def test_fit_by_priority_keeps_hits_over_recency_tail() -> None:
+    """Regressiya: eski `fit_budget` qidiruv rejimida dumni hit'dan ustun qo'yardi."""
+    hit = _mi(5, "javob shu yerda " * 20)  # ~100 token
+    tail = [_mi(90 + i, "kundalik gap " * 20) for i in range(5)]
+    ordered = [(5, hit), *[(m.msg_id, m) for m in tail]]
+    kept, trunc = S.fit_by_priority(ordered, 260)
+    assert trunc and kept[0].msg_id == 5  # hit saqlandi
+    assert 1 < len(kept) < len(ordered)  # byudjet qolganini dum to'ldirdi, hammasi emas
+    assert [m.msg_id for m in kept] == sorted(m.msg_id for m in kept)  # xronologik
+
+    # taqqoslash: eski qoida bir xil kirishda hit'ni yo'qotadi
+    old_kept, _ = S.fit_budget([hit, *tail], 260)
+    assert 5 not in [m.msg_id for m in old_kept]
+
+
+def test_fit_by_priority_always_keeps_at_least_one() -> None:
+    kept, trunc = S.fit_by_priority([(1, _mi(1, "x" * 5000))], 10)
+    assert len(kept) == 1 and not trunc
 
 
 # ─── strategiya aniqlash ─────────────────────────────────────────────────────
@@ -209,6 +278,174 @@ def test_estimate_cost() -> None:
 
 
 # ─── Claude prompt caching ───────────────────────────────────────────────────
+
+
+# ─── embedding task_type va qidiruv kanallari (fake session) ────────────────
+
+
+class _FakeResult:
+    def __init__(self, rows: list[Any]) -> None:
+        self._rows = rows
+
+    def all(self) -> list[Any]:
+        return list(self._rows)
+
+    def first(self) -> Any:
+        return self._rows[0] if self._rows else None
+
+    def scalars(self) -> Any:
+        return SimpleNamespace(all=lambda: list(self._rows))
+
+
+class _FakeSession:
+    """Navbatdagi natijalarni qaytaradi va bajarilgan SQL matnini saqlaydi."""
+
+    def __init__(self, *results: list[Any]) -> None:
+        self.queue = list(results)
+        self.sql: list[str] = []
+
+    async def execute(self, stmt: Any) -> _FakeResult:
+        self.sql.append(str(stmt))
+        return _FakeResult(self.queue.pop(0) if self.queue else [])
+
+
+class _EmbedLLM:
+    def __init__(self) -> None:
+        self.task_types: list[str] = []
+
+    async def embed(self, texts: list[str], **kw: Any) -> Any:
+        self.task_types.append(kw.get("task_type", "default"))
+        return SimpleNamespace(vectors=[[0.1, 0.2]], model="m", provider="p", usage=Usage())
+
+
+async def test_vector_search_uses_retrieval_query_task_type() -> None:
+    llm = _EmbedLLM()
+    session = _FakeSession([(1,)], [(1, 101, 0.2)])
+    hits = await S.vector_search(session, 1, "to'lov", llm=llm)  # type: ignore[arg-type]
+    assert llm.task_types == ["RETRIEVAL_QUERY"]
+    assert [h.message_id for h in hits] == [1] and hits[0].source == "vector"
+
+
+async def test_vector_search_without_embeddings_is_silent() -> None:
+    llm = _EmbedLLM()
+    assert await S.vector_search(_FakeSession([]), 1, "q", llm=llm) == []  # type: ignore[arg-type]
+    assert llm.task_types == []
+
+
+def test_llm_embed_defaults_to_document_task_type() -> None:
+    import inspect
+
+    from app.llm import EMBED_DOCUMENT, LLM, BaseProvider
+
+    for fn in (LLM.embed, BaseProvider.embed):
+        assert inspect.signature(fn).parameters["task_type"].default == EMBED_DOCUMENT
+
+
+async def test_fts_channels_are_skipped_without_terms() -> None:
+    session = _FakeSession()
+    assert await S.fts_uz_search(session, 1, []) == []  # type: ignore[arg-type]
+    assert await S.fts_ru_search(session, 1, []) == []  # type: ignore[arg-type]
+    assert await S.trigram_search(session, 1, []) == []  # type: ignore[arg-type]
+    assert session.sql == []
+
+
+async def test_lexical_sql_uses_generated_columns_and_excludes_deleted() -> None:
+    session = _FakeSession([(1, 101, 0.5)])
+    await S.fts_uz_search(session, 1, ["to'lov"])  # type: ignore[arg-type]
+    sql = session.sql[0]
+    assert "tsv_uz" in sql and "to_tsquery" in sql
+    assert "to_tsvector" not in sql  # inline tsvector qurish yo'q
+    assert "deleted_at IS NULL" in sql
+
+    ru = _FakeSession([(2, 102, 0.5)])
+    await S.fts_ru_search(ru, 1, ["оплата"])  # type: ignore[arg-type]
+    assert "tsv_ru" in ru.sql[0] and "deleted_at IS NULL" in ru.sql[0]
+
+    tri = _FakeSession([(3, 103, 0.7)])
+    await S.trigram_search(tri, 1, ["tolov"])  # type: ignore[arg-type]
+    assert "strict_word_similarity" in tri.sql[0] and "text_fold" in tri.sql[0]
+    assert "similarity(messages.text," not in tri.sql[0]  # eski o'lik yo'l
+
+
+async def test_fts_uz_falls_back_from_and_to_or() -> None:
+    session = _FakeSession([], [(1, 101, 0.3)])
+    hits = await S.fts_uz_search(session, 1, ["tolov", "muddat"])  # type: ignore[arg-type]
+    assert len(session.sql) == 2  # avval AND, natija bo'sh → OR
+    assert len(hits) == 1
+    assert S._tsquery(["tolov", "muddat"], prefix=True, op=" & ") == "tolov:* & muddat:*"
+    assert S._tsquery(["tolov", "muddat"], prefix=True, op=" | ") == "tolov:* | muddat:*"
+
+
+async def test_trigram_falls_back_to_word_similarity() -> None:
+    session = _FakeSession([], [(1, 101, 0.8)])
+    hits = await S.trigram_search(session, 1, ["tolov"])  # type: ignore[arg-type]
+    assert len(session.sql) == 2 and "word_similarity" in session.sql[1]
+    assert len(hits) == 1
+
+
+async def test_hybrid_search_runs_four_channels_without_expansion() -> None:
+    llm = _EmbedLLM()
+    session = _FakeSession([(1, 101, 0.5)], [], [], [])
+    hits = await S.hybrid_search(session, 1, "crypto narxi", llm=llm)  # type: ignore[arg-type]
+    assert [h.message_id for h in hits] == [1]
+    assert len(session.sql) >= 3  # tsv_uz + trigram + vektor tekshiruvi
+
+
+async def test_hybrid_search_expands_when_asked(monkeypatch) -> None:
+    from app.services import query_expand as QX
+
+    seen: list[str] = []
+
+    async def fake_expand(query: str, **kw: Any) -> QX.Expansion:
+        seen.append(query)
+        return QX.Expansion(ru=["оплата"])
+
+    monkeypatch.setattr(QX, "expand", fake_expand)
+    session = _FakeSession([], [(2, 102, 0.4)], [], [])
+    hits = await S.hybrid_search(session, 1, "to'lov qachon", expand=True)  # type: ignore[arg-type]
+    assert seen == ["to'lov qachon"]
+    assert any("tsv_ru" in q for q in session.sql)  # ru kanali endi ishlaydi
+    assert [h.message_id for h in hits] == [2]
+
+
+async def test_search_context_prioritizes_hits_over_tail(monkeypatch) -> None:
+    """Tor byudjetda mos xabar qoladi, oxirgi 15 xabarlik dum kesiladi."""
+    from app.db.models import Chat, Message
+
+    chat = Chat(id=1, account_id=1, tg_peer_id=7, type="channel", title="T", synced_total=100)
+    answer = Message(
+        id=500, chat_id=1, tg_msg_id=500, text="javob shu yerda " * 20, published_at=NOW
+    )
+    tail_rows = [
+        Message(
+            id=900 + i, chat_id=1, tg_msg_id=900 + i, text="kundalik gap " * 20, published_at=NOW
+        )
+        for i in range(6)
+    ]
+
+    async def fake_hybrid(*_a: Any, **_kw: Any) -> list[S.Hit]:
+        return [S.Hit(500, 500, 1.0, "tsv_uz")]
+
+    async def fake_hydrate(_s: Any, _c: Any, hits: list[S.Hit]) -> list[S.Hit]:
+        return hits
+
+    monkeypatch.setattr(S, "hybrid_search", fake_hybrid)
+    monkeypatch.setattr(S, "hydrate_hits", fake_hydrate)
+    session = _FakeSession(
+        [(m.tg_msg_id,) for m in reversed(tail_rows)],  # dum id'lari
+        [answer, *tail_rows],  # xabar qatorlari
+    )
+    bundle = await S.search_context(
+        session,  # type: ignore[arg-type]
+        chat,
+        "javob qayerda",
+        budget_tokens=280,
+        rerank_enabled=False,
+    )
+    ids = [m.msg_id for m in bundle.messages]
+    assert 500 in ids  # hit byudjetdan tushib qolmadi
+    assert bundle.truncated and bundle.hits == 1
+    assert ids == sorted(ids)  # chiqish xronologik
 
 
 def test_claude_long_system_gets_cache_control() -> None:

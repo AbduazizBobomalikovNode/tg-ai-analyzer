@@ -23,10 +23,12 @@ from enum import StrEnum
 
 from app.config import get_settings
 from app.llm.base import (
+    EMBED_DOCUMENT,
     BaseProvider,
     Capability,
     ChatResult,
     EmbedResult,
+    EmbedTaskType,
     LLMError,
     Msg,
     ToolSpec,
@@ -299,9 +301,18 @@ class LLM:
         )
         return result
 
-    async def embed(self, texts: list[str], *, dim: int | None = None) -> EmbedResult:
+    async def embed(
+        self,
+        texts: list[str],
+        *,
+        dim: int | None = None,
+        task_type: EmbedTaskType = EMBED_DOCUMENT,
+    ) -> EmbedResult:
+        """`task_type`: indekslashda DOCUMENT (default), qidiruvda QUERY."""
         provider, model = resolve(Task.EMBED)
-        return await provider.embed(texts, model=model, dim=dim or get_settings().embed_dim)
+        return await provider.embed(
+            texts, model=model, dim=dim or get_settings().embed_dim, task_type=task_type
+        )
 
     async def generate_image(self, prompt: str) -> bytes:
         provider, model = resolve(Task.IMAGE)

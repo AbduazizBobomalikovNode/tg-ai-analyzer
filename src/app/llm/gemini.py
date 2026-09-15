@@ -21,10 +21,12 @@ from google.genai import types
 
 from app.config import get_settings
 from app.llm.base import (
+    EMBED_DOCUMENT,
     BaseProvider,
     Capability,
     ChatResult,
     EmbedResult,
+    EmbedTaskType,
     LLMError,
     Msg,
     Role,
@@ -120,7 +122,14 @@ class GeminiProvider(BaseProvider):
 
     # ── embedding ────────────────────────────────────────────────────────────
 
-    async def embed(self, texts: list[str], *, model: str, dim: int) -> EmbedResult:
+    async def embed(
+        self,
+        texts: list[str],
+        *,
+        model: str,
+        dim: int,
+        task_type: EmbedTaskType = EMBED_DOCUMENT,
+    ) -> EmbedResult:
         self.require(model, Capability.EMBED)
 
         async def _call() -> Any:
@@ -128,7 +137,7 @@ class GeminiProvider(BaseProvider):
                 return await self._client.aio.models.embed_content(
                     model=model,
                     contents=texts,  # type: ignore[arg-type]
-                    config=types.EmbedContentConfig(output_dimensionality=dim),
+                    config=types.EmbedContentConfig(output_dimensionality=dim, task_type=task_type),
                 )
             except Exception as exc:
                 raise LLMError(self.name, str(exc), status=_status_of(exc)) from exc
