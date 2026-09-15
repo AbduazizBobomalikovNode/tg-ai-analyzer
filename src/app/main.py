@@ -81,6 +81,17 @@ async def _check() -> int:
         )
         ok = False
 
+    # L10: `EMBED_DIMS` ↔ DB ustuni. Mos kelmasa har embedding INSERT'i
+    # yiqiladi — deploy paytida bilingani ma'qul.
+    from app.config import embed_dims_mismatch
+
+    dims_error = embed_dims_mismatch(s)
+    if dims_error:
+        log.error("check.embed_dims", ok=False, error=dims_error)
+        ok = False
+    else:
+        log.info("check.embed_dims", ok=True, dims=s.embed_dims, model=s.embed_model)
+
     try:
         async with get_engine().connect() as conn:
             await conn.execute(text("select 1"))
@@ -159,7 +170,12 @@ def main() -> int:
     if cmd == "bot":
         from app.bot.main import run_bot
 
-        asyncio.run(run_bot())
+        try:
+            asyncio.run(run_bot())
+        except KeyboardInterrupt:
+            # Auth-retry siklidagi `asyncio.sleep()` yoki polling shu yerda
+            # to'xtaydi — traceback bilan emas, toza chiqish bilan.
+            get_logger("bot").info("bot.stopped", reason="keyboard_interrupt")
         return 0
     if cmd == "check":
         return asyncio.run(_check())

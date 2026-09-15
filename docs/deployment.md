@@ -55,6 +55,19 @@ Postgres — odatiy dump. `MASTER_KEY_B64` — secret manager'da; yo'qolsa
 session'lar tiklanmaydi. Rotatsiya: `crypto.envelope.rewrap_dek` bilan DEK'lar
 qayta wrap (skript kerak bo'lsa 8-bosqichda).
 
+## Compose izolyatsiyasi
+
+`docker-compose.yml` dagi har servisning `env_file: .env` yo'li **fayl joylashgan
+katalogga nisbatan** (loyiha ildizi) yechiladi, `-p`/`--env-file` bayrog'iga
+emas. Shuning uchun `docker compose -p other --env-file other.env up` faqat
+loyiha nomini va Compose CLI o'zi o'qiydigan `.env`ni (masalan `${POSTGRES_USER}`
+kabi interpolatsiya uchun) almashtiradi — har servisning **konteyner ichidagi**
+muhiti hali ham asosiy `.env` dan keladi, chunki `env_file: .env` yozuvi
+o'zgarmaydi. Alohida (smoke/staging) stack kerak bo'lsa, override compose
+faylida shu servis uchun `env_file: !override [boshqa/.env]` bilan yo'lni
+almashtiring va nomlar to'qnashmasin uchun `volumes`/`ports`ni ham alohida
+belgilang (masalan boshqa host port va boshqa named volume).
+
 ## Ma'lum cheklovlar
 `api` va `worker` bir xil session'ni ishlatadi (bir host/egress IP'da muammo yo'q);
 `AuthKeyDuplicatedError` ko'rsangiz api'dagi jonli o'qishni DB'ga ko'chiring.
