@@ -69,6 +69,30 @@ def test_split_long_single_line_never_cuts_inside_a_tag() -> None:
         assert c.rfind("<") <= c.rfind(">")
 
 
+def test_split_long_single_line_never_cuts_inside_an_entity() -> None:
+    """F2/H5: `&amp;` ni `&am` + `p;` ga bo'lish ham "can't parse entities" beradi.
+
+    Renderer'lar `html.escape` ishlatadi, ya'ni uzun qatorda entity'lar
+    deyarli har doim bor — kesish nuqtasi ularning ustiga tushishi mumkin.
+    """
+    line = "z" * 4090 + "&amp;" * 40
+    chunks = push.split_html(line, limit=4096)
+    assert len(chunks) > 1
+    assert all(len(c) <= 4096 for c in chunks)
+    for c in chunks:
+        tail = c[c.rfind("&") :] if "&" in c else ""
+        assert not tail or ";" in tail  # yarim qolgan entity yo'q
+        assert not c.startswith(";")
+    assert "".join(chunks) == line  # kontent butun
+
+
+def test_hard_split_terminates_on_pathological_input() -> None:
+    """Har belgi `&` bo'lsa ham sikl tugaydi (cut > 0 kafolati)."""
+    out = push._hard_split("&" * 50, 10)
+    assert "".join(out) == "&" * 50
+    assert all(len(c) <= 10 for c in out)
+
+
 def test_split_preserves_all_content() -> None:
     text = "\n".join("a" * 100 for _ in range(200))
     assert "".join(push.split_html(text)).replace("\n", "") == text.replace("\n", "")

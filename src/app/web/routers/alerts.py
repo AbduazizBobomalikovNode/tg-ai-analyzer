@@ -155,9 +155,15 @@ async def update_alert(
             AL.validate(kind, pattern, threshold, cooldown)
         except AL.AlertError as exc:
             raise _fail(exc) from exc
-        if "chat_id" in data:
+        if "chat_id" in data and data["chat_id"] != rule.chat_id:
             await _check_chat(db, rule.account_id, data["chat_id"])
             rule.chat_id = data["chat_id"]
+            # Qamrov o'zgardi — eski kursor boshqa chatlar bo'yicha qo'yilgan
+            # va yangi qamrovning butun tarixini yashirib turardi. Nolga
+            # tushiramiz: skaner `ALERTS_SCAN_LIMIT` bilan chegaralangan,
+            # ya'ni backlog bir necha yugurishda bosqichma-bosqich ko'riladi
+            # (bir yugurishda butun tarix emas).
+            rule.last_checked_msg_id = 0
         # Naqsh yoki tur o'zgarsa keshlangan vektor yaroqsiz — skaner qayta embed qiladi.
         if pattern.strip() != (rule.pattern or "").strip() or kind != str(rule.kind):
             rule.embedding = None
@@ -196,7 +202,9 @@ async def rule_events(
                 select(AlertEvent, Chat, Message)
                 .join(Chat, Chat.id == AlertEvent.chat_id)
                 .join(Message, Message.id == AlertEvent.message_id)
-                .where(AlertEvent.rule_id == rule.id)
+                # O'chirilgan xabar hodisasi ko'rsatilmaydi: matni yo'q, havolasi
+                # o'lik — `deliver_alerts` ham uni yubormaydi.
+                .where(AlertEvent.rule_id == rule.id, Message.deleted_at.is_(None))
                 .order_by(AlertEvent.created_at.desc())
                 .limit(limit)
             )

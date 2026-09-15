@@ -39,7 +39,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -549,8 +549,12 @@ async def build_briefing(
     Returns:
         Yozilgan `Briefing`; kun tugunlari bo'lmasa `None`.
     """
+    from app.observability import BRIEFING_BUILDS
+    from app.services.limits import check_daily_budget
+
     account = await session.get(Account, account_id)
     if account is None:
+        BRIEFING_BUILDS.labels("error").inc()
         return None
     existing = (
         await session.execute(
@@ -560,10 +564,21 @@ async def build_briefing(
     if existing is not None and not force:
         return existing
 
+    # Byudjet **qurishdan oldin**: briefing — foydalanuvchi so'ramagan fon
+    # xarajati (`record_usage` uni `conversation_messages` ga yozadi, ya'ni
+    # u ham kunlik limitga kiradi). Limit to'lgan bo'lsa bugungi nashr
+    # o'tkazib yuboriladi — xato emas, holat.
+    over = await check_daily_budget(session, account.user_id)
+    if over:
+        log.info("briefing.budget_skip", account_id=account_id, day=str(day), limit=over)
+        BRIEFING_BUILDS.labels("budget").inc()
+        return None
+
     user = await session.get(User, account.user_id)
     items = await collect_salience(session, account, day, user=user)
     if not items:
         log.info("briefing.no_nodes", account_id=account_id, day=str(day))
+        BRIEFING_BUILDS.labels("empty").inc()
         return None
 
     s = get_settings()
@@ -571,6 +586,7 @@ async def build_briefing(
     locale = (user.locale if user else None) or s.default_locale
     synth = await synthesize(items, day, locale, top=top, llm=llm)
     if synth is None:
+        BRIEFING_BUILDS.labels("error").inc()
         return None
     draft, cost = synth
 
@@ -601,6 +617,7 @@ async def build_briefing(
         calls=len(cost.calls),
         tokens=cost.tokens_in + cost.tokens_out,
     )
+    BRIEFING_BUILDS.labels("ok").inc()
     return row
 
 
@@ -752,6 +769,45 @@ class DeliveryResult:
     message_id: int | None = None
 
 
+def _counted(res: DeliveryResult) -> DeliveryResult:
+    """Har yetkazish natijasi `tgai_briefing_pushes_total{status}` ga tushadi."""
+    from app.observability import BRIEFING_PUSHES
+
+    BRIEFING_PUSHES.labels(res.status).inc()
+    return res
+
+
+#: Push urinishlari — shundan keyin nashr `delivery_error` bilan yopiladi
+#: (`delivered_at` qo'yilgan holda qoladi). Cheksiz qayta urinish bloklangan
+#: botda har 15 daqiqada bir xil xatoni takrorlashdan boshqa narsa bermaydi.
+BRIEFING_MAX_DELIVERY_ATTEMPTS = 3
+
+
+async def _release(
+    session: AsyncSession,
+    row: Briefing,
+    account: Account,
+    check: DeliveryCheck,
+    error: str,
+    attempt: int,
+) -> DeliveryResult:
+    """Push muvaffaqiyatsiz — bandlashni bo'shatish (yoki voz kechish).
+
+    `attempt < BRIEFING_MAX_DELIVERY_ATTEMPTS` bo'lsa `delivered_at` qaytadan
+    `NULL` ga tushadi va keyingi tik qayta uradi. Aks holda qator
+    **yopiq** qoladi: `delivered_at` o'rnida, `delivery_error` esa nima
+    bo'lganini aytadi.
+    """
+    err = error[:500]
+    if attempt < BRIEFING_MAX_DELIVERY_ATTEMPTS:
+        row.delivered_at = None
+        row.delivery_error = err
+    else:
+        row.delivery_error = f"gave_up_after_{attempt}: {err}"[:500]
+    await session.flush()
+    return DeliveryResult(account.id, check.day, "error", error[:200])
+
+
 async def deliver_account(
     session: AsyncSession,
     account: Account,
@@ -764,7 +820,7 @@ async def deliver_account(
     """Bitta akkauntning joriy nashrini push qiladi (sozlama/jim oyna hisobga olinadi)."""
     check = delivery_check(account, now=now)
     if not check.ok:
-        return DeliveryResult(account.id, check.day, "skipped", check.reason)
+        return _counted(DeliveryResult(account.id, check.day, "skipped", check.reason))
 
     row = (
         await session.execute(
@@ -772,13 +828,36 @@ async def deliver_account(
         )
     ).scalar_one_or_none()
     if row is None:
-        return DeliveryResult(account.id, check.day, "skipped", "not_built")
+        return _counted(DeliveryResult(account.id, check.day, "skipped", "not_built"))
     if row.delivered_at is not None:
-        return DeliveryResult(account.id, check.day, "skipped", "already_delivered")
+        return _counted(DeliveryResult(account.id, check.day, "skipped", "already_delivered"))
 
     user = await session.get(User, account.user_id)
     if user is None or not user.tg_user_id:
-        return DeliveryResult(account.id, check.day, "skipped", "no_owner")
+        return _counted(DeliveryResult(account.id, check.day, "skipped", "no_owner"))
+
+    # Push'dan **oldin** shartli UPDATE bilan "band qilamiz". Ikki
+    # `deliver_briefings` tiki ustma-ust kelsa (masalan avvalgisi sekin
+    # tugagan bo'lsa), ikkalasi ham `delivered_at IS NULL` ni ko'rib bir
+    # xil briefingni ikki marta yuborardi — bu tekshiruv va yozuv orasidagi
+    # oynani yopadi: qatorni faqat bittasi bandlay oladi.
+    now_utc = datetime.now(UTC)
+    attempt = (
+        await session.execute(
+            update(Briefing)
+            .where(
+                Briefing.account_id == account.id,
+                Briefing.day == check.day,
+                Briefing.delivered_at.is_(None),
+            )
+            .values(delivered_at=now_utc, attempts=Briefing.attempts + 1)
+            .returning(Briefing.attempts)
+        )
+    ).scalar_one_or_none()
+    if attempt is None:
+        return _counted(DeliveryResult(account.id, check.day, "skipped", "already_delivered"))
+    row.delivered_at = now_utc
+    row.attempts = int(attempt)
 
     from app.bot.push import mini_app_link, send_html
 
@@ -792,20 +871,15 @@ async def deliver_account(
     try:
         msg_id = await sender(int(user.tg_user_id), body)
     except Exception as exc:  # sender o'zi yutadi, bu — ikkinchi chiziq
-        row.delivery_error = str(exc)[:500]
-        await session.flush()
-        return DeliveryResult(account.id, check.day, "error", str(exc)[:200])
+        return _counted(await _release(session, row, account, check, str(exc), int(attempt)))
 
     if msg_id is None:
-        row.delivery_error = "push_failed"
-        await session.flush()
-        return DeliveryResult(account.id, check.day, "error", "push_failed")
+        return _counted(await _release(session, row, account, check, "push_failed", int(attempt)))
 
-    row.delivered_at = datetime.now(UTC)
     row.delivery_error = None
     await session.flush()
     log.info("briefing.delivered", account_id=account.id, day=str(check.day), msg_id=msg_id)
-    return DeliveryResult(account.id, check.day, "sent", "ok", int(msg_id))
+    return _counted(DeliveryResult(account.id, check.day, "sent", "ok", int(msg_id)))
 
 
 async def enabled_accounts(session: AsyncSession) -> list[Account]:

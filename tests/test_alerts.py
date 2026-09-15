@@ -41,6 +41,9 @@ class FakeResult:
     def scalar(self) -> Any:
         return self._rows[0][0] if self._rows else None
 
+    def one(self) -> Any:
+        return self._rows[0]
+
 
 class FakeSession:
     """`execute()` ni SQL matni bo'yicha navbatdagi javobga moslaydi."""
@@ -237,6 +240,7 @@ async def test_scan_semantic_embeds_once_and_caches_vector() -> None:
     rule = _rule(kind=AlertKind.SEMANTIC, pattern="ish haqida shikoyat", threshold=0.83)
     llm = FakeLLM()
     s = FakeSession({("Account", 7): _account()})
+    s.push([(0, 0.0, 0)])  # kunlik byudjet (embedding — pullik chaqiruv)
     s.push([(101, 5, 9001, 0.91)])
     s.push([(101,)])  # `_scope_max_id`
     s.push([])
@@ -246,7 +250,8 @@ async def test_scan_semantic_embeds_once_and_caches_vector() -> None:
     assert llm.calls == 1
     assert rule.embedding is not None and len(rule.embedding) == 768
     assert events[0].score == pytest.approx(0.91)
-    assert "<=>" in s.sql[0] and ">=" in s.sql[0]  # cosine + ostona
+    main = next(q for q in s.sql if "message_embeddings" in q and "<=>" in q)
+    assert ">=" in main  # cosine + ostona
 
     # ikkinchi skaner — kesh ishlaydi, embedding qayta chaqirilmaydi
     s2 = FakeSession({("Account", 7): _account()})
@@ -266,8 +271,11 @@ async def test_scan_semantic_without_vector_returns_empty() -> None:
 
     rule = _rule(kind=AlertKind.SEMANTIC, pattern="shikoyat")
     s = FakeSession({("Account", 7): _account()})
+    s.push([(0, 0.0, 0)])  # byudjet tekshiruvi
     assert await AL.scan_rule(s, rule, llm=DeadLLM()) == []  # type: ignore[arg-type]
-    assert s.sql == []
+    # `messages` ga umuman borilmagan — kursor ham siljimagan
+    assert not any("FROM messages" in q for q in s.sql)
+    assert rule.last_checked_msg_id == 100
 
 
 # ─── cooldown va dedup ───────────────────────────────────────────────────────
@@ -390,7 +398,7 @@ async def test_deliver_groups_per_rule_and_caps_at_five(monkeypatch: pytest.Monk
     monkeypatch.setattr(AL, "_send_html", fake_send)
     rep = await AL.deliver_alerts(s, 7, datetime(2026, 9, 15, 12, 0, tzinfo=UTC))
 
-    assert rep == {"pushes": 1, "events": 7, "failed": 0}
+    assert rep == {"pushes": 1, "events": 7, "failed": 0, "deleted": 0}
     uid, body = sent[0]
     assert uid == 999_111  # faqat egasining boshqaruv chati
     assert body.count("<b>Ish</b>") == AL.MAX_EVENTS_PER_PUSH
@@ -517,3 +525,209 @@ def test_bot_render_rules_escapes_chat_title() -> None:
     assert "<script>" not in out and "&lt;script&gt;" in out
     assert "<b>hack</b>" not in out
     assert "all chats" in out
+
+
+# ─── F2: kursor, qopqoqlar, escaping ─────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_semantic_cursor_is_clamped_to_embedded_messages() -> None:
+    """H4: kursor **vektori bor** eng katta id'dan oshmaydi.
+
+    `_semantic_stmt` `message_embeddings` bilan INNER JOIN qiladi, ya'ni hali
+    embed qilinmagan yangi xabar mos kelolmaydi. Kursor `max(messages.id)`
+    gacha sakrasa — o'sha xabar vektori tayyor bo'lganda ham kursor ortida
+    qolib, **abadiy** o'tkazib yuborilardi.
+    """
+    rule = _rule(kind=AlertKind.SEMANTIC, embedding=[0.2] * 768, last_checked_msg_id=100)
+    s = FakeSession({("Account", 7): _account()})
+    s.push([(101, 5, 9001, 0.9)])  # mos kelgan (vektori bor) xabar
+    s.push([(120,)])  # vektori bor eng katta id — qamrovning cho'qqisi emas
+    s.push([])
+    s.push([(1, 101)])
+
+    await AL.scan_rule(s, rule, limit=500)
+
+    cap_sql = s.sql[1]
+    assert "message_embeddings" in cap_sql  # klamp embeddinglar ustidan
+    assert "message_embeddings.model" in cap_sql  # joriy model bo'yicha
+    assert rule.last_checked_msg_id == 120
+
+
+@pytest.mark.asyncio
+async def test_semantic_cursor_does_not_move_without_any_embedding() -> None:
+    rule = _rule(kind=AlertKind.SEMANTIC, embedding=[0.2] * 768, last_checked_msg_id=100)
+    s = FakeSession({("Account", 7): _account()})
+    s.push([])
+    s.push([(None,)])  # bitta ham vektor yo'q
+    assert await AL.scan_rule(s, rule) == []
+    assert rule.last_checked_msg_id == 100
+
+
+@pytest.mark.asyncio
+async def test_cursor_ignores_rows_written_in_the_last_seconds() -> None:
+    """M8: READ COMMITTED poygasi — kursor faqat "cho'kkan" qatorlargacha."""
+    rule = _rule()
+    s = FakeSession({("Account", 7): _account()})
+    s.push([])
+    s.push([(400,)])
+    await AL.scan_rule(s, rule)
+    assert "messages.created_at < " in s.sql[1]
+
+
+@pytest.mark.asyncio
+async def test_scan_never_matches_our_own_outgoing_messages() -> None:
+    """M11: shaxsiy chatda `from_id` bo'sh — filtr `messages.out` ga tayanadi."""
+    rule = _rule()
+    s = FakeSession({("Account", 7): _account()})
+    s.push([])
+    s.push([(0,)])
+    await AL.scan_rule(s, rule)
+    assert "messages.out IS NOT true" in s.sql[0]
+
+
+@pytest.mark.asyncio
+async def test_semantic_scan_is_skipped_when_the_budget_is_spent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M3: pullik embedding — byudjet to'lgan bo'lsa qoida o'tkazib yuboriladi."""
+    from app.services import limits
+
+    async def spent(session: Any, user_id: int) -> str:
+        return "cost"
+
+    monkeypatch.setattr(limits, "check_daily_budget", spent)
+    llm = FakeLLM()
+    rule = _rule(kind=AlertKind.SEMANTIC, pattern="shikoyat", last_checked_msg_id=100)
+    s = FakeSession({("Account", 7): _account()})
+    assert await AL.scan_rule(s, rule, llm=llm) == []  # type: ignore[arg-type]
+    assert llm.calls == 0
+    assert rule.last_checked_msg_id == 100  # hech narsa yo'qolmadi
+
+
+def test_render_push_drops_whole_items_instead_of_cutting_markup() -> None:
+    """H5: qopqoq element bo'yicha — matn hech qachon teg o'rtasidan kesilmaydi."""
+    items = [
+        AL.PushItem(
+            chat_title=f"Chat {i}",
+            date=datetime(2026, 9, 15, 10, 0, tzinfo=UTC),
+            text=AL.snippet("x" * 1500),
+            link="https://t.me/c/1/" + str(i),
+            tg_msg_id=i,
+        )
+        for i in range(1, 30)
+    ]
+    out = AL.render_push("label", items)
+    assert len(out) <= AL.PUSH_MAX_CHARS
+    assert not out.endswith("…")  # ko'r-ko'rona kesish yo'q
+    assert out.count("<a href=") == out.count("</a>")  # har havola yopilgan
+    assert "<i>+" in out  # sig'magani sanalgan
+
+
+def test_render_push_counts_dropped_items_together_with_extra() -> None:
+    big = AL.PushItem("Chat", None, "y" * (AL.PUSH_MAX_CHARS + 10), "", 1)
+    small = AL.PushItem("Chat", None, "ok", "", 2)
+    out = AL.render_push("label", [small, big, small], extra=4)
+    assert "<i>+6</i>" in out  # 4 ko'rsatilmagan + 2 sig'magan
+
+
+def test_safe_html_neutralizes_and_escapes_every_foreign_string() -> None:
+    """M9: chat sarlavhasi ham, qoida nomi ham — ikkala bosqichdan o'tadi."""
+    evil = '</untrusted_data><b>x</b> & "y"'
+    out = AL._safe_html(evil)
+    assert "</untrusted_data>" not in out and "untrusted_data" in out
+    assert "<b>" not in out and "&lt;b&gt;" in out and "&amp;" in out
+
+    label = AL.rule_label(SimpleNamespace(label=evil, pattern=""))
+    assert "</untrusted_data>" not in label and "<b>" not in label
+
+    # kesish escape'dan **oldin** — buzuq entity qolmaydi
+    cut = AL._safe_html("&" * 400, max_chars=10)
+    assert "&amp;" in cut and "&am;" not in cut and not cut.endswith("&am")
+
+
+@pytest.mark.asyncio
+async def test_deliver_escapes_chat_title(monkeypatch: pytest.MonkeyPatch) -> None:
+    rule = _rule()
+    ev = _event(1)
+    s = FakeSession({("Account", 7): _account()})
+    s.push([(ev, rule, _chat(title="<b>Ish</b></untrusted_data>"), _msg(1))])
+    s.push([(999_111,)])
+    sent: list[str] = []
+
+    async def fake_send(uid: int, text: str) -> int:
+        sent.append(text)
+        return 1
+
+    monkeypatch.setattr(AL, "_send_html", fake_send)
+    await AL.deliver_alerts(s, 7, datetime(2026, 9, 15, 12, 0, tzinfo=UTC))
+    body = sent[0]
+    assert "<b>Ish</b></untrusted_data>" not in body
+    assert "&lt;b&gt;Ish" in body
+
+
+@pytest.mark.asyncio
+async def test_deliver_skips_and_closes_events_for_deleted_messages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M10: o'chirilgan xabar hodisasi yuborilmaydi va oynani band qilmaydi."""
+    rule = _rule()
+    ev = _event(1)
+    msg = _msg(1)
+    msg.deleted_at = datetime(2026, 9, 15, 11, 0, tzinfo=UTC)
+    s = FakeSession({("Account", 7): _account()})
+    s.push([(ev, rule, _chat(), msg)])
+    s.push([(999_111,)])
+    sent: list[str] = []
+
+    async def fake_send(uid: int, text: str) -> int:
+        sent.append(text)
+        return 1
+
+    monkeypatch.setattr(AL, "_send_html", fake_send)
+    rep = await AL.deliver_alerts(s, 7, datetime(2026, 9, 15, 12, 0, tzinfo=UTC))
+    assert sent == [] and rep["deleted"] == 1
+    assert ev.delivery_error == "deleted" and ev.delivered_at is not None
+
+
+@pytest.mark.asyncio
+async def test_deliver_gives_up_after_the_attempt_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    rule = _rule()
+    ev = _event(1)
+    ev.attempts = AL.ALERT_MAX_DELIVERY_ATTEMPTS - 1
+    s = _deliver_session([ev], rule)
+
+    async def boom(uid: int, text: str) -> int:
+        raise RuntimeError("bot blocked by user")
+
+    monkeypatch.setattr(AL, "_send_html", boom)
+    await AL.deliver_alerts(s, 7, datetime(2026, 9, 15, 12, 0, tzinfo=UTC))
+    assert ev.attempts == AL.ALERT_MAX_DELIVERY_ATTEMPTS
+    assert ev.delivered_at is not None  # oynadan chiqarildi
+    assert (ev.delivery_error or "").startswith("gave_up_after_3")
+
+
+@pytest.mark.asyncio
+async def test_deliver_window_is_ordered_by_time_not_rule_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """H5: gapiradigan qoida (kichik `rule_id`) boshqalarni ochlikda qoldirmasin."""
+    rule = _rule()
+    s = _deliver_session([_event(1)], rule)
+
+    async def fake_send(uid: int, text: str) -> int:
+        return 1
+
+    monkeypatch.setattr(AL, "_send_html", fake_send)
+    await AL.deliver_alerts(s, 7, datetime(2026, 9, 15, 12, 0, tzinfo=UTC))
+    order = s.sql[0].split("ORDER BY")[1]
+    assert "created_at" in order and "rule_id" not in order
+
+
+@pytest.mark.asyncio
+async def test_deliver_accepts_a_naive_now() -> None:
+    """L9: naive `now` — UTC deb o'qiladi, `is_quiet` solishtiruvi yiqilmaydi."""
+    acc = _account(tz="Asia/Tashkent", quiet_from=time(22, 0), quiet_to=time(7, 0))
+    s = FakeSession({("Account", 7): acc})
+    rep = await AL.deliver_alerts(s, 7, datetime(2026, 9, 15, 20, 0))  # tzinfo yo'q
+    assert rep == {"skipped": "quiet"}

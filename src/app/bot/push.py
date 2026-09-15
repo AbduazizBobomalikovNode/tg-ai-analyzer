@@ -30,6 +30,8 @@ TG_MAX_CHARS = 4096
 MAX_CHUNKS = 6
 #: Yozib bo'lmaydigan maxsus peer'lar (Telegram xizmat akkauntlari).
 _FORBIDDEN_IDS = frozenset({777000, 42777})
+#: Eng uzun HTML entity (`&thetasym;`) — kesish shu oynada tekshiriladi.
+_ENTITY_MAX_CHARS = 12
 
 
 class PushError(RuntimeError):
@@ -100,7 +102,16 @@ def split_html(html: str, *, limit: int = TG_MAX_CHARS) -> list[str]:
 
 
 def _hard_split(line: str, limit: int) -> list[str]:
-    """Limitdan uzun bitta qator — teg o'rtasidan kesmasdan bo'laklarga."""
+    """Limitdan uzun bitta qator — teg **va** entity o'rtasidan kesmasdan.
+
+    Ikki qopqoq, ikkalasi ham Telegram parseri uchun:
+
+    * yopilmagan `<` dan oldin kesiladi — `<a href="…` ning yarmi keyingi
+      bo'lakka o'tsa, xabar "can't parse entities" bilan rad etiladi;
+    * yopilmagan `&` dan oldin kesiladi — `&amp;` ni `&am` + `p;` ga
+      bo'lish ham aynan shu xatoni beradi (renderer'lar `html.escape`
+      ishlatadi, ya'ni entity'lar **har doim** bor).
+    """
     if len(line) <= limit:
         return [line]
     out: list[str] = []
@@ -111,6 +122,11 @@ def _hard_split(line: str, limit: int) -> list[str]:
         open_lt = head.rfind("<")
         if open_lt > 0 and head.rfind(">") < open_lt:
             cut = open_lt  # teg ichida kesmaymiz
+        amp = rest.rfind("&", 0, cut)
+        if amp > 0 and cut - amp <= _ENTITY_MAX_CHARS and ";" not in rest[amp:cut]:
+            cut = amp  # entity ichida ham kesmaymiz
+        if cut <= 0:  # bo'lakka joy qolmadi — qattiq kesamiz (cheksiz sikl yo'q)
+            cut = limit
         out.append(rest[:cut])
         rest = rest[cut:]
     if rest:

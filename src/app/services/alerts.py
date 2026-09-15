@@ -18,6 +18,15 @@ Ikki turdagi qoida:
     embed qilish bekor xarajat. `pattern` yangilanganda router `embedding`
     ni `NULL` ga tushiradi.
 
+    **Qamrov cheklovi:** semantik qoida faqat `message_embeddings` da
+    vektori bor xabarlarni ko'radi, vektor esa
+    `worker.tasks.EMBED_MIN_CHARS` (20 belgi) dan qisqa matnga umuman
+    hisoblanmaydi. Ya'ni "ha", "ok", "👍" kabi qisqa xabarlar semantik
+    qoidaga **hech qachon** tushmaydi (kalit so'z qoidasi ularni ko'radi).
+    Shu sababli semantik kursor `max(messages.id)` gacha emas, **vektori
+    bor** eng katta id gacha siljiydi: aks holda hali embed qilinmagan
+    yangi xabarlar kursor ortida qolib, abadiy o'tkazib yuborilardi.
+
 Qopqoqlar (o'lchov bilan emas, xavfsizlik bilan qo'yilgan):
 
   * **Kursor** `last_checked_msg_id` — har skaner faqat yangi xabarlarni
@@ -62,6 +71,8 @@ from app.services.textnorm import uz_fold
 log = get_logger(__name__)
 
 __all__ = [
+    "ALERT_MAX_DELIVERY_ATTEMPTS",
+    "CURSOR_SETTLE_SECONDS",
     "MAX_EVENTS_PER_PUSH",
     "PATTERN_MAX_CHARS",
     "AlertError",
@@ -80,6 +91,16 @@ MAX_EVENTS_PER_RUN = 200  # bitta deliver yugurishida ko'riladigan hodisalar
 SNIPPET_CHARS = 200
 PUSH_MAX_CHARS = 3800  # Telegram chegarasi 4096 — sarlavha/havolalarga zapas
 SCAN_LIMIT = 500
+#: Push urinishlari — shundan keyin hodisa `delivery_error` bilan yopiladi.
+#: Qopqoqsiz bloklangan bot har 5 daqiqada bir xil xatoni takrorlab,
+#: `MAX_EVENTS_PER_RUN` oynasini boshqa qoidalardan to'sib qo'yardi.
+ALERT_MAX_DELIVERY_ATTEMPTS = 3
+#: Kursor faqat shuncha soniya oldin **bazaga yozilgan** qatorlargacha
+#: siljiydi. READ COMMITTED da hozir ochiq tranzaksiyaning kichikroq id'si
+#: keyinroq ko'rinadi; klampsiz u kursor ortida qolib ketardi.
+CURSOR_SETTLE_SECONDS = 5
+#: `render_push` oxiridagi "+N" qatoriga zaxira (belgi).
+_FOOTER_RESERVE = 24
 
 THRESHOLD_MIN = 0.5
 THRESHOLD_MAX = 0.95
@@ -192,23 +213,35 @@ def compile_keyword_query(pattern: str, *, fold: bool = True) -> str:
     return " | ".join(dict.fromkeys(groups))
 
 
-def snippet(text: str, *, max_chars: int = SNIPPET_CHARS) -> str:
-    """Push uchun xavfsiz parcha: neutralize → bir qatorga → kesish → escape.
+def _safe_html(text: str | None, *, max_chars: int | None = None, ellipsis: bool = True) -> str:
+    """Push'ga tushadigan **har qanday** begona satr shu yerdan o'tadi.
 
-    Tartib muhim: `neutralize` konvert tegini o'ldiradi (`<untrusted_data>`),
-    `html.escape` esa Telegram HTML tegini (`<b>`). Ikkalasi ham kerak —
-    biri ikkinchisini almashtirmaydi.
+    Ikkala bosqich ham majburiy va tartibi qat'iy:
+
+      1. `untrusted.neutralize` — konvert tegini (`</untrusted_data>`) va
+         ko'rinmas/bidi belgilarni o'ldiradi;
+      2. `html.escape` — Telegram HTML tegini (`<b>`, `<a>`) o'ldiradi.
+
+    Kesish **ikkisining orasida**: escape qilingan matnni kesish
+    `&amp;` ni `&am` ga aylantirib, Telegram parseri uchun buzuq
+    entity yasardi.
     """
-    clean = U.neutralize(text or "").replace("\n", " ").strip()
-    clean = re.sub(r"\s{2,}", " ", clean)
-    if len(clean) > max_chars:
-        clean = clean[: max_chars - 1].rstrip() + "…"
+    clean = U.neutralize(text or "")
+    if max_chars is not None and len(clean) > max_chars:
+        clean = clean[: max_chars - 1].rstrip() + ("…" if ellipsis else "")
     return html.escape(clean, quote=False)
 
 
+def snippet(text: str, *, max_chars: int = SNIPPET_CHARS) -> str:
+    """Push uchun xavfsiz parcha: neutralize → bir qatorga → kesish → escape."""
+    clean = re.sub(r"\s{2,}", " ", U.neutralize(text or "").replace("\n", " ").strip())
+    return _safe_html(clean, max_chars=max_chars)
+
+
 def rule_label(rule: Any) -> str:
+    """Qoida sarlavhasi — u ham foydalanuvchi yozgan matn: neutralize + escape."""
     raw = (getattr(rule, "label", "") or "").strip() or (rule.pattern or "").strip()
-    return html.escape(raw[:64], quote=False) or "alert"
+    return _safe_html(raw, max_chars=64, ellipsis=False) or "alert"
 
 
 def message_link(chat: Any, tg_msg_id: int) -> str:
@@ -232,13 +265,17 @@ def _base_where(rule: Any, owner_tg_id: int | None) -> list[Any]:
     conds: list[Any] = [
         Message.id > int(rule.last_checked_msg_id or 0),
         Message.deleted_at.is_(None),
+        # O'zimiz yozgan xabar — hech qachon. Shaxsiy chatda `from_id` bo'sh
+        # keladi, shuning uchun `sender_id` filtri buni tutmasdi: o'z
+        # xabaringiz o'z alertingizni uyg'otib, cooldown'ni yeb qo'yardi.
+        Message.out.is_not(True),
     ]
     if rule.chat_id is not None:
         conds.append(Message.chat_id == int(rule.chat_id))
     else:
         conds.append(Chat.account_id == int(rule.account_id))
     if owner_tg_id is not None:
-        # O'z xabaringiz haqida sizga xabar berish ma'nosiz (va cooldown'ni yeydi).
+        # Guruhda esa `sender_id` bor — o'zimizni shu yerda chiqaramiz.
         conds.append(or_(Message.sender_id.is_(None), Message.sender_id != int(owner_tg_id)))
     return conds
 
@@ -279,19 +316,39 @@ def _semantic_stmt(rule: Any, owner_tg_id: int | None, qvec: Any, limit: int) ->
     )
 
 
-async def _owner_tg_id(session: AsyncSession, account_id: int) -> int | None:
+async def _owner(session: AsyncSession, account_id: int) -> tuple[int | None, int | None]:
+    """`(tg_account_id, user_id)` — filtr uchun biri, byudjet uchun ikkinchisi."""
     acc = await session.get(Account, int(account_id))
-    return int(acc.tg_account_id) if acc is not None and acc.tg_account_id else None
+    if acc is None:
+        return None, None
+    tg = int(acc.tg_account_id) if acc.tg_account_id else None
+    uid = int(acc.user_id) if getattr(acc, "user_id", None) else None
+    return tg, uid
 
 
-async def _rule_vector(session: AsyncSession, rule: Any, llm: LLM | None) -> list[float] | None:
-    """Keshlangan vektor yoki bitta `RETRIEVAL_QUERY` embedding (kesh yoziladi)."""
+async def _rule_vector(
+    session: AsyncSession, rule: Any, llm: LLM | None, user_id: int | None = None
+) -> list[float] | None:
+    """Keshlangan vektor yoki bitta `RETRIEVAL_QUERY` embedding (kesh yoziladi).
+
+    Kesh bo'sh bo'lsa — bu **pullik** chaqiruv, shuning uchun kunlik byudjet
+    shu yerda tekshiriladi (`limits.check_daily_budget`, xato ko'tarmaydi).
+    Byudjet to'lgan bo'lsa qoida shu yugurishda o'tkazib yuboriladi:
+    kursor ham siljimaydi, ya'ni hech narsa yo'qolmaydi.
+    """
     cached = getattr(rule, "embedding", None)
     if cached is not None:
         return [float(x) for x in cached]
     text_ = (rule.pattern or "").strip()
     if not text_:
         return None
+    if user_id is not None:
+        from app.services.limits import check_daily_budget
+
+        over = await check_daily_budget(session, int(user_id))
+        if over:
+            log.info("alerts.budget_skip", rule_id=getattr(rule, "id", None), limit=over)
+            return None
     try:
         res = await (llm or LLM()).embed([text_], task_type=EMBED_QUERY)
     except LLMError as exc:
@@ -348,13 +405,26 @@ async def scan_rule(
     topilmasa ham, aks holda har yugurish bir xil oynani qayta skanerlardi.
     Agar natija `limit` ga tiqilib qolsa — kursor faqat oxirgi ko'rilgan
     xabargacha siljiydi, qolgani keyingi yugurishda ko'riladi.
-    """
-    now = datetime.now(UTC)
-    owner = await _owner_tg_id(session, rule.account_id)
-    kind = str(getattr(rule, "kind", AlertKind.KEYWORD))
 
-    if kind == AlertKind.SEMANTIC:
-        qvec = await _rule_vector(session, rule, llm)
+    Kursorning yuqori chegarasi (`_scope_max_id`) ikki jihatdan qisqartirilgan:
+
+    * **cho'kkanlik** — `CURSOR_SETTLE_SECONDS` dan yaqinda yozilgan qatorlar
+      hisobga olinmaydi (READ COMMITTED da kichikroq id keyinroq ko'rinadi);
+    * **vektor** — semantik qoida uchun faqat joriy embed modelida vektori
+      bor xabarlar. Aks holda hali embed qilinmagan yangi xabarlar kursor
+      ortida qolib, `INNER JOIN message_embeddings` tufayli abadiy
+      o'tkazib yuborilardi (bu funksiya ularni hech qachon qaytarmaydi).
+    """
+    from app.observability import ALERT_EVENTS, ALERT_SCANS
+
+    now = datetime.now(UTC)
+    ALERT_SCANS.inc()
+    owner, user_id = await _owner(session, rule.account_id)
+    kind = str(getattr(rule, "kind", AlertKind.KEYWORD))
+    semantic = kind == AlertKind.SEMANTIC
+
+    if semantic:
+        qvec = await _rule_vector(session, rule, llm, user_id)
         if qvec is None:
             return []
         stmt = _semantic_stmt(rule, owner, qvec, limit)
@@ -375,11 +445,11 @@ async def scan_rule(
         for r in rows
     ]
 
-    # Kursor: to'liq oyna ko'rilgan bo'lsa eng katta id'gacha, aks holda
-    # oxirgi qaytgan xabargacha (limit bilan kesilgan qolgan qismi yo'qolmasin).
-    max_seen = max((c.message_id for c in cands), default=0)
-    if len(cands) < limit:
-        max_seen = max(max_seen, await _scope_max_id(session, rule))
+    # Kursor: to'liq oyna ko'rilgan bo'lsa qamrovning "xavfsiz" cho'qqisigacha,
+    # oyna `limit` ga tiqilib qolgan bo'lsa oxirgi qaytgan xabargacha (lekin
+    # baribir cho'qqidan oshmagan holda).
+    cap = await _scope_max_id(session, rule, require_embedding=semantic, now=now)
+    max_seen = cap if len(cands) < limit else min(max(c.message_id for c in cands), cap)
     if max_seen > int(rule.last_checked_msg_id or 0):
         rule.last_checked_msg_id = max_seen
 
@@ -391,14 +461,47 @@ async def scan_rule(
     )
     if not fresh:
         return []
-    return await _insert_events(session, rule.id, fresh)
+    events = await _insert_events(session, rule.id, fresh)
+    if events:
+        ALERT_EVENTS.labels(kind).inc(len(events))
+    return events
 
 
-async def _scope_max_id(session: AsyncSession, rule: Any) -> int:
-    """Qoida qamrovidagi eng katta `messages.id` — bo'sh skanerdan keyingi kursor."""
+async def _scope_max_id(
+    session: AsyncSession,
+    rule: Any,
+    *,
+    require_embedding: bool = False,
+    now: datetime | None = None,
+) -> int:
+    """Kursorni qo'yish mumkin bo'lgan eng katta `messages.id`.
+
+    Args:
+        session: DB sessiyasi.
+        rule: qoida (qamrov `chat_id` yoki butun akkaunt).
+        require_embedding: faqat joriy embed modelida vektori bor xabarlar
+            (semantik qoida uchun — H4).
+        now: klamp uchun joriy vaqt (test uchun beriladi).
+
+    Returns:
+        `CURSOR_SETTLE_SECONDS` dan oldin yozilgan qatorlar orasidagi eng
+        katta id; bunday qator bo'lmasa `0` (kursor **siljimaydi**).
+    """
     from sqlalchemy import func as sa_func
 
-    stmt = select(sa_func.max(Message.id)).join(Chat, Chat.id == Message.chat_id)
+    settled = (now or datetime.now(UTC)) - timedelta(seconds=CURSOR_SETTLE_SECONDS)
+    stmt = (
+        select(sa_func.max(Message.id))
+        .join(Chat, Chat.id == Message.chat_id)
+        .where(Message.created_at < settled)
+    )
+    if require_embedding:
+        from app.db.models import MessageEmbedding
+        from app.llm import embed_model_name
+
+        stmt = stmt.join(MessageEmbedding, MessageEmbedding.message_id == Message.id).where(
+            MessageEmbedding.model == embed_model_name()
+        )
     if rule.chat_id is not None:
         stmt = stmt.where(Message.chat_id == int(rule.chat_id))
     else:
@@ -463,23 +566,37 @@ class PushItem:
 def render_push(label: str, items: list[PushItem], extra: int = 0) -> str:
     """Bitta qoida uchun HTML push (`parse_mode=HTML`, ≤ `PUSH_MAX_CHARS`).
 
-    Barcha o'zgaruvchi qismlar allaqachon `snippet()` / `html.escape` dan
+    Barcha o'zgaruvchi qismlar allaqachon `_safe_html` / `snippet` dan
     o'tgan bo'lishi shart — bu funksiya yangi escaping qilmaydi, faqat
     sarlavha va sanani qo'shadi.
+
+    Qopqoq **element bo'yicha** ishlaydi: matn uzun bo'lsa oxirgi
+    elementlar butunligicha tashlanadi va "+N" ga qo'shiladi. Ilgari
+    tayyor matn `PUSH_MAX_CHARS` da ko'r-ko'rona kesilardi — kesish
+    `<a href="…` ning o'rtasiga tushsa Telegram butun xabarni rad etadi
+    va hodisa **abadiy** yetkazilmagan bo'lib qolardi (har yugurishda
+    aynan o'sha xabar qayta yasalardi).
     """
-    lines = [f"🔔 <b>{label}</b>"]
+    head_line = f"🔔 <b>{label}</b>"
+    lines = [head_line]
+    size = len(head_line)
+    dropped = 0
     for i, it in enumerate(items, 1):
         when = it.date.strftime("%Y-%m-%d %H:%M") if it.date else "—"
-        head = f"{i}. <b>{it.chat_title}</b> · {when}"
+        block = f"{i}. <b>{it.chat_title}</b> · {when}"
         if it.link:
-            head += f' · <a href="{html.escape(it.link, quote=True)}">#{it.tg_msg_id}</a>'
-        lines.append(head)
+            block += f' · <a href="{html.escape(it.link, quote=True)}">#{it.tg_msg_id}</a>'
         if it.text:
-            lines.append(it.text)
-    if extra > 0:
-        lines.append(f"<i>+{extra}</i>")
-    out = "\n".join(lines)
-    return out if len(out) <= PUSH_MAX_CHARS else out[: PUSH_MAX_CHARS - 1] + "…"
+            block += f"\n{it.text}"
+        if size + 1 + len(block) + _FOOTER_RESERVE > PUSH_MAX_CHARS:
+            dropped = len(items) - (i - 1)
+            break
+        lines.append(block)
+        size += 1 + len(block)
+    total_extra = extra + dropped
+    if total_extra > 0:
+        lines.append(f"<i>+{total_extra}</i>")
+    return "\n".join(lines)
 
 
 async def _send_html(user_tg_id: int, text: str) -> int | None:
@@ -509,8 +626,21 @@ async def deliver_alerts(
     Jim soatlarda **hech narsa yuborilmaydi va hech narsa yo'qolmaydi** —
     hodisalar `delivered_at IS NULL` bo'lib qoladi va keyingi yugurishda
     (jim soatlar tugagach) bitta guruhlangan push bo'lib ketadi.
+
+    Uch qopqoq:
+
+    * oyna `created_at` bo'yicha tartiblanadi (`rule_id` emas) — aks holda
+      kichik `rule_id` li "gapiradigan" qoida `MAX_EVENTS_PER_RUN` ni
+      to'ldirib, boshqa qoidalarni ochlikda qoldirardi;
+    * xabari o'chirilgan hodisa yuborilmaydi — `delivery_error="deleted"`
+      bilan yopiladi (aks holda u oynani abadiy band qilardi);
+    * `ALERT_MAX_DELIVERY_ATTEMPTS` dan keyin voz kechiladi.
     """
+    from app.observability import ALERT_PUSHES
+
     now = now or datetime.now(UTC)
+    if now.tzinfo is None:  # naive kirsa jim soat hisobi UTC'da bo'lsin
+        now = now.replace(tzinfo=UTC)
     acc = await session.get(Account, int(account_id))
     if acc is None:
         return {"skipped": "no_account"}
@@ -529,7 +659,7 @@ async def deliver_alerts(
             .join(Chat, Chat.id == AlertEvent.chat_id)
             .join(Message, Message.id == AlertEvent.message_id)
             .where(AlertRule.account_id == int(account_id), AlertEvent.delivered_at.is_(None))
-            .order_by(AlertEvent.rule_id, AlertEvent.created_at)
+            .order_by(AlertEvent.created_at, AlertEvent.id)
             .limit(MAX_EVENTS_PER_RUN)
         )
     ).all()
@@ -541,7 +671,15 @@ async def deliver_alerts(
         return {"skipped": "no_owner"}
 
     groups: dict[int, list[tuple[Any, Any, Any, Any]]] = {}
+    skipped_deleted = 0
     for ev, rule, chat, msg in rows:
+        if getattr(msg, "deleted_at", None) is not None:
+            # Xabar o'chirilgan — yuboradigan matn yo'q. Hodisa yopiladi,
+            # aks holda u oynani abadiy band qilardi.
+            ev.delivery_error = "deleted"
+            ev.delivered_at = now
+            skipped_deleted += 1
+            continue
         groups.setdefault(int(ev.rule_id), []).append((ev, rule, chat, msg))
 
     pushes = 0
@@ -551,7 +689,7 @@ async def deliver_alerts(
         shown = grp[:MAX_EVENTS_PER_PUSH]
         items = [
             PushItem(
-                chat_title=U.attr(chat.title or ""),
+                chat_title=_safe_html(chat.title or "", max_chars=64),
                 date=msg.published_at,
                 text=snippet(msg.text or ""),
                 link=message_link(chat, ev.tg_msg_id),
@@ -569,16 +707,38 @@ async def deliver_alerts(
             err = str(exc)[:500]
             log.warning("alerts.push_failed", rule_id=grp[0][0].rule_id, error=err[:200])
             for ev, *_ in grp:
-                ev.delivery_error = err
+                tries = int(getattr(ev, "attempts", 0) or 0) + 1
+                ev.attempts = tries
+                if tries >= ALERT_MAX_DELIVERY_ATTEMPTS:
+                    # Voz kechildi: `delivered_at` qo'yiladi (oynani bo'shatish
+                    # uchun), lekin `delivery_error` nima bo'lganini saqlaydi.
+                    ev.delivered_at = now
+                    ev.delivery_error = f"gave_up_after_{tries}: {err}"[:500]
+                else:
+                    ev.delivery_error = err
             failed += len(grp)
+            ALERT_PUSHES.labels("failed").inc()
             continue
         pushes += 1
+        ALERT_PUSHES.labels("ok").inc()
         for ev, *_ in grp:
+            ev.attempts = int(getattr(ev, "attempts", 0) or 0) + 1
             ev.delivered_at = now
             ev.delivery_error = None
             delivered += 1
-    log.info("alerts.delivered", account_id=account_id, pushes=pushes, events=delivered)
-    return {"pushes": pushes, "events": delivered, "failed": failed}
+    log.info(
+        "alerts.delivered",
+        account_id=account_id,
+        pushes=pushes,
+        events=delivered,
+        deleted=skipped_deleted,
+    )
+    return {
+        "pushes": pushes,
+        "events": delivered,
+        "failed": failed,
+        "deleted": skipped_deleted,
+    }
 
 
 # ─── qoida CRUD yordamchilari (router ishlatadi) ─────────────────────────────
