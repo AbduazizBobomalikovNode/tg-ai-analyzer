@@ -6,7 +6,7 @@ requires-python = ">=3.12"
 
 dependencies = [
     # Telegram
-    "telethon>=1.36",
+    "telethon>=1.44",  # layer 227+: channels.SearchPosts(query=), CheckSearchPostsFlood
     "aiogram>=3.15",
     # web / api (Mini App fallback auth)
     "fastapi>=0.115",
@@ -35,6 +35,9 @@ dependencies = [
     "httpx>=0.28",
     "qrcode[pil]>=8.0",
     "orjson>=3.10",
+    # til aniqlash (ingest) — o'zbek tili lingua ro'yxatida yo'q, shuning uchun
+    # ru/en ni lingua, uz ni marker so'zlar hal qiladi (services/ingestion.py)
+    "lingua-language-detector>=2.0",
 ]
 
 [project.optional-dependencies]
@@ -61,6 +64,17 @@ src = ["src"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC", "S", "RUF"]
 ignore = ["S101"]  # assert allowed in tests
+
+[tool.ruff.lint.per-file-ignores]
+# Bu fayllar ataylab kirill/o'zbek matnini **ma'lumot** sifatida saqlaydi
+# (fold jadvallari, stop-so'zlar, paritet korpusi) — RUF001/2/3 "ASCII'ga
+# o'xshash belgi" ogohlantirishlari bu yerda shovqin.
+"src/app/services/stopwords.py" = ["RUF001", "RUF002", "RUF003"]
+"src/app/services/textnorm.py" = ["RUF001", "RUF002", "RUF003"]
+"migrations/versions/0008_retrieval_foundation.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_textnorm.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_db_integration.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_ingest_normalization.py" = ["RUF001", "RUF002", "RUF003"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -20,9 +20,11 @@ Snapshot (4.6-band): faqat kanallar; yosh postlar tez-tez, eskilari kamroq —
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from functools import lru_cache
 from typing import Any
 
 from sqlalchemy import func, select, update
@@ -44,8 +46,10 @@ from app.db.models import (
     SyncState,
 )
 from app.logging import get_logger
-from app.mtproto.pool import PoolError, pool
+from app.mtproto.pool import DIALOGS_LIMIT, PoolError, pool
 from app.observability import FLOODWAIT, SNAPSHOT_POSTS, SYNC_MESSAGES
+from app.services.stopwords import STOP_EN, STOP_RU, STOP_UZ
+from app.services.textnorm import strip_invisible, uz_fold
 
 log = get_logger(__name__)
 
@@ -97,6 +101,114 @@ def _title(ent: Any) -> str:
     return getattr(ent, "title", None) or str(getattr(ent, "id", ""))
 
 
+def link_prefix_for(chat_type: str, tg_peer_id: int, username: str | None) -> str | None:
+    """Sitata havolasi prefiksi: `<prefix><tg_msg_id>` → to'liq t.me havolasi.
+
+    Sync vaqtida bir marta hisoblanadi (`chats.link_prefix`) — aks holda har
+    sitata uchun runtime'da peer turini qayta tekshirish kerak bo'ladi.
+
+    * public (username bor) → ``https://t.me/<username>/``
+    * kanal/supergruh        → ``https://t.me/c/<id>/`` (``-100`` prefiksisiz)
+    * private / oddiy guruh  → ``None`` (bunday chatga ommaviy havola yo'q)
+
+    `chats.tg_peer_id` odatda **xom** Telethon id (``ent.id``, musbat) bo'ladi,
+    lekin bot API uslubidagi ``-100…`` ko'rinish ham kelishi mumkin. ``-100``
+    faqat **manfiy** qiymatdan qirqiladi: musbat xom id'da ``100`` bilan
+    boshlanuvchi haqiqiy kanallar bor (masalan ``1001234567``) va ularni
+    qirqish noto'g'ri havola beradi.
+    """
+    if username:
+        return f"https://t.me/{username}/"
+    if chat_type in (ChatType.CHANNEL, ChatType.SUPERGROUP):
+        peer = int(tg_peer_id)
+        raw = str(-peer) if peer < 0 else str(peer)
+        if peer < 0 and raw.startswith("100") and len(raw) > 3:
+            raw = raw[3:]
+        return f"https://t.me/c/{raw}/"
+    return None
+
+
+# ─── til aniqlash ────────────────────────────────────────────────────────────
+
+MIN_CHARS_FOR_LANG = 12  # undan qisqa matnda har qanday detektor tanga tashlaydi
+
+#: Faqat o'zbekchaga xos stop-so'zlar (fold fazosida). `lingua` da **o'zbek
+#: tili yo'q** (75 tilning ichida emas), shuning uchun uz ↔ ru/en ajratish
+#: marker so'zlar + yozuv (script) tahlili bilan qilinadi, lingua esa faqat
+#: ru/en ni tasdiqlaydi. Aniqlik mukammal emas — `lang_conf` shuning uchun
+#: saqlanadi, filtr emas, **vazn** sifatida ishlatilsin.
+_UZ_MARKERS: frozenset[str] = STOP_UZ - STOP_RU - STOP_EN
+
+_TOKEN_RE = re.compile(r"[a-zЀ-ӿ]+")
+_CYRILLIC_RE = re.compile(r"[Ѐ-ӿ]")
+_LATIN_RE = re.compile(r"[a-zA-Z]")
+
+
+@lru_cache(maxsize=1)
+def _detector() -> Any:
+    """`lingua` detektori (ru/en), low-accuracy rejimida. Yo'q bo'lsa — None."""
+    try:
+        from lingua import Language, LanguageDetectorBuilder
+    except ImportError:  # pragma: no cover — dev muhitda paket bo'lmasa
+        log.warning("ingest.lingua_missing")
+        return None
+    langs = [Language.RUSSIAN, Language.ENGLISH]
+    return LanguageDetectorBuilder.from_languages(*langs).with_low_accuracy_mode().build()
+
+
+def _lingua_conf(text: str) -> dict[str, float]:
+    det = _detector()
+    if det is None:
+        return {}
+    try:
+        values = det.compute_language_confidence_values(text)
+    except Exception:  # pragma: no cover — detektor xatosi ingest'ni to'xtatmasin
+        return {}
+    return {v.language.iso_code_639_1.name.lower(): float(v.value) for v in values}
+
+
+def detect_lang(text: str) -> tuple[str | None, float | None]:
+    """Xabar tili: ``uz`` | ``ru`` | ``en`` | ``other`` (+ ishonch 0..1).
+
+    < ``MIN_CHARS_FOR_LANG`` belgili matn uchun ``(None, None)`` — aniqlash
+    o'tkazib yuboriladi (qisqa matnda natija shovqin).
+
+    Args:
+        text: tozalangan xabar matni.
+
+    Returns:
+        ``(lang, confidence)`` juftligi; aniqlanmasa ``("other", conf)``.
+    """
+    body = (text or "").strip()
+    if len(body) < MIN_CHARS_FOR_LANG:
+        return None, None
+
+    folded = uz_fold(body)
+    tokens = _TOKEN_RE.findall(folded)
+    if not tokens:
+        return "other", 0.0
+    uz_hits = sum(1 for t in tokens if t in _UZ_MARKERS)
+    uz_ratio = uz_hits / len(tokens)
+
+    conf = _lingua_conf(body)
+    ru, en = conf.get("ru", 0.0), conf.get("en", 0.0)
+    cyr = len(_CYRILLIC_RE.findall(body))
+    lat = len(_LATIN_RE.findall(body))
+
+    # 1) O'zbekcha marker so'zlar — ikkala yozuvda ham ishlaydi (fold tufayli).
+    if uz_hits >= 2 or (uz_hits >= 1 and len(tokens) <= 8):
+        return "uz", round(min(0.99, 0.55 + uz_ratio), 3)
+    # 2) Kirill ustun → rus (lingua tasdiqlasa), aks holda noaniq.
+    if cyr > lat:
+        return ("ru", round(ru, 3)) if ru >= 0.55 else ("other", round(ru, 3))
+    # 3) Lotin ustun → ingliz (lingua tasdiqlasa), aks holda o'zbek lotin.
+    if lat > cyr:
+        if en >= 0.65:
+            return "en", round(en, 3)
+        return "uz", round(max(0.3, 1.0 - en), 3)
+    return "other", 0.0
+
+
 def _is_admin(ent: Any) -> bool:
     return bool(getattr(ent, "creator", False) or getattr(ent, "admin_rights", None))
 
@@ -110,7 +222,7 @@ def _is_writable(ent: Any) -> bool:
     return not bool(getattr(ent, "left", False))
 
 
-async def refresh_chats(account_id: int, *, limit: int = 200) -> int:
+async def refresh_chats(account_id: int, *, limit: int = DIALOGS_LIMIT) -> int:
     """Dialoglarni `chats` jadvaliga upsert qiladi. Qaytaradi: nechta yozuv."""
     try:
         client = await pool.get(account_id)
@@ -123,14 +235,17 @@ async def refresh_chats(account_id: int, *, limit: int = 200) -> int:
         ent = d.entity
         if ent is None:
             continue
+        ctype = _chat_type(ent)
+        uname = getattr(ent, "username", None)
         rows.append(
             {
                 "account_id": account_id,
                 "tg_peer_id": int(ent.id),
                 "access_hash": getattr(ent, "access_hash", None),
-                "type": _chat_type(ent),
+                "type": ctype,
                 "title": _title(ent)[:256],
-                "username": getattr(ent, "username", None),
+                "username": uname,
+                "link_prefix": link_prefix_for(ctype, int(ent.id), uname),
                 "is_writable": _is_writable(ent),
                 "is_admin": _is_admin(ent),
                 "participants_count": getattr(ent, "participants_count", None),
@@ -151,6 +266,7 @@ async def refresh_chats(account_id: int, *, limit: int = 200) -> int:
                 "type": stmt.excluded.type,
                 "title": stmt.excluded.title,
                 "username": stmt.excluded.username,
+                "link_prefix": stmt.excluded.link_prefix,
                 "is_writable": stmt.excluded.is_writable,
                 "is_admin": stmt.excluded.is_admin,
                 "participants_count": stmt.excluded.participants_count,
@@ -201,17 +317,59 @@ def _reactions_map(reactions: Any) -> dict[str, int] | None:
     return out
 
 
+def _fwd_peer_id(fwd: Any) -> int | None:
+    """Forward manba peer'i — to'liq (`-100…`) ko'rinishda, yangi RPC'siz.
+
+    `from_name` (maxfiylik sozlamasi yopiq bo'lsa keladigan matn) **e'tiborga
+    olinmaydi**: u peer emas, va uni ism sifatida saqlash foydasiz.
+    """
+    peer = getattr(fwd, "from_id", None)
+    if peer is None:
+        return None
+    try:
+        from telethon import utils as tl_utils
+
+        return int(tl_utils.get_peer_id(peer))
+    except (TypeError, ValueError, AttributeError):
+        return _peer_id(peer)
+
+
+def _top_msg_id(reply_to: Any) -> int | None:
+    """Forum topic / thread ildizi.
+
+    Telethon `MessageReplyHeader`: `reply_to_top_id` — thread ildizi;
+    forum topic'da `forum_topic=True` bo'lsa va `reply_to_top_id` bo'sh bo'lsa,
+    topic ildizi `reply_to_msg_id` ning o'zi bo'ladi.
+    """
+    if reply_to is None:
+        return None
+    top = getattr(reply_to, "reply_to_top_id", None)
+    if top is not None:
+        return int(top)
+    if getattr(reply_to, "forum_topic", False):
+        root = getattr(reply_to, "reply_to_msg_id", None)
+        return int(root) if root is not None else None
+    return None
+
+
 def message_to_row(chat_id: int, m: Any) -> dict[str, Any] | None:
-    """Telethon Message → `messages` qatori. Service/bo'sh xabarlar → None."""
+    """Telethon Message → `messages` qatori. Service/bo'sh xabarlar → None.
+
+    Matn DB'ga **tozalangan** holda yoziladi (`textnorm.strip_invisible`):
+    zero-width, bidi va Unicode Tags belgilari saqlanmaydi. Bu
+    `services/untrusted.neutralize` ni almashtirmaydi — u prompt
+    chegarasida, bu esa saqlash chegarasida ishlaydi.
+    """
     if not isinstance(m, TlMessage) and not hasattr(m, "message"):
         return None
-    text = getattr(m, "message", None) or ""
+    text = strip_invisible(getattr(m, "message", None) or "")
     media = getattr(m, "media", None)
     if not text and media is None:
         return None
     replies = getattr(m, "replies", None)
     fwd = getattr(m, "fwd_from", None)
     reply_to = getattr(m, "reply_to", None)
+    lang, lang_conf = detect_lang(text)
     return {
         "chat_id": chat_id,
         "tg_msg_id": int(m.id),
@@ -222,6 +380,12 @@ def message_to_row(chat_id: int, m: Any) -> dict[str, Any] | None:
         "media_type": _media_type(media),
         "reply_to_msg_id": getattr(reply_to, "reply_to_msg_id", None) if reply_to else None,
         "fwd_from_id": _peer_id(getattr(fwd, "from_id", None)) if fwd else None,
+        "fwd_from_peer_id": _fwd_peer_id(fwd),
+        "fwd_from_msg_id": getattr(fwd, "channel_post", None) if fwd else None,
+        "fwd_date": getattr(fwd, "date", None) if fwd else None,
+        "top_msg_id": _top_msg_id(reply_to),
+        "lang": lang,
+        "lang_conf": lang_conf,
         "grouped_id": getattr(m, "grouped_id", None),
         "is_pinned": bool(getattr(m, "pinned", False)),
         "views": getattr(m, "views", None),
@@ -242,6 +406,14 @@ async def upsert_messages(rows: list[dict[str, Any]]) -> int:
                 "text": stmt.excluded.text,
                 "edited_at": stmt.excluded.edited_at,
                 "media_type": stmt.excluded.media_type,
+                # matn o'zgargan bo'lsa til ham qayta hisoblanadi (text_fold/tsv_*
+                # generated — ularni DB o'zi yangilaydi)
+                "lang": stmt.excluded.lang,
+                "lang_conf": stmt.excluded.lang_conf,
+                "fwd_from_peer_id": stmt.excluded.fwd_from_peer_id,
+                "fwd_from_msg_id": stmt.excluded.fwd_from_msg_id,
+                "fwd_date": stmt.excluded.fwd_date,
+                "top_msg_id": stmt.excluded.top_msg_id,
                 "is_pinned": stmt.excluded.is_pinned,
                 "views": stmt.excluded.views,
                 "forwards": stmt.excluded.forwards,

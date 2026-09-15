@@ -91,8 +91,82 @@ bu testlarni o'chirish/yumshatish taqiqlanadi.
 - Byudjetlar (`AGENT_MAX_ITERATIONS`, `AGENT_TOOL_RESULT_TOKENS`, tool ichidagi
   `MAX_RESULT_CHARS`) — "javob to'liqroq bo'lsin" deb olib tashlamang; avval
   digest/stats tool'i orqali ixchamlang.
-- Digest keshi (`chat_digests`) `msg_count` bo'yicha invalidatsiya — xabarlar
-  qayta sync bo'lsa avtomat qayta hisoblanadi.
+
+### Narx qopqoqlari — o'lchov bilan qo'yilgan
+
+Uchtasi ham o'lchovdan keyin qo'shilgan, taxmindan emas. Olib tashlashdan oldin
+`scratchpad/bench.py` uslubida qayta o'lchang (LLM tebranadi — **kamida 3 marta**
+yugurtiring, bitta yugurish hech narsani isbotlamaydi).
+
+- **Chat indeksi `runtime_note` ichida** (`tools.chat_index(compact=True)`).
+  Usiz agent deyarli har so'rovda `list_chats` chaqirardi — bitta ortiqcha LLM
+  aylanishi ≈ 4.3k token. Indeksning o'zi ≈ 350 token. System'ga **qo'ymang**:
+  kesh prefiksi buziladi (`cached=4224` shu tufayli ishlaydi).
+- **`MAX_CALLS_PER_TOOL = 3`** — model qoniqmasa `search_messages` ni boshqa
+  so'zlar bilan 4 martagacha takrorlaydi (o'lchovda 25.8k token). Prompt'dagi
+  "adjust once" buni to'xtatmadi.
+- **`seen_calls`** — aynan bir xil `(tool, args)` ikkinchi marta bajarilmaydi;
+  natija o'zgarmaydi, DB/MTProto ishi va token esa behuda ketadi.
+
+To'silgan chaqiruv ham `calls_log` ga tushadi (nima so'ralganini ko'rish uchun) —
+loglardagi tool soni **bajarilgan** soni bilan bir xil emas.
+- Digest keshi (`chat_digests`) `src_fingerprint` bo'yicha invalidatsiya
+  (`md5("<tg_msg_id>:<md5(text)>,…")`, SQL'da hisoblanadi) — qo'shilish,
+  **tahrir va o'chirish** ham qamraladi; `msg_count` zaxira yo'l sifatida
+  faqat fingerprint `NULL` bo'lgan eski qatorlar uchun qoladi.
+- Yangi tool qo'shsangiz uni `AGENT_SYSTEM_PROMPT` da ham tavsiflang —
+  `test_agent.py::test_prompts_are_stable_and_safe` buni talab qiladi
+  (registry'dagi har bir nom promptda bo'lishi shart).
+
+### Qidiruvning ikki yo'li
+
+- `search_messages` — **lokal DB** (FTS + pgvector, RRF). Reyting bor, ma'noni
+  tushunadi, bepul. Standart yo'l.
+- `search_telegram` / `search_global` — **Telegram serveri**
+  (`messages.Search` / `messages.SearchGlobal`, allowlist'da READ). Sinxronlanmagan
+  tarixni ham ko'radi va `search_global` chat bilmasdan qidiradi, lekin faqat
+  kalit so'z bo'yicha va har chaqiruv real MTProto so'rovi.
+- `TG_SEARCH_RATE_PER_MINUTE` (akkaunt bo'yicha, 0 = tool'lar o'chiq) —
+  agent bir savolda bir necha marta chaqirishi mumkin, shuning uchun shift
+  kerak. `FloodWaitError` **retry qilinmaydi** — modelga matn bo'lib qaytadi
+  va u lokal qidiruvga o'tadi (4.2-band: retry-storm yo'q).
+- Telethon entity'lari `m.sender` / `m.chat` keshidan olinadi; `get_sender()` /
+  `get_chat()` chaqirmang — ular allowlist'da yo'q metodlarga borishi mumkin.
+
+### A'zolar ro'yxati
+
+- `list_members` — `channels.GetParticipants` (allowlist'da READ). Katta
+  kanalda admin huquqi kerak, `private` chatda umuman yo'q, bir so'rovda
+  maksimum 200 ta.
+- **Telefon raqami hech qachon qaytarilmaydi** — natija LLM promptiga tushadi,
+  raqam u yerda kerak emas. `test_list_members_never_leaks_phone` qo'riqlaydi.
+  Yangi maydon qo'shsangiz shu mezon bilan o'lchang: "buni modelga berish
+  shartmi?"
+- Shift `_tg_rpc_guard` orqali — `search_*` bilan **bitta** `TG_SEARCH_RATE_PER_MINUTE`
+  kvotasini bo'lishadi, chunki hammasi bir akkauntning MTProto kvotasini yeydi.
+
+### Profil tool'lari va peer turi
+
+`get_chat_info` / `get_user_info` / `get_reactions` / `get_post_comments` —
+serverga boradi, shift bir xil.
+
+- **Peer turiga qarab boshqa TL metod kerak.** DB'dagi `chats.type` ustuniga
+  ishonmang — haqiqiy `InputPeer` turini tekshiring:
+  `InputPeerChannel` → `channels.GetFullChannel` (kanal **va** supergruh),
+  `InputPeerChat` → `messages.GetFullChat` (oddiy guruh),
+  `InputPeerUser` → `users.GetFullUser`. Noto'g'rilari `TypeError` beradi
+  (`Cannot cast InputPeerChat to InputChannel` — jonli sinovda tutilgan).
+- **Telegram cheklovlari xato emas, holat** — modelga tushunarli matn qaytarish
+  kerak, aks holda u qayta-qayta urinadi:
+  kanalda `GetMessageReactionsList` → `BroadcastForbiddenError` (kim bosgani
+  oshkor qilinmaydi, faqat umumiy son); bog'langan guruhsiz kanalda
+  `GetReplies` → `MsgIdInvalidError`; `stats.*` → admin + minimal obunachi.
+- **Telefon raqami hech qayerda qaytarilmaydi** (`list_members`, `get_user_info`) —
+  testlar qo'riqlaydi.
+- Ishlatilmayotgan READ metodlar hali bor (`contacts.GetContacts`,
+  `messages.GetMessageReadParticipants`, `stats.*`). Ular ataylab qo'shilmagan:
+  maxfiylik qiymati past, token narxi yuqori. Qo'shsangiz shu mezon bilan
+  o'lchang.
 
 ## Yozish amallari (6-bosqich)
 
@@ -133,7 +207,18 @@ bu testlarni o'chirish/yumshatish taqiqlanadi.
   per-account DEK → master key bilan wrap. Master key faqat `.env` da.
 - Login kodi **faqat Mini App (HTTPS)** orqali qabul qilinadi. Chat orqali
   hech qachon — Telegram chat'ga yuborilgan kodni bekor qiladi.
-- QR login (`auth.ExportLoginTokenRequest`) — asosiy yo'l, kod umuman kerak emas.
+- **QR login — asosiy yo'l** (`auth_flow.start_qr`, `/api/auth/qr` + `/qr/poll`).
+  Telefon ham, kod ham kerak emas. Token ~1 daqiqada eskiradi, shuning uchun
+  har oqim uchun fon vazifasi (`_watch_qr`) `qr.wait()` / `qr.recreate()` siklini
+  yuritadi; frontend 2 soniyada bir holatni so'raydi. Oqim tugaganda
+  `_cancel_watcher` **majburiy** — aks holda task yopilgan klientda qoladi.
+- QR rasmi **server tomonda** chiziladi (`qrcode` → SVG → `data:` URI) va
+  `<img src>` bo'lib beriladi. Brauzerga QR kutubxonasi qo'shilmaydi (CDN yo'q)
+  va `innerHTML` ishlatilmaydi.
+- Kod yo'li fallback: Telegram faol sessiya ko'rsa kodni **SMS emas, ilovaga**
+  yuboradi (`code_type=app`). Shuning uchun `auth.ResendCode` (`/api/auth/resend`)
+  bor — `next_type` bo'sh bo'lsa Telegram qayta yuborishga ruxsat bermaydi va
+  UI tugmani ko'rsatmaydi. Resend `attempts` ni **nolga tushirmaydi**.
 
 ## Ban riskini kamaytirish
 
@@ -168,10 +253,10 @@ Yangi kodda model nomini qattiq yozmang — `Task` ni bering, router hal qiladi.
 
 | `Task` | Claude | Gemini | DeepSeek |
 |---|---|---|---|
-| `ROUTE` | `claude-haiku-4-5` | `gemini-2.5-flash-lite` | `deepseek-chat` |
-| `SEARCH` | `claude-opus-5` | `gemini-2.5-flash` | `deepseek-chat` |
-| `TOOLS` | `claude-opus-5` | `gemini-2.5-flash` | `deepseek-chat` |
-| `DEEP` | `claude-opus-5` | `gemini-2.5-pro` | `deepseek-reasoner` |
+| `ROUTE` | `claude-haiku-4-5` | `gemini-2.5-flash-lite` | `deepseek-v4-flash` |
+| `SEARCH` | `claude-opus-5` | `gemini-2.5-flash` | `deepseek-v4-flash` |
+| `TOOLS` | `claude-opus-5` | `gemini-2.5-flash` | `deepseek-v4-flash` |
+| `DEEP` | `claude-opus-5` | `gemini-2.5-pro` | `deepseek-v4-pro` |
 | `EMBED` | ❌ yo'q | `gemini-embedding-001` | ❌ yo'q |
 | `IMAGE` | ❌ yo'q | `gemini-2.5-flash-image` | ❌ yo'q |
 
@@ -200,10 +285,18 @@ fayl tizimini LLM'ga ochish. `capabilities()` da TOOLS yo'q — rost.
   bajaradi, `tool_use` qaytarmaydi) → `Task.TOOLS` fallback'ga tushadi.
   Ko'p-turnli suhbat transkript matni sifatida beriladi; `temperature`/
   `max_tokens` e'tiborsiz. Docker'da CLI yo'q — token yo'li.
-- `deepseek-reasoner` da **function calling yo'q** → `Task.TOOLS` unga
-  berilsa, fallback ishlaydi.
-- DeepSeek kontekst **64K** (Gemini 1M) → "butun tarixni promptga tashlash"
-  ishlamaydi, retrieval majburiy.
+- DeepSeek V4: `deepseek-v4-flash` va `deepseek-v4-pro` — API `/models`
+  faqat shu ikkitasini beradi. **Ikkalasida ham function calling bor**,
+  `temperature` ham qabul qilinadi. `_TOOL_CAPABLE` ga qo'shilmagan yangi
+  model nomi = `Task.TOOLS` jimgina Gemini'ga tushadi, xatosiz.
+- Eski `deepseek-chat` / `deepseek-reasoner` nomlari ishlaydi, lekin API
+  **ikkalasini ham v4-flash** ga yo'naltiradi — `reasoner` deb so'rash
+  kuchliroq model bermaydi. `.env` da konkret v4 nomini yozing.
+- DeepSeek kontekst **1M** (chiqish 384K gacha). Shunga qaramay
+  `search.select_context` byudjetidan o'ting — narx uchun, sig'im uchun emas.
+- Javobdagi `model` maydoni so'ralganidan farq qilishi mumkin (alias) —
+  `pricing.py` ga **qaytgan** nomni qo'shing, aks holda `estimate_cost`
+  `None` qaytaradi va kunlik xarajat limiti jimgina ishlamay qoladi.
 
 Yangi provider qo'shish: `BaseProvider` dan meros oling, `capabilities()` ni
 rostgo'ylik bilan e'lon qiling (yo'q imkoniyatni bor deb ko'rsatmang —

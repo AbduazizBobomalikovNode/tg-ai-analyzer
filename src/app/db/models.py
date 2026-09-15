@@ -10,7 +10,7 @@ Dizayn qarorlari:
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from enum import StrEnum
 from typing import Any
 
@@ -18,18 +18,22 @@ from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    Computed,
+    Date,
     DateTime,
     Float,
     ForeignKey,
     Index,
     Integer,
     LargeBinary,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
     func,
+    text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.config import get_settings
@@ -139,6 +143,9 @@ class Chat(Base):
     total_estimate: Mapped[int | None] = mapped_column(Integer)  # Telegram `count`
     sync_error: Mapped[str | None] = mapped_column(String(256))
     last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # 1-bosqich: sitata havolasi (`<prefix><tg_msg_id>`) sync vaqtida hisoblanadi —
+    # runtime'da peer turini qayta tekshirishga hojat qolmaydi.
+    link_prefix: Mapped[str | None] = mapped_column(String(128))
 
     account: Mapped[Account] = relationship(back_populates="chats")
 
@@ -148,6 +155,21 @@ class Message(Base):
     __table_args__ = (
         UniqueConstraint("chat_id", "tg_msg_id", name="uq_msg_per_chat"),
         Index("ix_messages_chat_published", "chat_id", "published_at"),
+        # 0008 — generated ustunlar ustidagi indekslar
+        Index("ix_messages_tsv_uz", "tsv_uz", postgresql_using="gin"),
+        Index("ix_messages_tsv_ru", "tsv_ru", postgresql_using="gin"),
+        Index(
+            "ix_messages_fold_trgm",
+            "text_fold",
+            postgresql_using="gin",
+            postgresql_ops={"text_fold": "gin_trgm_ops"},
+        ),
+        Index(
+            "ix_messages_top_msg",
+            "chat_id",
+            "top_msg_id",
+            postgresql_where=text("top_msg_id IS NOT NULL"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
@@ -174,6 +196,37 @@ class Message(Base):
     replies_count: Mapped[int | None] = mapped_column(Integer)
 
     raw: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+
+    # ── 1-bosqich (migratsiya 0008) ──
+    # Til — ingest'da `lingua` bilan aniqlanadi (uz | ru | en | other).
+    lang: Mapped[str | None] = mapped_column(String(8))
+    lang_conf: Mapped[float | None] = mapped_column(Float)
+    # Forward manbasi: `fwd_from_id` (eski) faqat muallif; bular — manba chat/post.
+    fwd_from_peer_id: Mapped[int | None] = mapped_column(BigInteger)
+    fwd_from_msg_id: Mapped[int | None] = mapped_column(BigInteger)
+    fwd_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Forum topic / thread ildizi (`reply_to.reply_to_top_id`).
+    top_msg_id: Mapped[int | None] = mapped_column(BigInteger)
+    # Soft-delete — 2-bosqich updates listener to'ldiradi.
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    # ── generated stored ustunlar: DB hisoblaydi, ORM hech qachon yozmaydi ──
+    # `deferred=True` — og'ir ustunlar oddiy SELECT'da tortilmasin.
+    text_fold: Mapped[str | None] = mapped_column(
+        Text, Computed("uz_fold(coalesce(text, ''))", persisted=True), deferred=True
+    )
+    tsv_uz: Mapped[Any] = mapped_column(
+        TSVECTOR,
+        Computed("to_tsvector('simple', uz_fold(coalesce(text, '')))", persisted=True),
+        deferred=True,
+        nullable=True,
+    )
+    tsv_ru: Mapped[Any] = mapped_column(
+        TSVECTOR,
+        Computed("to_tsvector('russian', coalesce(text, ''))", persisted=True),
+        deferred=True,
+        nullable=True,
+    )
 
 
 class MessageEmbedding(Base):
@@ -234,6 +287,8 @@ class AgentRun(Base):
     model: Mapped[str] = mapped_column(String(64), default="")
     tokens_in: Mapped[int] = mapped_column(Integer, default=0)
     tokens_out: Mapped[int] = mapped_column(Integer, default=0)
+    # LLM uzilsa (masalan tool'siz provider) — run yarim bo'sh qolmaydi
+    error: Mapped[str | None] = mapped_column(String(500))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now())
 
@@ -319,7 +374,9 @@ class ChatDigest(Base):
     """Kunlik digest keshi — katta vaqt oynasi savollari uchun map-reduce takrorlanmasin.
 
     Bir marta arzon model bilan hisoblanadi (`services/digests.py`), keyin har savolda
-    tayyor matn ishlatiladi. Xabarlar o'zgarsa (yangi sync) — `msg_count` farq qilsa qayta.
+    tayyor matn ishlatiladi. Xabarlar o'zgarsa qayta hisoblanadi — invalidatsiya
+    `src_fingerprint` bo'yicha (`md5` ro'yxati): `msg_count` tahrir va o'chirishni
+    sezmaydi, fingerprint ikkalasini ham qamrab oladi.
     """
 
     __tablename__ = "chat_digests"
@@ -334,6 +391,14 @@ class ChatDigest(Base):
     tokens_in: Mapped[int] = mapped_column(Integer, default=0)
     tokens_out: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now())
+
+    # ── 1-bosqich (migratsiya 0008) ──
+    # md5 over "tg_msg_id:md5(text)" ro'yxati — tahrir/o'chirishni ham sezadi.
+    src_fingerprint: Mapped[str | None] = mapped_column(String(32))
+    level: Mapped[int] = mapped_column(SmallInteger, default=1, server_default="1")  # 1 kun
+    period_start: Mapped[date | None] = mapped_column(Date)
+    structured: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    faithfulness: Mapped[float | None] = mapped_column(Float)
 
 
 class GeneratedImage(Base):

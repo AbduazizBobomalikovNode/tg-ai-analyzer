@@ -6,8 +6,16 @@ map-reduce qilish ham sekin, ham qimmat. Yechim: har kun uchun **bitta** digest
 
   * savol kelganda oynadagi kunlar uchun kesh o'qiladi, yo'qlari hisoblanib yoziladi;
   * worker har kecha kechagi kunni oldindan hisoblaydi (`build_daily_digests`);
-  * kun ichida xabar soni o'zgarsa (yangi sync) — `msg_count` farqi → qayta hisob;
+  * kun ichidagi xabarlar o'zgarsa — `src_fingerprint` farqi → qayta hisob;
   * < MIN_MSGS xabarli kunlar digest qilinmaydi — xom qatorlar o'zi arzon.
+
+Invalidatsiya nima uchun fingerprint: avvalgi `msg_count` taqqoslashi **tahrir
+va o'chirishni sezmaydi** — xabar tahrirlansa ham, biri o'chib o'rniga yangisi
+kelsa ham son o'zgarmaydi va eskirgan digest abadiy qoladi. `src_fingerprint`
+— `md5` ustidan `md5`: `md5("<tg_msg_id>:<md5(text)>,…")`, SQL'da bir
+so'rovda hisoblanadi (xabarlarni Python'ga tortmasdan). `msg_count` ham
+saqlanib qoladi: eski qatorlarda fingerprint `NULL` va ular uchun kesh
+tekshiruvi eski yo'l bilan ishlaydi.
 
 Natija: 30 kunlik savol ≈ 30 x 150 so'z ≈ 6k token, LLM chaqiruvsiz (kesh issiq bo'lsa).
 """
@@ -17,12 +25,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Chat, ChatDigest, Message
 from app.llm import LLM, LLMError, Msg, Task
 from app.logging import get_logger
+from app.services import untrusted as U
 from app.services.prompts import MAP_DIGEST_PROMPT
 
 log = get_logger(__name__)
@@ -76,6 +85,57 @@ async def day_messages(session: AsyncSession, chat_id: int, day: datetime) -> li
     return list(rows.scalars().all())
 
 
+#: Bir kunlik xabarlarning "barmoq izi" — mazmun o'zgarganini (qo'shilish,
+#: tahrir, o'chirish) bitta 32 belgili satrda ushlaydi. Butun kunni Python'ga
+#: tortmaslik uchun ataylab SQL'da.
+_FINGERPRINT_SQL = text(
+    """
+    SELECT md5(string_agg(tg_msg_id || ':' || md5(coalesce(text, '')),
+                          ',' ORDER BY tg_msg_id)) AS fingerprint,
+           count(*) AS n
+      FROM messages
+     WHERE chat_id = :chat_id
+       AND published_at >= :day
+       AND published_at < :next_day
+    """
+)
+
+
+async def day_fingerprint(
+    session: AsyncSession, chat_id: int, day: datetime
+) -> tuple[str | None, int]:
+    """Kun mazmuni barmoq izi va xabar soni.
+
+    Args:
+        session: DB sessiyasi.
+        chat_id: `chats.id`.
+        day: UTC 00:00 ga tekislangan kun boshi.
+
+    Returns:
+        ``(fingerprint, msg_count)``; kunda xabar bo'lmasa ``(None, 0)``.
+    """
+    row = (
+        await session.execute(
+            _FINGERPRINT_SQL,
+            {"chat_id": chat_id, "day": day, "next_day": day + timedelta(days=1)},
+        )
+    ).one()
+    return (row.fingerprint, int(row.n or 0))
+
+
+def _is_fresh(cached: ChatDigest, fingerprint: str | None, msg_count: int) -> bool:
+    """Keshdagi digest hali amaldami.
+
+    Fingerprint bor bo'lsa — faqat u hal qiladi (tahrir/o'chirish ham qamrab
+    olinadi). Eski, 0008-migratsiyagacha yozilgan qatorlarda fingerprint
+    `NULL` bo'ladi — ular uchun eski `msg_count` yo'li saqlanadi, aks holda
+    butun kesh bir marta behuda kuyib ketardi.
+    """
+    if cached.src_fingerprint is not None and fingerprint is not None:
+        return bool(cached.src_fingerprint == fingerprint)
+    return bool(cached.msg_count == msg_count)
+
+
 async def _summarize(
     lines: list[str], *, title: str, day: datetime, llm: LLM
 ) -> tuple[str, int, int, str]:
@@ -92,8 +152,8 @@ async def _summarize(
     t_in = t_out = 0
     model = ""
     for i, chunk in enumerate(chunks, 1):
-        body = "\n".join(chunk)
-        head = f'<untrusted_data source="telegram" chat="{title}" day="{day.date()}"'
+        body = U.neutralize("\n".join(chunk))
+        head = f'<untrusted_data source="telegram" chat="{U.attr(title)}" day="{day.date()}"'
         if len(chunks) > 1:
             head += f' part="{i}/{len(chunks)}"'
         res = await llm.chat(
@@ -121,7 +181,8 @@ async def digest_for_day(
             select(ChatDigest).where(ChatDigest.chat_id == chat.id, ChatDigest.day == day)
         )
     ).scalar_one_or_none()
-    if cached is not None and not force and cached.msg_count == len(msgs):
+    fingerprint, _ = await day_fingerprint(session, chat.id, day)
+    if cached is not None and not force and _is_fresh(cached, fingerprint, len(msgs)):
         return DayDigest(day, cached.digest, cached.msg_count, True)
 
     lines = [_line(m, chat) for m in msgs]
@@ -130,7 +191,7 @@ async def digest_for_day(
         return DayDigest(day, "\n".join(lines), len(msgs), False)
 
     try:
-        text, t_in, t_out, model = await _summarize(
+        summary, t_in, t_out, model = await _summarize(
             lines, title=chat.title, day=day, llm=llm or LLM()
         )
     except LLMError as exc:
@@ -140,8 +201,11 @@ async def digest_for_day(
     if cached is None:
         cached = ChatDigest(chat_id=chat.id, day=day)
         session.add(cached)
-    cached.digest = text
+    cached.digest = summary
     cached.msg_count = len(msgs)
+    cached.src_fingerprint = fingerprint
+    cached.level = 1  # 1 = kun (2 = hafta, 3 = briefing)
+    cached.period_start = day.date()
     cached.model = model
     cached.tokens_in = t_in
     cached.tokens_out = t_out
@@ -149,7 +213,7 @@ async def digest_for_day(
     log.info(
         "digest.built", chat_id=chat.id, day=str(day.date()), msgs=len(msgs), tokens=t_in + t_out
     )
-    return DayDigest(day, text, len(msgs), False, t_in, t_out, model)
+    return DayDigest(day, summary, len(msgs), False, t_in, t_out, model)
 
 
 async def digests_for_window(
