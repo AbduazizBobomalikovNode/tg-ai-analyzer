@@ -169,9 +169,43 @@ def _render(request: Request, name: str, locale: str, **extra: Any) -> Response:
     return _finish_html(request, resp, locale)
 
 
+async def _prefs_for(ident: WebIdentity | None) -> dict[str, Any]:
+    """`users.prefs` (normallashtirilgan). DB'ga borib bo'lmasa — defaultlar.
+
+    Sahifa marshruti prefs tufayli yiqilmasligi kerak: baza yo'q bo'lsa
+    (test, migratsiya oldidan) bo'sh lug'at qaytadi va chaqiruvchi
+    `normalize()` defaultlariga tushadi.
+    """
+    if ident is None:
+        return {}
+    try:
+        from app.db.base import session_scope
+        from app.db.models import User
+        from app.services import prefs as P
+
+        async with session_scope() as db:
+            user = await db.get(User, ident.user_id)
+            return P.normalize(user.prefs if user is not None else None)
+    except Exception as exc:
+        log.debug("pages.prefs_failed", error=str(exc)[:200])
+        return {}
+
+
 @router.get("/", response_class=HTMLResponse)
 async def index(request: Request) -> Any:
-    return RedirectResponse("/chat" if await identity_of(request) else "/login", status_code=302)
+    """Kirish nuqtasi: akkaunt yo'q → `/login`, yangi foydalanuvchi →
+    `/onboarding`, aks holda `/today` (ui/R2c, `docs/ui-research.md` § 2).
+
+    "Yangi" mezoni — `prefs.onboarding_done` bayrog'i. U `/onboarding`
+    ning oxirgi qadamida qo'yiladi, ya'ni oqimni tugatmagan foydalanuvchi
+    keyingi safar ham o'sha yerdan davom etadi.
+    """
+    ident = await identity_of(request)
+    if ident is None:
+        return RedirectResponse("/login", status_code=302)
+    prefs = await _prefs_for(ident)
+    target = "/today" if prefs.get("onboarding_done") else "/onboarding"
+    return RedirectResponse(target, status_code=302)
 
 
 @router.get("/login", response_class=HTMLResponse)
@@ -184,16 +218,38 @@ async def login_page(request: Request) -> Any:
 
 @router.get("/chat", response_class=HTMLResponse)
 async def chat_page(request: Request) -> Any:
+    """Eski marshrut — `/ask` ga ko'chdi (ui/R2b). Havolalar buzilmasin.
+
+    Yo'naltirish **autentifikatsiyadan keyin**: bekor qilingan cookie bilan
+    kelgan so'rov `/ask` ga emas, `/login` ga tushishi kerak. Aks holda
+    `/chat` sessiya tekshiruvini aylanib o'tadigan yo'lga aylanardi
+    (`tests/test_hardening.py::test_logout_refuses_the_old_cookie`).
+    """
+    if await identity_of(request) is None:
+        return RedirectResponse("/login", status_code=302)
+    return RedirectResponse("/ask", status_code=302)
+
+
+@router.get("/ask", response_class=HTMLResponse)
+@router.get("/ask/{conversation_id}", response_class=HTMLResponse)
+async def ask_page(request: Request, conversation_id: int = 0) -> Any:
+    """AI suhbat yuzasi (ui/R2b).
+
+    Sahifa faqat qobiq: suhbatlar, xabarlar va oqim `/api` orqali keladi.
+    `conversation_id` — chuqur havola; egalik **API tomonda** tekshiriladi
+    (bu yerda faqat qobiqqa uzatiladi, DB'ga borilmaydi).
+    """
     ident = await identity_of(request)
     if ident is None:
         return RedirectResponse("/login", status_code=302)
     s = get_settings()
     return _render(
         request,
-        "chat.html",
+        "ask.html",
         await _locale_for(request, ident),
         context_default=s.web_context_default_messages,
         context_max=s.web_context_max_messages,
+        conversation_id=conversation_id,
     )
 
 
@@ -217,3 +273,112 @@ async def briefings_page(request: Request, day: str = "") -> Any:
     # `day` faqat sahifa qobig'iga beriladi; ma'lumot /api/briefings dan keladi
     # va u yerda egalik tekshiriladi.
     return _render(request, "briefings.html", await _locale_for(request, ident), day=day[:10])
+
+
+# ── ui/R2a: chat ro'yxati va tafsiloti ──────────────────────────────────────
+
+
+@router.get("/chats", response_class=HTMLResponse)
+async def chats_page(request: Request) -> Any:
+    """Chat ro'yxati. Mobilda bitta panel (`pane="list"`), desktopda ikkitasi."""
+    ident = await identity_of(request)
+    if ident is None:
+        return RedirectResponse("/login", status_code=302)
+    return _render(
+        request,
+        "chats.html",
+        await _locale_for(request, ident),
+        nav_current="chats",
+        pane="list",
+        selected_id=0,
+    )
+
+
+@router.get("/chats/{chat_id}", response_class=HTMLResponse)
+async def chat_detail_page(request: Request, chat_id: int) -> Any:
+    """Bitta chat tafsiloti.
+
+    `chat_id` faqat qobiqqa beriladi — egalik `GET /api/accounts/{id}/chats/{id}`
+    da tekshiriladi (begona chat 404). Mobilda `pane="content"`: ro'yxat
+    ustiga **push** bo'ladi va orqaga qaytish brauzer tarixi orqali ishlaydi.
+    """
+    ident = await identity_of(request)
+    if ident is None:
+        return RedirectResponse("/login", status_code=302)
+    return _render(
+        request,
+        "chat_detail.html",
+        await _locale_for(request, ident),
+        nav_current="chats",
+        pane="content",
+        selected_id=chat_id,
+    )
+
+
+# ── ui/R2c: /today · /alerts · /actions · /settings · /onboarding ────────────
+
+
+@router.get("/today", response_class=HTMLResponse)
+async def today_page(request: Request) -> Any:
+    """Uy ekrani: briefing + alert lentasi + "so'rang" + sync holati.
+
+    Sahifa faqat qobiq — barcha ma'lumot `/api` dan keladi va egalik o'sha
+    yerda tekshiriladi.
+    """
+    ident = await identity_of(request)
+    if ident is None:
+        return RedirectResponse("/login", status_code=302)
+    return _render(request, "today.html", await _locale_for(request, ident))
+
+
+@router.get("/alerts", response_class=HTMLResponse)
+async def alerts_page(request: Request) -> Any:
+    """Alert qoidalari va hodisalar (ilgari dashboard ichida edi)."""
+    ident = await identity_of(request)
+    if ident is None:
+        return RedirectResponse("/login", status_code=302)
+    return _render(request, "alerts.html", await _locale_for(request, ident))
+
+
+@router.get("/actions", response_class=HTMLResponse)
+async def actions_page(request: Request) -> Any:
+    """Tasdiq kutayotgan yozish amallari (invariant 4 ning yuzasi)."""
+    ident = await identity_of(request)
+    if ident is None:
+        return RedirectResponse("/login", status_code=302)
+    return _render(request, "actions.html", await _locale_for(request, ident))
+
+
+@router.get("/settings", response_class=HTMLResponse)
+async def settings_page(request: Request) -> Any:
+    """Sozlamalar: akkaunt, ko'rinish, AI standartlari, yozish rejimi,
+    auto-reply, briefing/jim soatlar, maxfiylik.
+
+    Kontekst chegaralari **server sozlamasi** (pref emas) — shuning uchun
+    faqat o'qish uchun qobiqqa beriladi.
+    """
+    ident = await identity_of(request)
+    if ident is None:
+        return RedirectResponse("/login", status_code=302)
+    s = get_settings()
+    return _render(
+        request,
+        "settings.html",
+        await _locale_for(request, ident),
+        context_default=s.web_context_default_messages,
+        context_max=s.web_context_max_messages,
+    )
+
+
+@router.get("/onboarding", response_class=HTMLResponse)
+async def onboarding_page(request: Request) -> Any:
+    """To'rt qadamli birinchi tajriba — **kirish talab qilmaydi**.
+
+    1-qadam aynan kirmagan foydalanuvchi uchun (QR login), shuning uchun
+    bu yerda `/login` ga yo'naltirish yo'q. Kirgan foydalanuvchida klient
+    birinchi qadamni o'tkazib yuboradi.
+    """
+    ident = await identity_of(request)
+    return _render(
+        request, "onboarding.html", await _locale_for(request, ident), logged_in=ident is not None
+    )

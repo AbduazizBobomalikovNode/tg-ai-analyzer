@@ -23,7 +23,7 @@ let items = [], cursor = 0, untrap = null, lastFocus = null;
 let chats = [];
 const extraActions = [];
 
-/** Sahifa o'z chat ro'yxatini beradi (chat.js allaqachon yuklagan). */
+/** Sahifa o'z chat ro'yxatini beradi (sahifa moduli allaqachon yuklagan). */
 export function setChats(rows) {
   chats = (rows || []).map((c) => ({
     id: c.id, peer_id: c.tg_peer_id ?? c.peer_id ?? c.id,
@@ -84,8 +84,15 @@ function chatEntries() {
     label: c.title || String(c.peer_id),
     meta: c.username ? `@${c.username}` : t(`web.chat.kind_${c.type}`),
     run: () => {
+      // `/chats/{id}` (ui/R2a) — marshrut xaritasida shablon saqlanmaydi,
+      // faqat ildiz (`chats`), aks holda `TGAI.routes` dagi `{` test va
+      // tahlilni buzadi.
       const R = routes();
-      window.location.href = R.chatDetail ? R.chatDetail.replace("{id}", String(c.id)) : `${R.ask || "/chat"}?chat=${encodeURIComponent(c.id)}`;
+      window.location.href = R.chats
+        ? `${R.chats}/${encodeURIComponent(c.id)}`
+        : R.chatDetail
+          ? R.chatDetail.replace("{id}", String(c.id))
+          : `${R.ask || "/ask"}?chats=${encodeURIComponent(c.id)}`;
     },
   }));
 }

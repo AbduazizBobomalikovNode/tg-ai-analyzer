@@ -9,7 +9,10 @@ Xato formati: `{"detail": {"code": "<i18n kalit>", ...}}` — kalitlar
 `action.err.*`, `sync.err.*`).
 
 ## Sahifalar
-`GET /` → `/chat` yoki `/login` · `GET /login` · `GET /chat` · `GET /dashboard` ·
+`GET /` → `/login` (sessiya yo'q) · `/onboarding` (tugatilmagan) · `/today` ·
+`GET /login` · `GET /onboarding` · `GET /today` · `GET /chats[/{id}]` ·
+`GET /ask[/{id}]` (`GET /chat` → 302 `/ask`) · `GET /alerts` · `GET /actions` ·
+`GET /settings` · `GET /dashboard` · `GET /briefings[/{day}]` ·
 `?lang=uz|ru|en` (cookie'ga yoziladi) · `GET /health`.
 
 ## Auth (telefon → kod → 2FA)

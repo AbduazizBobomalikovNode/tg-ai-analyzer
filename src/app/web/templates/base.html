@@ -16,6 +16,10 @@
       try {
         var m = JSON.parse(localStorage.getItem("tgai.theme") || '"system"');
         if (m === "dark" || m === "light") document.documentElement.setAttribute("data-theme", m);
+        // Zichlik (ui/R2c) — tema bilan bir joyda, paint'dan oldin: aks holda
+        // sahifa avval keng, keyin ixcham bo'lib sakraydi.
+        var d = JSON.parse(localStorage.getItem("tgai.density") || '"comfortable"');
+        if (d === "compact") document.documentElement.setAttribute("data-density", d);
       } catch (e) { /* xususiy oyna */ }
       // Telegram Mini App konteksti — SDK'ni faqat shu holatda yuklaymiz.
       try {
@@ -47,15 +51,16 @@
        chiqmaydi: yangi sahifa qo'shilganda faqat shu xarita o'zgaradi. #}
     routes: {
       login: "/login",
-      ask: "/chat",
+      ask: "/ask",
       briefings: "/briefings",
       dashboard: "/dashboard",
-      today: null,
-      chats: null,
-      chatDetail: null,
-      alerts: null,
-      actions: null,
-      settings: null
+      today: "/today",
+      chats: "/chats",
+      chatDetail: "/chats/{id}",
+      alerts: "/alerts",
+      actions: "/actions",
+      settings: "/settings",
+      onboarding: "/onboarding"
     }
   };</script>
   <script src="{{ asset('md.js') }}"></script>

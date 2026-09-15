@@ -16,7 +16,8 @@ make up          # postgres, redis, migrate (alembic upgrade head), bot, api, wo
 docker compose run --rm bot python -m app.main check   # config, LLM marshruti, DB, Redis
 make logs
 ```
-Web: `http://localhost:8080` → `/login` → telefon → kod → `/chat`.
+Web: `http://localhost:8080` → `/login` → QR (yoki telefon → kod) →
+`/onboarding` → `/today`.
 
 ## Servislar
 | Servis | Buyruq | Eslatma |

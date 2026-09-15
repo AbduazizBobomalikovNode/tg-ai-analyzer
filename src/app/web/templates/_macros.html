@@ -70,3 +70,38 @@
 {% macro toast_root() -%}
   <div id="toast-root" class="toast-root" role="region" aria-live="polite" aria-atomic="false"></div>
 {%- endmacro %}
+
+{# ── KPI plitasi (ui/R2c) ────────────────────────────────────────────────
+   Qiymatni klient to'ldiradi: `[data-k]` — `dashboard.js` bilan shartnoma,
+   shuning uchun kalit nomlari o'zgartirilmaydi. #}
+{% macro stat_tile(label, key, sub="", sub_key="") -%}
+  <div class="tile-v2">
+    <span class="tile-k">{{ label }}</span>
+    <span class="tile-v" data-k="{{ key }}">—</span>
+    {%- if sub_key %}<span class="tile-s" data-k="{{ sub_key }}"></span>
+    {%- elif sub %}<span class="tile-s">{{ sub }}</span>{% endif -%}
+  </div>
+{%- endmacro %}
+
+{# ── Sarlavhali karta. Eski `.card` sinfi ham qoladi: `app.css` dagi
+      `.card table` / `.card h3` qoidalari shu nomga bog'langan. #}
+{% macro card(title, id="") -%}
+  <div class="card card-v2"{% if id %} id="{{ id }}"{% endif %}>
+    {%- if title %}<h3>{{ title }}</h3>{% endif %}
+    {{ caller() }}
+  </div>
+{%- endmacro %}
+
+{# ── Sozlamalar bo'limi: mobilda akkordeon, desktopda ochiq (css/pages/settings.css).
+      `id` — `/settings#sec-...` anchor'i va sub-nav uchun. #}
+{% macro set_section(id, ico, title) -%}
+  <details class="set-section" id="{{ id }}" open>
+    <summary>
+      {{ icon(ico) }}
+      <span>{{ title }}</span>
+      <span class="spacer"></span>
+      {{ icon("chevron-down", cls="chev") }}
+    </summary>
+    <div class="set-body">{{ caller() }}</div>
+  </details>
+{%- endmacro %}

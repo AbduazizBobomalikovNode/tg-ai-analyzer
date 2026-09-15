@@ -2,7 +2,7 @@
  *
  * Tuzilishi: (1) tokenlar → (2) reset → (3) primitivlar (tugma, input, badge)
  * → (4) sahifalar. Sinf nomlari JS bilan shartnoma — o'zgartirmang, faqat
- * ko'rinishini kengaytiring (`chat.js`, `dashboard.js` shu nomlarga tayanadi).
+ * ko'rinishini kengaytiring (`pages/ask/*`, `dashboard.js` shu nomlarga tayanadi).
  *
  * Ranglar ikki qatlamda: xom palitra (`--blue-500`) → semantik token
  * (`--accent`). Komponentlar **faqat semantik** tokenlardan foydalanadi,
@@ -92,7 +92,7 @@
 
   /* o'lchamlar */
   --sidebar-w: 320px;
-  --composer-max: 40svh;   /* chat.js autosize() bilan bir xil bo`lsin */
+  --composer-max: 40svh;   /* pages/ask/composer.js autosize() bilan bir xil bo`lsin */
 }
 
 @media (prefers-color-scheme: dark) {
@@ -514,7 +514,7 @@ a.topbar-ctx:hover { background: var(--accent-soft-2); }
 }
 .empty-text { margin: 0 0 1.1rem; }
 
-/* Taklif chiplari — bosilganda savol kiritish maydoniga tushadi (chat.js) */
+/* Taklif chiplari — bosilganda savol kiritish maydoniga tushadi (pages/ask/composer.js) */
 .suggests { display: flex; flex-wrap: wrap; gap: .45rem; justify-content: center; }
 .suggest {
   border: 1px solid var(--border); background: var(--panel);
@@ -682,16 +682,12 @@ a.topbar-ctx:hover { background: var(--accent-soft-2); }
 }
 
 /* ══ 7. Yozish amallari (action card) ══════════════════════════════════════ */
-.action-card {
-  margin: .55rem 0 .2rem;
-  border: 1px solid var(--border); border-left: 3px solid var(--series-2);
-  border-radius: var(--r-sm); padding: .6rem .75rem;
-  background: var(--panel-2); font-size: .87rem;
-}
-.action-card.executed { border-left-color: var(--ok); }
-.action-card.rejected, .action-card.failed, .action-card.blocked {
-  border-left-color: var(--bad); opacity: .82;
-}
+/* `.action-card` ning O'ZI va holat variantlari `css/components.css` da
+ * (R2-C, yagona ta'rif) — bu yerda faqat u qamramagan yordamchilar qoldi.
+ * Ilgari ikkala fayl ham bir xil selektorlarni e'lon qilardi va farqlar
+ * (`--bad` vs `--danger`, `border-left` vs `border-inline-start`) yuklash
+ * tartibiga qarab jimgina yutib ketardi. Yangi qoidani components.css ga
+ * qo'shing, bu yerga emas. */
 .action-head { display: flex; justify-content: space-between; gap: .5rem; align-items: baseline; flex-wrap: wrap; }
 .action-head b { font-size: .84rem; }
 .action-status {
@@ -713,7 +709,7 @@ a.topbar-ctx:hover { background: var(--accent-soft-2); }
   max-width: 100%; height: auto; border-radius: var(--r-sm);
   margin: .45rem 0; display: block; border: 1px solid var(--border);
 }
-.action-card .gen-img { max-height: 260px; width: auto; }
+/* `.action-card .gen-img` — components.css da (yagona ta'rif). */
 
 /* ══ 8. Modal panellar ═════════════════════════════════════════════════════ */
 .panel-backdrop {
@@ -740,7 +736,7 @@ a.topbar-ctx:hover { background: var(--accent-soft-2); }
 
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: .7rem .8rem; }
 .form-grid label { display: flex; flex-direction: column; gap: .3rem; font-size: .82rem; color: var(--muted); font-weight: 500; }
-/* `.full` — nafaqat label, balki `.form-note full` kabi div'lar ham (chat.js) */
+/* `.full` — nafaqat label, balki `.form-note full` kabi div'lar ham (pages/ask/*) */
 .form-grid label.full, .form-grid .full { grid-column: 1 / -1; }
 .form-grid input[type=checkbox] { width: auto; }
 .form-grid textarea { min-height: 92px; resize: vertical; }

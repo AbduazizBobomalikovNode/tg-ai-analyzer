@@ -247,7 +247,7 @@ _ALLOWED_FILES = {SRC / "services" / "avatars.py", SRC / "mtproto" / "allowlist.
 
 
 def test_no_other_module_downloads_files() -> None:
-    """"Media saqlanmaydi" — `upload.GetFile` yo'li faqat profil rasmi uchun.
+    """ "Media saqlanmaydi" — `upload.GetFile` yo'li faqat profil rasmi uchun.
 
     Bu test sinsa: kimdir ilovaga fayl yuklab olish yo'lini qo'shgan. Avval
     CLAUDE.md ("Kontent") va migratsiya 0017 izohini o'qing — bu siyosat

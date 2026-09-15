@@ -7,13 +7,15 @@
 
    Marshrutlar: `ROUTES` da `none` — hali yo'q sahifa. U holda element
    ko'rinadi (IA ko'rinib tursin) lekin **havola emas** — o'lik link yo'q.
-   2-bosqichda `pages.py` ga marshrut qo'shilgach shu xarita va
-   `base.html` dagi `TGAI.routes` yangilanadi, boshqa hech nima emas. #}
+   R2 dan keyin `none` qolmadi: IA dagi to'qqizta sahifa ham jonli.
+   Yangi sahifa qo'shilganda shu xarita va `base.html` dagi `TGAI.routes`
+   yangilanadi, boshqa hech nima emas
+   (`test_web.py::test_routes_map_has_no_dead_links`). #}
 
 {% set ROUTES = {
-  "today": none, "chats": none, "ask": "/chat", "alerts": none,
-  "actions": none, "dashboard": "/dashboard", "briefings": "/briefings",
-  "settings": none
+  "today": "/today", "chats": "/chats", "ask": "/ask", "alerts": "/alerts",
+  "actions": "/actions", "dashboard": "/dashboard", "briefings": "/briefings",
+  "settings": "/settings", "onboarding": "/onboarding"
 } %}
 
 {% set NAV = [
@@ -42,14 +44,15 @@
 
     {# ── Desktop rail (>=860px) ── #}
     <nav class="rail" aria-label="{{ t('web.a11y.primary_nav') }}">
-      <a class="rail-brand" href="{{ ROUTES.ask or '/chat' }}" aria-label="{{ t('web.title') }}">{{ m.icon("sparkles") }}</a>
+      <a class="rail-brand" href="{{ ROUTES.ask or '/ask' }}" aria-label="{{ t('web.title') }}">{{ m.icon("sparkles") }}</a>
       {% for key, ico, label in NAV %}
         {% set href = ROUTES[key] %}
         {% if href %}
         <a class="rail-item" href="{{ href }}"{% if nav_current == key %} aria-current="page"{% endif %}>
           {{ m.icon(ico) }}<span class="sr-only">{{ t(label) }}</span>
           <span class="rail-tip" aria-hidden="true">{{ t(label) }}</span>
-          {% if key == 'actions' %}<span class="nav-badge" id="rail-actions-badge" hidden>0</span>{% endif %}
+          {# Badge slot: `lib/actions-badge.js` `[data-actions-badge]` bo'yicha to'ldiradi. #}
+          {% if key == 'actions' %}<span class="nav-badge" id="rail-actions-badge" data-actions-badge hidden>0</span>{% endif %}
         </a>
         {% else %}
         <span class="rail-item is-disabled" aria-disabled="true" title="{{ t('web.nav.soon') }}">
@@ -112,7 +115,10 @@
     <div class="sheet-grab" aria-hidden="true"></div>
     {% for key, ico, label in [("actions","check-check","web.nav.actions"), ("briefings","inbox","web.nav.briefings"), ("dashboard","bar-chart-3","web.nav.dashboard"), ("settings","settings","web.nav.settings")] %}
       {% if ROUTES[key] %}
-      <a class="sheet-item" href="{{ ROUTES[key] }}">{{ m.icon(ico) }}{{ t(label) }}</a>
+      {# `briefings` faqat shu varaqda ko'rinadi (rail/tabbar'da yo'q) —
+         `aria-current` shu yerda ham qo'yilmasa u yagona "joriy sahifasiz"
+         marshrut bo'lib qolardi. #}
+      <a class="sheet-item" href="{{ ROUTES[key] }}"{% if nav_current == key %} aria-current="page"{% endif %}>{{ m.icon(ico) }}{{ t(label) }}</a>
       {% else %}
       <span class="sheet-item is-disabled" aria-disabled="true">{{ m.icon(ico) }}{{ t(label) }} — {{ t('web.nav.soon') }}</span>
       {% endif %}
@@ -162,5 +168,10 @@
   const seed = () => cmdk.setChats((window.TGAI && window.TGAI.chats) || []);
   window.addEventListener("tgai:chats", seed);
   seed();
+</script>
+<script type="module">
+  // Tasdiq kutayotgan amallar soni — rail badge'i (ui/R2C).
+  import { initActionsBadge } from "/static/lib/actions-badge.js";
+  initActionsBadge();
 </script>
 {% endblock %}

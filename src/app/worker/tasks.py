@@ -1187,9 +1187,7 @@ async def refresh_all_chat_profiles(ctx: dict[str, Any]) -> dict[str, Any]:
 async def _enqueue_chat_profiles(account_id: int) -> None:
     """`sync_account` oxiridagi ilgak — yangi chatlar darhol profil oladi."""
     try:
-        await enqueue(
-            "refresh_chat_profiles", account_id, job_id=job_id_profiles(account_id)
-        )
+        await enqueue("refresh_chat_profiles", account_id, job_id=job_id_profiles(account_id))
     except Exception as exc:  # navbat yo'q bo'lsa ham sync muvaffaqiyatli qoladi
         log.warning("worker.profiles_enqueue_failed", account_id=account_id, error=str(exc)[:200])
 

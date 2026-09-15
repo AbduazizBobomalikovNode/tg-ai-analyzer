@@ -16,29 +16,37 @@ Bosqich: **P0 poydevor + P1 karkas** bajarildi. P2 (AI javob yuzasi), P3
 ## 1. Axborot arxitekturasi va marshrutlar
 
 ```
-/            → akkaunt yo'q → /login, aks holda /today (hozircha /chat)
+/            → akkaunt yo'q → /login; onboarding tugamagan → /onboarding; aks holda /today
 /login       ✅ QR-first onboarding
-/chat        ✅ AI suhbat (2-bosqichda → /ask)
-/dashboard   ✅ token/narx/latency/sifat/sync + alertlar
+/ask         ✅ AI suhbat (3-panel, oqim, deep, sitatalar, amal kartalari)
+/ask/{id}    ✅ suhbatga chuqur havola
+/chat        ↪️ 302 → /ask (eski havolalar uchun; autentifikatsiyadan keyin)
+/dashboard   ✅ token/narx/latency/sifat/sync (alertlar → /alerts)
 /briefings   ✅ kunlik briefing
-/today       ⏳ uy: briefing + alert lentasi + "so'rang"
-/chats       ⏳ chat ro'yxati (mobil to'liq sahifa, desktop 2-panel)
-/chats/{id}  ⏳ chat tafsiloti
-/alerts      ⏳ alert qoidalari (hozir dashboard ichida)
-/actions     ⏳ tasdiq kutayotgan yozish amallari (badge)
-/settings    ⏳ akkaunt, write-mode, jim soatlar, model/byudjet, til
+/today       ✅ uy: briefing + alert lentasi + "so'rang" + sync/plitalar
+/chats       ✅ chat ro'yxati (mobil to'liq sahifa, desktop 2-panel)
+/chats/{id}  ✅ chat tafsiloti
+/alerts      ✅ alert qoidalari (karta + sheet forma) va hodisalar
+/actions     ✅ tasdiq kutayotgan yozish amallari (rail badge)
+/settings    ✅ akkaunt, write-mode, auto-reply, jim soatlar, til, maxfiylik
+/onboarding  ✅ 4 qadam: QR → ishonch kartasi → sync progress → 3 savol
 ```
 
-**⏳ marshrutlar o'lik havola emas.** Ular ikki joyda e'lon qilinadi:
+**R2 dan keyin kutilayotgan marshrut qolmadi** — IA dagi hamma sahifa jonli.
+Marshrutlar ikki joyda e'lon qilinadi (mexanizm saqlanadi: kelajakdagi yangi
+sahifa yoqilgunicha `none`/`null` bo'lib turadi va o'lik havola bermaydi):
 
 | Joy | Nima uchun |
 |---|---|
 | `templates/_shell.html` → `ROUTES` | navigatsiya: `none` bo'lsa element ko'rinadi, lekin `<a>` emas (`is-disabled`, `aria-disabled`) |
 | `templates/base.html` → `window.TGAI.routes` | ⌘K palitrasi va JS navigatsiya |
 
-2-bosqich yangi sahifani yoqish uchun **shu ikki xaritani** o'zgartiradi,
-boshqa hech nimani. `tests/test_web.py::test_routes_map_has_no_dead_links`
-har bir `null` bo'lmagan qiymat haqiqatan ochilishini tekshiradi.
+Yangi sahifani yoqish uchun **shu ikki xaritani** o'zgartiriladi, boshqa hech
+nimani. `tests/test_web.py::test_routes_map_has_no_dead_links` har bir `null`
+bo'lmagan qiymat haqiqatan ochilishini **va** IA dagi to'qqizta sahifa
+(`today, chats, ask, alerts, actions, settings, dashboard, briefings,
+onboarding`) jonli ekanini tekshiradi. Shablonli qiymat (`chatDetail:
+"/chats/{id}"`) — `lib/palette-cmd.js` `{id}` ni almashtiradi.
 
 ---
 
@@ -395,7 +403,7 @@ tushadi (`css/base.css`).
 |---|---|---|
 | CSS (kritik yadro: tokens+base) | ≤ 12 KB | ~7 KB |
 | CSS (jami, marshrut bo'yicha) | ≤ 50 KB | ~57 KB (app.css 40 KB — P3'da bo'linadi) |
-| JS (marshrut, gz'siz) | ≤ 150 KB | shell ~26 KB + sahifa (chat.js 39 KB) |
+| JS (marshrut, gzʻsiz) | ≤ 150 KB | shell ~26 KB + sahifa (ask modullari ~97 KB) |
 | Ikonka sprite | ≤ 25 KB | 20 KB (67 ikonka) |
 | FCP (mobil) | < 1s | brauzer QA'da o'lchanadi |
 
@@ -440,7 +448,7 @@ src/app/web/
     css/components.css     avatar · skeleton · toast · cmdk · sheet · chip
     md.js                  KLASSIK skript (node `eval` bilan yuklaydi) —
                            ESM qilinmaydi, `window.TGAI.md/hydrate/esc`
-    chat.js dashboard.js alerts.js briefings.js login.js   (klassik, o'z joyida)
+    pages/ask.js + pages/ask/*.js   (ES modullar, /ask kirish nuqtasi)
     lib/*.js               ES modullar (quyida)
 ```
 
@@ -555,7 +563,7 @@ renderer hamon **yagona**.
 | **`/today`** (yangi) | `pages.py` marshruti; briefing kartasi (`/api/briefings`), alert lentasi (`/api/alerts/*/events`), "so'rang" maydoni + taklif chiplari; `ROUTES.today` va `TGAI.routes.today` ni yoqish |
 | **`/chats`** (yangi) | `pane_list` + ChatRow komponenti; avatar endpoint (R1a), sparkline (`/chats/{id}/stats`), filtr segmenti URL holati bilan, `/` bilan ro'yxat qidiruvi (`lib/palette.js::rank`), multi-select |
 | **`/chats/{id}`** (yangi) | sarlavha (avatar 64px, bio clamp, sync pill), tez amallar, analitika plitalari; mobil push + `tg.backButton(true)` |
-| **`/chat` → `/ask`** | `chat.js` (39 KB) modullarga bo'linadi: `ask/state.js`, `ask/render.js`, `ask/composer.js`, `ask/deep.js`; `lib/api.js` va `lib/sse.js` ga o'tadi (`parseFrame` allaqachon ko'chirilgan); chap sidebar `/chats` ga ko'chadi, `pane_list` qoladi; javob yuzasi (P2): manbalar tasmasi, `.cite-chip` + hovercard, `.stage` timeline, klaster chiplari, qamrov paneli, streaming (`POST /api/conversations/{id}/messages/stream`) |
+| **`/ask`** (tayyor) | `chat.js` (39 KB) modullarga boʻlindi: `pages/ask.js` + `pages/ask/{state,conversations,composer,messages,answer,deep,actions,panels}.js` (~97 KB, izohlar bilan); `lib/api.js` va `lib/sse.js` ga oʻtdi; javob yuzasi: manbalar tasmasi, `.cite-chip` + hovercard, bosqich timeline’i, klaster chiplari, qamrov paneli, oqim (`/messages/stream` va `/api/deep/stream`), amal kartalari |
 | **`/alerts`** (yangi) | alert CRUD dashboard'dan ko'chadi; hodisa lentasi |
 | **`/actions`** (yangi) | tasdiq kutayotgan amallar; rail/tabbar badge (`#rail-actions-badge`) to'ldiriladi |
 | **`/dashboard`** | plitalar → `lib/fmt.js`; chart'lar lazy `import()`; qolgan emoji (👍 👎 ★) sprite'ga |

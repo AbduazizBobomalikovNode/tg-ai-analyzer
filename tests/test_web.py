@@ -2,7 +2,7 @@
 
 Qo'riqlaydi:
   * cookie imzosi/TTL, CSRF header, locale tanlash
-  * sahifalar: /login ochiq, /chat login talab qiladi
+  * sahifalar: /login ochiq, /ask login talab qiladi
   * auth API: telefon → kod → done → cookie; xato kodlari i18n kalit bilan
   * chat servisi: kontekst <untrusted_data> ichida, tarix tartibi, kesish
 """
@@ -178,7 +178,7 @@ def test_pages(client: TestClient) -> None:
     r = client.get("/login?lang=en")
     assert r.status_code == 200 and "Connect a Telegram account" in r.text
     assert r.cookies.get("lang") == "en"
-    r = client.get("/chat", follow_redirects=False)
+    r = client.get("/ask", follow_redirects=False)
     assert r.status_code == 302
 
 
@@ -208,8 +208,8 @@ def test_full_auth_flow_with_2fa_sets_cookie(client: TestClient) -> None:
     assert client.linked["result"].tg_user_id == 555  # type: ignore[attr-defined]
     assert client.linked["owner"] is None  # type: ignore[attr-defined]
 
-    # cookie bilan endi /chat ochiladi
-    r = client.get("/chat", follow_redirects=False)
+    # cookie bilan endi /ask ochiladi
+    r = client.get("/ask", follow_redirects=False)
     assert r.status_code == 200
 
 
@@ -317,12 +317,29 @@ def test_actions_api_confirm_reject_and_list(
     assert ("confirm", 5) in calls and ("reject", 5) in calls
 
 
-def test_chat_page_has_write_mode_and_action_ui(client: TestClient) -> None:
+def test_ask_page_has_composer_and_action_ui(client: TestClient) -> None:
+    """ui/R2b: `/ask` composer, kontekst chiplari va amal badge'i."""
     client.cookies.set(sec.SESSION_COOKIE, sec.issue_session(7))
-    r = client.get("/chat?lang=uz")
+    r = client.get("/ask?lang=uz")
     assert r.status_code == 200
-    assert 'id="write-mode"' in r.text and 'id="pending-badge"' in r.text
-    assert "Avtonom" in r.text
+    for marker in ('id="ask-input"', 'id="ctx-chips"', 'id="actions-badge"', 'id="ask-sheet"'):
+        assert marker in r.text, marker
+
+
+def test_legacy_chat_route_redirects_to_ask(client: TestClient) -> None:
+    """Eski havolalar buzilmasin — `/chat` 302 bilan `/ask` ga."""
+    client.cookies.set(sec.SESSION_COOKIE, sec.issue_session(7))
+    r = client.get("/chat", follow_redirects=False)
+    assert r.status_code == 302 and r.headers["location"] == "/ask"
+    client.cookies.clear()
+
+
+def test_ask_deep_link_opens_a_conversation(client: TestClient) -> None:
+    """`/ask/{id}` — qobiq o'sha suhbat bilan ochiladi (egalik API'da)."""
+    client.cookies.set(sec.SESSION_COOKIE, sec.issue_session(7))
+    r = client.get("/ask/42")
+    assert r.status_code == 200 and "conversationId: 42" in r.text
+    client.cookies.clear()
 
 
 def test_content_endpoints_guarded(client: TestClient) -> None:
@@ -568,10 +585,10 @@ def test_deep_disabled_refuses_both_routes(
     assert r2.status_code == 403 and r2.json()["detail"]["code"] == "chat.err.disabled"
 
 
-def test_chat_page_has_deep_toggle(client: TestClient) -> None:
+def test_ask_page_has_deep_toggle(client: TestClient) -> None:
     client.cookies.set(sec.SESSION_COOKIE, sec.issue_session(7))
-    r = client.get("/chat?lang=en")
-    assert 'id="deep"' in r.text and 'id="deep-wrap"' in r.text
+    r = client.get("/ask?lang=en")
+    assert 'id="btn-deep"' in r.text and 'aria-pressed="false"' in r.text
 
 
 def test_chat_api_accepts_deep_mode(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1174,11 +1191,22 @@ _WEB = _Path(__file__).resolve().parents[1] / "src/app/web"
 _LOCALES = _Path(__file__).resolve().parents[1] / "src/app/i18n/locales"
 
 #: Piktografik emoji (matn o'qlari `←`/`→` va tipografik belgilar emas).
-_EMOJI = _re.compile(
-    "[\U0001f000-\U0001faff☀-➿⬀-⯿️‍⏠-⏿]"
+_EMOJI = _re.compile("[\U0001f000-\U0001faff☀-➿⬀-⯿️‍⏠-⏿]")
+
+_SHELL_PAGES = (
+    "/ask",
+    "/dashboard",
+    "/briefings",
+    # ui/R2c
+    "/today",
+    "/alerts",
+    "/actions",
+    "/settings",
 )
 
-_SHELL_PAGES = ("/chat", "/dashboard", "/briefings")
+#: Karkassiz sahifalar (`base.html` dan meros) — ular rail/tab bar olmaydi,
+#: lekin sprite va tema qoidalari ularga ham tegishli.
+_BARE_PAGES = ("/login", "/onboarding")
 
 
 def _logged(client: TestClient) -> TestClient:
@@ -1203,7 +1231,7 @@ def test_pages_render_with_the_navigation_shell(client: TestClient) -> None:
 
 def test_pages_reference_the_icon_sprite_not_emoji(client: TestClient) -> None:
     c = _logged(client)
-    for path in (*_SHELL_PAGES, "/login"):
+    for path in (*_SHELL_PAGES, *_BARE_PAGES):
         r = c.get(f"{path}?lang=en")
         assert r.status_code == 200, path
         html = r.text
@@ -1231,15 +1259,60 @@ def test_theme_bootstrap_runs_before_paint(client: TestClient) -> None:
 def test_routes_map_has_no_dead_links(client: TestClient) -> None:
     """`TGAI.routes` — hali yo'q sahifalar `null`; barcha satrlar haqiqiy."""
     c = _logged(client)
-    html = c.get("/chat").text
-    raw = html.split("routes: {", 1)[1].split("}", 1)[0]
-    routes = _json.loads("{" + _re.sub(r"(\w+):", r'"\1":', raw).replace("null", "null") + "}")
+    html = c.get("/ask").text
+    # Blok oxiri — satr boshidagi `}` (qiymat ichidagi `{id}` emas: shablonli
+    # marshrut `/chats/{id}` bo'lgani uchun sodda `split("}")` yaramaydi).
+    raw = _re.split(r"\n\s*\}", html.split("routes: {", 1)[1], maxsplit=1)[0]
+    routes = _json.loads("{" + _re.sub(r"(\w+):", r'"\1":', raw) + "}")
     for key, value in routes.items():
         assert value is None or value.startswith("/"), key
+    # ui/R2: IA dagi hamma sahifa **jonli** — `null` qolmasin.
+    for key in (
+        "today",
+        "chats",
+        "ask",
+        "alerts",
+        "actions",
+        "settings",
+        "dashboard",
+        "briefings",
+        "onboarding",
+    ):
+        assert routes.get(key), f"{key}: marshrut xaritasida yo'q yoki null"
     live = {v for v in routes.values() if v}
     for url in live:
-        assert c.get(url, follow_redirects=False).status_code in (200, 302), url
-    assert routes["today"] is None and routes["settings"] is None  # 2-bosqich
+        # Shablonli marshrut (`/chats/{id}`) — `{` gacha bo'lgan qismi
+        # ochilishi tekshiriladi: id sahifa qobig'iga o'tadi, egalik esa
+        # API tomonda (`/api/accounts/{id}/chats/{id}`).
+        probe = url.split("/{", 1)[0] or "/"
+        assert c.get(probe, follow_redirects=False).status_code in (200, 302), url
+    c.cookies.clear()
+
+
+def test_every_shell_page_highlights_its_nav_entry(client: TestClient) -> None:
+    """`aria-current="page"` har karkasli sahifada **o'z** marshrutida.
+
+    Uch joyda ko'rinishi mumkin (rail · tabbar · More varag'i) — shuning
+    uchun kamida bitta mos kelishi yetarli, lekin boshqa marshrutda
+    `aria-current` bo'lmasligi shart: aks holda ikkita "joriy sahifa"
+    bo'lib qoladi va skrinrider ikkalasini o'qiydi.
+    """
+    c = _logged(client)
+    for path, want in (
+        ("/today", "/today"),
+        ("/chats", "/chats"),
+        ("/chats/7", "/chats"),
+        ("/ask", "/ask"),
+        ("/alerts", "/alerts"),
+        ("/actions", "/actions"),
+        ("/settings", "/settings"),
+        ("/dashboard", "/dashboard"),
+        # `/briefings` faqat More varag'ida — u ham belgilanishi kerak.
+        ("/briefings", "/briefings"),
+    ):
+        html = c.get(f"{path}?lang=en").text
+        hits = set(_re.findall(r'href="([^"]+)"[^>]*aria-current="page"', html))
+        assert hits == {want}, f"{path}: aria-current={sorted(hits)}, kutilgan {want}"
     c.cookies.clear()
 
 
@@ -1250,21 +1323,66 @@ def test_new_ui_strings_exist_in_all_three_locales() -> None:
     }
     required = [
         "web.close",
-        "web.nav.today", "web.nav.chats", "web.nav.ask", "web.nav.alerts",
-        "web.nav.actions", "web.nav.dashboard", "web.nav.settings",
-        "web.nav.more", "web.nav.soon",
-        "web.a11y.skip", "web.a11y.primary_nav", "web.a11y.open_nav",
-        "web.theme.title", "web.theme.system", "web.theme.light", "web.theme.dark",
-        "web.cmd.open", "web.cmd.placeholder", "web.cmd.results", "web.cmd.empty",
-        "web.cmd.sec_chats", "web.cmd.sec_goto", "web.cmd.sec_actions",
-        "web.cmd.toggle_theme", "web.cmd.language",
+        "web.nav.today",
+        "web.nav.chats",
+        "web.nav.ask",
+        "web.nav.alerts",
+        "web.nav.actions",
+        "web.nav.dashboard",
+        "web.nav.settings",
+        "web.nav.more",
+        "web.nav.soon",
+        "web.a11y.skip",
+        "web.a11y.primary_nav",
+        "web.a11y.open_nav",
+        "web.theme.title",
+        "web.theme.system",
+        "web.theme.light",
+        "web.theme.dark",
+        "web.cmd.open",
+        "web.cmd.placeholder",
+        "web.cmd.results",
+        "web.cmd.empty",
+        "web.cmd.sec_chats",
+        "web.cmd.sec_goto",
+        "web.cmd.sec_actions",
+        "web.cmd.toggle_theme",
+        "web.cmd.language",
         "web.fmt.now",
-        "web.n.messages.one", "web.n.messages.other",
-        "web.n.chats.one", "web.n.chats.other",
+        "web.n.messages.one",
+        "web.n.messages.other",
+        "web.n.chats.one",
+        "web.n.chats.other",
+        # ui/R2b — `/ask`
+        "web.ask.title",
+        "web.ask.conversations",
+        "web.ask.new",
+        "web.ask.untitled",
+        "web.ask.rename",
+        "web.ask.undo",
+        "web.ask.deleted",
+        "web.ask.placeholder",
+        "web.ask.send",
+        "web.ask.stop",
+        "web.ask.deep",
+        "web.ask.context",
+        "web.ask.expert",
+        "web.ask.ctx_limit",
+        "web.ask.copy",
+        "web.ask.share",
+        "web.ask.regenerate",
+        "web.ask.contents",
+        "web.ask.sources",
+        "web.ask.source_n",
+        "web.ask.open_in_telegram",
+        "web.ask.coverage_sum",
+        "web.ask.pending",
+        "web.ask.act_ttl",
+        "web.ask.empty_title",
+        "web.ask.empty_text",
+        "web.ask.load_earlier",
     ]
-    missing = {
-        name: [k for k in required if not data.get(k)] for name, data in locales.items()
-    }
+    missing = {name: [k for k in required if not data.get(k)] for name, data in locales.items()}
     assert not any(missing.values()), missing
     # ru ko'plikning uchala shakli bor (Intl.PluralRules: one/few/many)
     for stem in ("web.n.messages", "web.n.chats"):
@@ -1279,7 +1397,8 @@ def test_ui_strings_carry_no_emoji_icons() -> None:
     for name in ("uz", "ru", "en"):
         data = _json.loads((_LOCALES / f"{name}.json").read_text(encoding="utf-8"))
         hits = [
-            k for k, v in data.items()
+            k
+            for k, v in data.items()
             if k.startswith(prefixes) and isinstance(v, str) and _EMOJI.search(v)
         ]
         if hits:
@@ -1290,11 +1409,19 @@ def test_ui_strings_carry_no_emoji_icons() -> None:
 def test_macros_and_shell_templates_exist_and_are_used() -> None:
     tpl = _WEB / "templates"
     assert (tpl / "_macros.html").is_file() and (tpl / "_shell.html").is_file()
-    for page in ("chat.html", "dashboard.html", "briefings.html"):
+    for page in (
+        "ask.html",
+        "dashboard.html",
+        "briefings.html",
+        "today.html",
+        "alerts.html",
+        "actions.html",
+        "settings.html",
+    ):
         text = (tpl / page).read_text(encoding="utf-8")
         assert 'extends "_shell.html"' in text, page
     # brend/lang-switch nusxalari macro'ga ko'chdi
-    for page in ("chat.html", "dashboard.html", "briefings.html", "login.html"):
+    for page in ("ask.html", "dashboard.html", "briefings.html", "login.html", "onboarding.html"):
         text = (tpl / page).read_text(encoding="utf-8")
         assert 'class="lang-switch"' not in text, f"{page}: eski lang-switch nusxasi qoldi"
 
@@ -1302,7 +1429,296 @@ def test_macros_and_shell_templates_exist_and_are_used() -> None:
 def test_static_assets_are_versioned_in_html(client: TestClient) -> None:
     """R1b `asset()` global'i — static URL'lar fingerprint bilan."""
     c = _logged(client)
-    html = c.get("/chat").text
+    html = c.get("/ask").text
     assert _re.search(r"/static/css/tokens\.css\?v=[0-9a-f]{6,}", html)
     assert _re.search(r"/static/md\.js\?v=[0-9a-f]{6,}", html)
     c.cookies.clear()
+
+
+# ─── ui/R2a: /chats ro'yxati va /chats/{id} tafsiloti ───────────────────────
+#
+# Sahifalar **qobiq**: ma'lumot `/api` dan keladi, shuning uchun bu yerda DB
+# kerak emas. Qo'riqlanadigani: login talabi, karkas, sprite ikonkalari,
+# sahifa moduli ulangani va i18n kalitlari uchala tilda borligi.
+
+
+_CHATS_PAGES = ("/chats", "/chats/11")
+
+
+def test_chats_pages_require_login(client: TestClient) -> None:
+    for path in _CHATS_PAGES:
+        r = client.get(path, follow_redirects=False)
+        assert r.status_code == 302 and r.headers["location"] == "/login", path
+
+
+def test_chats_pages_render_with_the_shell(client: TestClient) -> None:
+    c = _logged(client)
+    for path in _CHATS_PAGES:
+        r = c.get(f"{path}?lang=uz")
+        assert r.status_code == 200, path
+        html = r.text
+        assert 'class="rail"' in html, f"{path}: rail yo'q"
+        assert 'class="tabbar"' in html, f"{path}: tab bar yo'q"
+        assert 'id="cmdk"' in html and 'id="toast-root"' in html, path
+        assert 'class="skip-link"' in html, path
+        # ro'yxat paneli ikkala marshrutda ham bor (desktopda 2-panel)
+        assert 'id="chats-pane"' in html and 'id="chat-rows"' in html, path
+        assert "css/pages/chats.css" in html, path
+        assert "pages/chats.js" in html, path
+    # tafsilot sahifasi: o'z moduli, `data-detail` (Telegram BackButton)
+    detail = c.get("/chats/11?lang=uz").text
+    assert "pages/chat_detail.js" in detail and 'data-detail="1"' in detail
+    assert "initChatDetail({ chatId: 11 })" in detail
+    # ro'yxat sahifasida tafsilot moduli yuklanmaydi
+    assert "pages/chat_detail.js" not in c.get("/chats?lang=uz").text
+    c.cookies.clear()
+
+
+def test_chats_pages_use_the_sprite_and_no_emoji(client: TestClient) -> None:
+    c = _logged(client)
+    for path in _CHATS_PAGES:
+        html = c.get(f"{path}?lang=en").text
+        assert "/static/icons.svg" in html and "<use href=" in html, path
+        found = _EMOJI.findall(html)
+        assert not found, f"{path}: emoji qoldi: {sorted(set(found))}"
+    c.cookies.clear()
+
+
+def test_chats_nav_entry_is_a_live_link(client: TestClient) -> None:
+    """`ROUTES.chats` yoqilgan: rail/tab bar elementi `<a>`, `is-disabled` emas."""
+    c = _logged(client)
+    html = c.get("/chats?lang=uz").text
+    assert 'href="/chats"' in html
+    assert 'aria-current="page"' in html, "faol nav elementi belgilanmagan"
+    assert 'chats: "/chats"' in html
+    c.cookies.clear()
+
+
+def test_chats_strings_exist_in_all_three_locales() -> None:
+    locales = {
+        name: _json.loads((_LOCALES / f"{name}.json").read_text(encoding="utf-8"))
+        for name in ("uz", "ru", "en")
+    }
+    required = [
+        "web.chats.title",
+        "web.chats.account",
+        "web.chats.search",
+        "web.chats.filter_type",
+        "web.chats.filter_all",
+        "web.chats.filter_channels",
+        "web.chats.filter_groups",
+        "web.chats.filter_private",
+        "web.chats.unsynced",
+        "web.chats.sec_pinned",
+        "web.chats.sec_recent",
+        "web.chats.sec_all",
+        "web.chats.select",
+        "web.chats.selected",
+        "web.chats.clear_selection",
+        "web.chats.menu",
+        "web.chats.ask",
+        "web.chats.sync",
+        "web.chats.sync_all",
+        "web.chats.sync_started",
+        "web.chats.sync_synced",
+        "web.chats.sync_running",
+        "web.chats.sync_failed",
+        "web.chats.sync_none",
+        "web.chats.alerts",
+        "web.chats.pin",
+        "web.chats.unpin",
+        "web.chats.pin_failed",
+        "web.chats.write_mode",
+        "web.chats.wm_read_only",
+        "web.chats.wm_confirm",
+        "web.chats.wm_autonomous",
+        "web.chats.wm_saved",
+        "web.chats.verified",
+        "web.chats.scam",
+        "web.chats.fake",
+        "web.chats.no_results",
+        "web.chats.empty_title",
+        "web.chats.empty_text",
+        "web.chats.empty_none_text",
+        "web.chats.no_accounts_title",
+        "web.chats.no_accounts_text",
+        "web.chats.connect",
+        "web.chats.revoked",
+        "web.chats.relogin",
+        "web.chats.not_found",
+        "web.chats.more_bio",
+        "web.chats.less_bio",
+        "web.chats.sections",
+        "web.chats.tab_overview",
+        "web.chats.tab_activity",
+        "web.chats.tab_top",
+        "web.chats.tab_digests",
+        "web.chats.tab_members",
+        "web.chats.kpi_posts",
+        "web.chats.kpi_views",
+        "web.chats.kpi_reactions",
+        "web.chats.kpi_forwards",
+        "web.chats.kpi_replies",
+        "web.chats.kpi_views_delta",
+        "web.chats.kpi_per_day",
+        "web.chats.kpi_avg",
+        "web.chats.kpi_delta_note",
+        "web.chats.spark_alt",
+        "web.chats.range",
+        "web.chats.range_days",
+        "web.chats.heatmap_alt",
+        "web.chats.heatmap_note",
+        "web.chats.m_views",
+        "web.chats.m_reactions",
+        "web.chats.m_forwards",
+        "web.chats.digests_none",
+        "web.chats.members_note",
+        "web.chats.suggest_1",
+        "web.chats.suggest_2",
+        "web.chats.suggest_3",
+        *(f"web.chats.wd_{d}" for d in ("mon", "tue", "wed", "thu", "fri", "sat", "sun")),
+    ]
+    missing = {name: [k for k in required if not data.get(k)] for name, data in locales.items()}
+    assert not any(missing.values()), missing
+    # a'zolar soni — ko'plik (rus tilida uchala shakl majburiy)
+    for form in ("one", "few", "many", "other"):
+        for name, data in locales.items():
+            assert data.get(f"web.n.members.{form}"), f"{name}: web.n.members.{form}"
+
+
+def test_chats_page_modules_have_no_inner_html_except_markdown() -> None:
+    """R2a modullari `innerHTML` ga faqat `md()` chiqishini beradi.
+
+    Chat sarlavhasi va oxirgi xabar matni — begona kontent; ular
+    `lib/dom.js::el()` orqali `textContent` bo'lib tushadi.
+    """
+    pages = _WEB / "static/pages"
+    for name in ("chats.js", "chat_shared.js", "chat_detail.js"):
+        text = (pages / name).read_text(encoding="utf-8")
+        for raw in text.splitlines():
+            line = raw.strip()
+            if "innerHTML" not in line:
+                continue
+            if line.startswith(("*", "//", "/*")):  # izoh — kod emas
+                continue
+            assert "md(" in line, f"{name}: xavfli innerHTML — {line}"
+
+
+# ─── ui/R2c: /today · /alerts · /actions · /settings · /onboarding ───────────
+#
+# Qo'riqlaydi:
+#   * har bir yangi sahifa kirgan foydalanuvchiga ochiladi va kirmaganni
+#     `/login` ga yuboradi (onboarding — istisno: 1-qadam aynan kirmagan
+#     foydalanuvchi uchun);
+#   * `/` yangi foydalanuvchini `/onboarding` ga, tugatganini `/today` ga;
+#   * yangi sahifalarning i18n kalitlari **uchala** tilda bor;
+#   * sahifa moduli va uning CSS'i haqiqatan ulangan.
+
+_R2C_PAGES = ("/today", "/alerts", "/actions", "/settings")
+
+
+def test_r2c_pages_render_for_logged_in_user(client: TestClient) -> None:
+    c = _logged(client)
+    for path in _R2C_PAGES:
+        r = c.get(f"{path}?lang=en")
+        assert r.status_code == 200, path
+        name = path.strip("/")
+        assert f"/static/pages/{name}.js" in r.text, f"{path}: sahifa moduli ulanmagan"
+    c.cookies.clear()
+
+
+def test_r2c_pages_redirect_anonymous_to_login(client: TestClient) -> None:
+    for path in _R2C_PAGES:
+        r = client.get(path, follow_redirects=False)
+        assert r.status_code == 302 and r.headers["location"] == "/login", path
+
+
+def test_onboarding_is_reachable_without_a_session(client: TestClient) -> None:
+    """1-qadam QR login — kirmagan foydalanuvchi uchun; redirect bo'lmasin."""
+    r = client.get("/onboarding?lang=en", follow_redirects=False)
+    assert r.status_code == 200
+    assert "/static/pages/onboarding.js" in r.text
+
+
+def test_index_sends_new_users_to_onboarding(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`/` → `/onboarding` (onboarding_done=false), `/today` (true)."""
+    from app.web.routers import pages as pages_router
+
+    c = _logged(client)
+
+    async def unfinished(ident: Any) -> dict[str, Any]:
+        return {"onboarding_done": False}
+
+    async def finished(ident: Any) -> dict[str, Any]:
+        return {"onboarding_done": True}
+
+    monkeypatch.setattr(pages_router, "_prefs_for", unfinished)
+    r = c.get("/", follow_redirects=False)
+    assert r.status_code == 302 and r.headers["location"] == "/onboarding"
+
+    monkeypatch.setattr(pages_router, "_prefs_for", finished)
+    r = c.get("/", follow_redirects=False)
+    assert r.status_code == 302 and r.headers["location"] == "/today"
+    c.cookies.clear()
+
+
+def test_r2c_pages_link_their_stylesheet(client: TestClient) -> None:
+    c = _logged(client)
+    for path, css in (
+        ("/today", "css/pages/today.css"),
+        ("/alerts", "css/pages/alerts.css"),
+        ("/actions", "css/pages/actions.css"),
+        ("/settings", "css/pages/settings.css"),
+    ):
+        assert css in c.get(f"{path}?lang=en").text, path
+    assert "css/pages/onboarding.css" in c.get("/onboarding?lang=en").text
+    c.cookies.clear()
+
+
+def test_actions_badge_slot_exists_in_the_shell(client: TestClient) -> None:
+    """Rail badge'i `[data-actions-badge]` bilan belgilangan — JS shu bo'yicha topadi."""
+    c = _logged(client)
+    html = c.get("/today?lang=en").text
+    assert "data-actions-badge" in html
+    assert "/static/lib/actions-badge.js" in html
+    c.cookies.clear()
+
+
+def test_r2c_strings_exist_in_all_three_locales() -> None:
+    locales = {
+        name: _json.loads((_LOCALES / f"{name}.json").read_text(encoding="utf-8"))
+        for name in ("uz", "ru", "en")
+    }
+    prefixes = ("web.today.", "web.actions.", "web.settings.", "web.onboarding.")
+    # Prefiks bo'yicha: uz — manba, qolgan ikkitasi undan qolishmasligi kerak.
+    base = {k for k in locales["uz"] if k.startswith(prefixes)}
+    assert len(base) >= 80, f"yangi kalitlar juda kam: {len(base)}"
+    for name in ("ru", "en"):
+        missing = sorted(k for k in base if not locales[name].get(k))
+        assert not missing, f"{name}: {missing}"
+
+    # Alert sahifasining yangi kalitlari ham uchchalasida.
+    for key in (
+        "web.alerts.new",
+        "web.alerts.edit",
+        "web.alerts.save",
+        "web.alerts.cancel",
+        "web.alerts.tab_rules",
+        "web.alerts.tab_events",
+        "web.alerts.err_pattern",
+        "web.alerts.err_semantic_short",
+        "web.login.phone_fallback",
+        "web.login.qr_refresh",
+    ):
+        for name in ("uz", "ru", "en"):
+            assert locales[name].get(key), f"{name}: {key}"
+
+
+def test_the_legacy_alerts_script_is_gone() -> None:
+    """Alert CRUD dashboard'dan `/alerts` ga ko'chdi — eski nusxa qolmasin."""
+    assert not (_WEB / "static/alerts.js").is_file()
+    dash = (_WEB / "templates/dashboard.html").read_text(encoding="utf-8")
+    assert "alerts.js" not in dash
+    assert "alerts-form" not in dash, "dashboard'da eski alert formasi qoldi"
