@@ -21,7 +21,7 @@ Snapshot (4.6-band): faqat kanallar; yosh postlar tez-tez, eskilari kamroq —
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
@@ -374,6 +374,9 @@ def message_to_row(chat_id: int, m: Any) -> dict[str, Any] | None:
         "chat_id": chat_id,
         "tg_msg_id": int(m.id),
         "sender_id": _peer_id(getattr(m, "from_id", None)),
+        # Shaxsiy chatda `from_id` bo'sh keladi — "bu xabarni biz yozdik"
+        # ni faqat `m.out` aytadi (alertlar shu ustunga qaraydi).
+        "out": bool(getattr(m, "out", False)),
         "published_at": m.date,
         "edited_at": getattr(m, "edit_date", None),
         "text": text,
@@ -414,10 +417,21 @@ async def upsert_message_from_update(chat_id: int, m: Any) -> int:
     row = message_to_row(chat_id, m)
     if row is None:
         return 0
-    return await upsert_messages([row])
+    ents = getattr(m, "entities", None)
+    return await upsert_messages([row], tg_entities={(chat_id, int(m.id)): ents} if ents else None)
 
 
-async def upsert_messages(rows: list[dict[str, Any]]) -> int:
+async def upsert_messages(
+    rows: list[dict[str, Any]],
+    *,
+    tg_entities: dict[tuple[int, int], Any] | None = None,
+) -> int:
+    """Xabarlarni upsert qiladi va (phase4/A) entity indeksini yangilaydi.
+
+    `tg_entities` — `(chat_id, tg_msg_id)` → Telethon `message.entities`.
+    Faqat `mention_name` uchun kerak: ism **erkin matndan taxmin
+    qilinmaydi**, faqat Telegram bergan entity'dan olinadi.
+    """
     if not rows:
         return 0
     async with session_scope() as db:
@@ -443,8 +457,54 @@ async def upsert_messages(rows: list[dict[str, Any]]) -> int:
                 "replies_count": stmt.excluded.replies_count,
             },
         )
-        await db.execute(stmt)
+        res = await db.execute(stmt.returning(Message.id, Message.chat_id, Message.tg_msg_id))
+        await _index_entities(db, res.all(), rows, tg_entities)
     return len(rows)
+
+
+async def _index_entities(
+    db: Any,
+    written: Sequence[Any],
+    rows: list[dict[str, Any]],
+    tg_entities: dict[tuple[int, int], Any] | None,
+) -> None:
+    """Upsert qilingan xabarlar uchun `node_entities` (phase4/A).
+
+    Xatosi **sync'ni to'xtatmaydi**: indeks — qulaylik kanali, ingest esa
+    asosiy yo'l. Backfill ishi (`worker.tasks.backfill_entities`) o'tkazib
+    yuborilganini keyin to'ldiradi.
+    """
+    if not written:
+        return
+    try:
+        if not get_settings().entities_enabled:
+            return
+        from app.services.entities import EntityRef, index_messages_entities
+
+        by_key = {(int(r["chat_id"]), int(r["tg_msg_id"])): r for r in rows}
+        chat_ids = {int(w[1]) for w in written}
+        accounts = dict(
+            (await db.execute(select(Chat.id, Chat.account_id).where(Chat.id.in_(chat_ids)))).all()
+        )
+        refs: list[EntityRef] = []
+        for mid, chat_id, tg_msg_id in written:
+            row = by_key.get((int(chat_id), int(tg_msg_id)))
+            account_id = accounts.get(int(chat_id))
+            if row is None or account_id is None:
+                continue
+            refs.append(
+                EntityRef(
+                    message_id=int(mid),
+                    account_id=int(account_id),
+                    chat_id=int(chat_id),
+                    text=row.get("text") or "",
+                    seen_at=row.get("published_at"),
+                    tg_entities=(tg_entities or {}).get((int(chat_id), int(tg_msg_id))),
+                )
+            )
+        await index_messages_entities(db, refs)
+    except Exception as exc:  # entity indeksi ingest'ni hech qachon yiqitmaydi
+        log.warning("ingest.entities_failed", error=f"{type(exc).__name__}: {str(exc)[:160]}")
 
 
 # ─── ramp-up ─────────────────────────────────────────────────────────────────
@@ -542,6 +602,9 @@ async def _pull(
     """Telethon iteratori orqali batch'lab tortadi va yozadi. Qaytaradi: nechta xabar."""
     fetched = 0
     batch: list[dict[str, Any]] = []
+    # phase4/A: `mention_name` faqat Telegram entity'laridan olinadi — matn
+    # bilan birga batch'gacha olib boriladi (`messages` da saqlanmaydi).
+    batch_entities: dict[tuple[int, int], Any] = {}
     total_estimate: int | None = None
     it = client.iter_messages(
         peer, limit=budget, min_id=min_id, offset_id=offset_id, wait_time=WAIT_BETWEEN_BATCHES
@@ -553,14 +616,18 @@ async def _pull(
         row = message_to_row(chat_id, m)
         if row is not None:
             batch.append(row)
+            ents = getattr(m, "entities", None)
+            if ents:
+                batch_entities[(chat_id, int(m.id))] = ents
         report.newest_id = max(report.newest_id or 0, int(m.id))
         report.oldest_id = min(report.oldest_id or int(m.id), int(m.id))
         if len(batch) >= BATCH:
-            report.inserted_or_updated += await upsert_messages(batch)
+            report.inserted_or_updated += await upsert_messages(batch, tg_entities=batch_entities)
             await _progress(chat_id, report, total_estimate)
             batch = []
+            batch_entities = {}
     if batch:
-        report.inserted_or_updated += await upsert_messages(batch)
+        report.inserted_or_updated += await upsert_messages(batch, tg_entities=batch_entities)
     report.fetched += fetched
     if fetched:
         SYNC_MESSAGES.inc(fetched)

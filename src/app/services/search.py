@@ -25,12 +25,12 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db.models import Chat, ChatType, Message, MessageEmbedding
-from app.llm import EMBED_QUERY, LLM, LLMError, Msg, Task
+from app.llm import EMBED_QUERY, LLM, LLMError, Msg, Task, embed_model_name
 from app.logging import get_logger
 from app.mtproto.pool import MessageInfo
 from app.services import untrusted as U
@@ -180,6 +180,18 @@ def _tsq_safe(term: str) -> str:
 def _tsquery(terms: Sequence[str], *, prefix: bool, op: str) -> str:
     parts = [f"{t}:*" if prefix else t for t in (_tsq_safe(x) for x in terms) if t]
     return op.join(dict.fromkeys(parts))
+
+
+def _embed_model(col: Any) -> list[Any]:
+    """Joriy embedding modeli bo'yicha filtr (phase4/B integratsiyasi).
+
+    `message_embeddings` / `retrieval_node_embeddings` bir vaqtning o'zida bir
+    necha modelning vektorini saqlashi mumkin (re-embed hech narsa o'chirmaydi).
+    Filtr bo'lmasa cosine masofa **turli fazolardagi** vektorlar orasida
+    hisoblanardi — ya'ni model almashgan kuni reyting jimgina chalkashardi.
+    """
+    want = embed_model_name()
+    return [col == want] if want else []
 
 
 def _alive() -> list[Any]:
@@ -349,7 +361,7 @@ async def vector_search(
         await session.execute(
             select(MessageEmbedding.message_id)
             .join(Message, Message.id == MessageEmbedding.message_id)
-            .where(Message.chat_id == chat_id)
+            .where(Message.chat_id == chat_id, *_embed_model(MessageEmbedding.model))
             .limit(1)
         )
     ).first()
@@ -367,7 +379,7 @@ async def vector_search(
     stmt = (
         select(Message.id, Message.tg_msg_id, dist)
         .join(MessageEmbedding, MessageEmbedding.message_id == Message.id)
-        .where(Message.chat_id == chat_id, *_alive())
+        .where(Message.chat_id == chat_id, *_alive(), *_embed_model(MessageEmbedding.model))
         .order_by(dist)
         .limit(limit)
     )
@@ -517,6 +529,17 @@ DEFAULT_MULTI_RRF_WEIGHTS: tuple[float, float, float, float, float] = (
 NODE_CITE_NODES = 12
 NODE_CITE_PER_NODE = 2
 
+# Entity kanali — RRF'da **oltinchi** kirish (phase4/A). Og'irligi leksik
+# kanallardan ham yuqori (1.1): `@nurbek` tengligi "nurbek" so'zining matnda
+# uchrashidan kuchliroq signal — u yerda taxmin yo'q, aniq identifikator bor.
+# Kanal faqat planner entity bergan bo'lsa qo'shiladi, shuning uchun besh
+# kanalli sukut og'irliklari (`DEFAULT_MULTI_RRF_WEIGHTS`) o'zgarmaydi.
+W_ENTITY = 1.1
+ENTITY_MULTI_RRF_WEIGHTS: tuple[float, float, float, float, float, float] = (
+    *DEFAULT_MULTI_RRF_WEIGHTS,
+    W_ENTITY,
+)
+
 
 def _scope(
     account_id: int,
@@ -591,7 +614,7 @@ async def _vector_multi(
         select(Message.id, Message.tg_msg_id, Message.chat_id, dist)
         .join(MessageEmbedding, MessageEmbedding.message_id == Message.id)
         .join(Chat, Chat.id == Message.chat_id)
-        .where(*conds, *_alive())
+        .where(*conds, *_alive(), *_embed_model(MessageEmbedding.model))
         .order_by(dist)
         .limit(limit)
     )
@@ -747,7 +770,7 @@ async def node_search(
             await session.execute(
                 select(RetrievalNode, dist)
                 .join(RetrievalNodeEmbedding, RetrievalNodeEmbedding.node_id == RetrievalNode.id)
-                .where(*conds)
+                .where(*conds, *_embed_model(RetrievalNodeEmbedding.model))
                 .order_by(dist)
                 .limit(limit * 2)
             )
@@ -770,50 +793,112 @@ async def node_hits_to_messages(
 ) -> list[Hit]:
     """Tugun topilmalarini **level 0** xabarlarga qaytaradi (sitata uchun).
 
-    Bitta so'rov: oraliqlar `OR` bilan birlashtiriladi (`(chat_id, tg_msg_id)`
-    unikal indeksi ishlaydi), keyin har tugundan `per_node` xabar olinadi.
+    Har tugun uchun **alohida** so'rov (`n <= NODE_CITE_NODES`, ya'ni ≤ 12):
+    ilgari bitta katta `OR` so'rovi umumiy `LIMIT` bilan kesilardi va u
+    `chat_id, tg_msg_id` bo'yicha tartiblangani uchun butun byudjetni birinchi
+    chatlar yeb qo'yardi — ro'yxat oxiridagi tugunlarga hech narsa qolmasdi
+    (L5). Endi har tugun aynan o'z `per_node` ulushini oladi.
+
     Tugunlarning RRF tartibi saqlanadi — bu kanal kirishi shu tartibda.
     """
-    from sqlalchemy import and_, or_
-
-    top = list(node_hits)[:max_nodes]
+    top = [h for h in list(node_hits)[:max_nodes] if h.msg_hi >= h.msg_lo > 0]
     if not top:
         return []
-    ranges = [
-        and_(
-            Message.chat_id == h.chat_id,
-            Message.tg_msg_id >= h.msg_lo,
-            Message.tg_msg_id <= h.msg_hi,
-        )
-        for h in top
-        if h.msg_hi >= h.msg_lo > 0
-    ]
-    if not ranges:
-        return []
-    rows = (
-        await session.execute(
-            select(Message.id, Message.tg_msg_id, Message.chat_id)
-            .where(or_(*ranges), *_alive())
-            .order_by(Message.chat_id, Message.tg_msg_id)
-            .limit(max_nodes * per_node * 20)
-        )
-    ).all()
-    by_chat: dict[int, list[tuple[int, int]]] = {}
-    for mid, tg_id, chat_id in rows:
-        by_chat.setdefault(int(chat_id), []).append((int(tg_id), int(mid)))
     out: list[Hit] = []
     seen: set[int] = set()
     for h in top:
+        rows = (
+            await session.execute(
+                select(Message.id, Message.tg_msg_id)
+                .where(
+                    Message.chat_id == h.chat_id,
+                    Message.tg_msg_id >= h.msg_lo,
+                    Message.tg_msg_id <= h.msg_hi,
+                    *_alive(),
+                )
+                .order_by(Message.tg_msg_id)
+                .limit(per_node + len(seen))
+            )
+        ).all()
         picked = 0
-        for tg_id, mid in by_chat.get(h.chat_id, []):
-            if not (h.msg_lo <= tg_id <= h.msg_hi) or mid in seen:
+        for mid, tg_id in rows:
+            if int(mid) in seen:
                 continue
-            out.append(Hit(mid, tg_id, h.score, "node", chat_id=h.chat_id, level=h.level))
-            seen.add(mid)
+            out.append(Hit(int(mid), int(tg_id), h.score, "node", chat_id=h.chat_id, level=h.level))
+            seen.add(int(mid))
             picked += 1
             if picked >= per_node:
                 break
     return out
+
+
+async def entity_search(
+    session: AsyncSession,
+    account_id: int,
+    entities: Sequence[str],
+    *,
+    chat_ids: Sequence[int] | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    limit: int = 40,
+) -> list[Hit]:
+    """`node_entities` bo'yicha **aniq tenglik** kanali (phase4/A).
+
+    Planner bergan satrlar (`@nurbek`, `#deploy`, `example.com`,
+    `t.me/c/12/34`) shakli bo'yicha turga ajratiladi
+    (`services/entities.parse_entity_query`) va indeksdan tenglik bilan
+    qidiriladi. Reyting yo'q — bu yerda "qanchalik o'xshash" degan savol
+    yo'q, shuning uchun tartib **yangilik** bo'yicha; ball esa RRF uchun
+    o'rindan hosil qilinadi.
+
+    Args:
+        session: DB sessiyasi.
+        account_id: `accounts.id` (indeks kaliti shu bilan boshlanadi).
+        entities: xom satrlar; tanilmagani jimgina tashlab yuboriladi.
+        chat_ids / since / until: `hybrid_search_multi` bilan bir xil doira.
+        limit: natija soni.
+
+    Returns:
+        `source="entity"` bo'lgan `Hit` ro'yxati (yangidan eskiga).
+    """
+    from app.services.entities import resolve_entities
+
+    pairs = resolve_entities(list(entities or []))
+    if not pairs:
+        return []
+    from app.db.models import NodeEntity
+
+    match = or_(
+        *[and_(NodeEntity.kind == kind, NodeEntity.value == value) for kind, value in pairs]
+    )
+    # `published_at` select ro'yxatida — `SELECT DISTINCT` da tartiblash ifodasi
+    # chiqishda ham bo'lishi shart (Postgres talabi).
+    stmt = (
+        select(Message.id, Message.tg_msg_id, Message.chat_id, Message.published_at)
+        .join(NodeEntity, NodeEntity.message_id == Message.id)
+        .join(Chat, Chat.id == Message.chat_id)
+        .where(
+            *_scope(account_id, chat_ids, since, until),
+            *_alive(),
+            NodeEntity.account_id == account_id,
+            match,
+        )
+        .order_by(Message.published_at.desc())
+        .distinct()
+        .limit(limit)
+    )
+    rows = (await session.execute(stmt)).all()
+    return [
+        Hit(
+            int(r[0]),
+            int(r[1]),
+            1.0 / (i + 1),
+            "entity",
+            chat_id=int(r[2]),
+            date=r[3] if len(r) > 3 else None,
+        )
+        for i, r in enumerate(rows)
+    ]
 
 
 async def hybrid_search_multi(
@@ -830,6 +915,7 @@ async def hybrid_search_multi(
     llm: LLM | None = None,
     weights: Sequence[float] | None = None,
     levels: Sequence[int] = (1, 2, 3),
+    entities: Sequence[str] | None = None,
 ) -> list[Hit]:
     """Akkaunt bo'ylab besh kanalli qidiruv: tsv_uz, tsv_ru, trigram, vektor, tugunlar.
 
@@ -853,6 +939,10 @@ async def hybrid_search_multi(
         llm: LLM fasadi (embedding va kengaytirish uchun).
         weights: besh kanal og'irligi.
         levels: tugun kanalidagi darajalar.
+        entities: planner ajratgan identifikatorlar (`@nurbek`, `#deploy`,
+            `example.com`). Berilsa — **oltinchi** RRF kirishi
+            (`entity_search`, og'irlik `W_ENTITY`); berilmasa kanal umuman
+            ishga tushmaydi va og'irliklar besh kanalli holicha qoladi.
 
     Returns:
         RRF bo'yicha tartiblangan `Hit` ro'yxati (`chat_id` to'ldirilgan).
@@ -868,7 +958,8 @@ async def hybrid_search_multi(
     if expansion is not None:
         uz_terms += [t for t in expansion.latin_terms() if t not in uz_terms]
         ru_terms += [t for t in expansion.cyrillic_terms() if t not in ru_terms]
-    if not uz_terms and not ru_terms:
+    ent_terms = list(entities or [])
+    if not uz_terms and not ru_terms and not ent_terms:
         return []
 
     conds = _scope(account_id, chat_ids, since, until)
@@ -930,7 +1021,25 @@ async def hybrid_search_multi(
     )
     nodes = await node_hits_to_messages(session, node_hits)
 
-    fused = rrf(uz, ru, tri, vec, nodes, weights=weights or DEFAULT_MULTI_RRF_WEIGHTS)
+    ents: list[Hit] = []
+    if ent_terms:
+        ents = await entity_search(
+            session,
+            account_id,
+            ent_terms,
+            chat_ids=chat_ids,
+            since=since,
+            until=until,
+            limit=wide,
+        )
+
+    lists = [uz, ru, tri, vec, nodes]
+    w = list(weights or DEFAULT_MULTI_RRF_WEIGHTS)
+    if ent_terms:
+        lists.append(ents)
+        if len(w) < len(lists):
+            w.append(W_ENTITY)
+    fused = rrf(*lists, weights=w)
     log.debug(
         "search.hybrid_multi",
         account_id=account_id,
@@ -940,6 +1049,7 @@ async def hybrid_search_multi(
         trigram=len(tri),
         vector=len(vec),
         nodes=len(node_hits),
+        entities=len(ents),
         fused=len(fused),
     )
     return fused[:limit]
@@ -977,7 +1087,8 @@ async def fetch_vectors(
     rows = (
         await session.execute(
             select(MessageEmbedding.message_id, MessageEmbedding.vector).where(
-                MessageEmbedding.message_id.in_(list(message_ids))
+                MessageEmbedding.message_id.in_(list(message_ids)),
+                *_embed_model(MessageEmbedding.model),
             )
         )
     ).all()
@@ -1347,6 +1458,7 @@ async def select_context(
 __all__ = [
     "DEFAULT_MULTI_RRF_WEIGHTS",
     "DEFAULT_RRF_WEIGHTS",
+    "ENTITY_MULTI_RRF_WEIGHTS",
     "STRICT_TRGM_THRESHOLD",
     "TRGM_THRESHOLD",
     "ContextBundle",
@@ -1356,6 +1468,7 @@ __all__ = [
     "compact_window",
     "detect_window",
     "digest_window",
+    "entity_search",
     "est_tokens",
     "fetch_vectors",
     "fit_budget",

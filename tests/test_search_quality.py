@@ -277,6 +277,21 @@ def test_estimate_cost() -> None:
     assert estimate_cost("x", "unknown-model", 1, 1) is None
 
 
+def test_estimate_cost_embedding_models() -> None:
+    """phase4/B — `gemini-embedding-2` tayyorligi (narx taxminiy, batch arzonroq)."""
+    from app.llm.pricing import BATCH_PRICES, PRICES
+
+    assert estimate_cost("gemini", "gemini-embedding-2", 1_000_000, 0) == 0.20
+    # API alias qaytarsa ham `estimate_cost` None qaytarmasligi kerak
+    assert estimate_cost("gemini", "models/gemini-embedding-2-preview", 1_000_000, 0) == 0.20
+    # batch narxi — yarmi
+    assert estimate_cost("gemini", "gemini-embedding-2", 1_000_000, 0, batch=True) == 0.10
+    # batch jadvalida yo'q model jonli narxda qoladi
+    assert estimate_cost("gemini", "gemini-2.5-flash", 1_000_000, 0, batch=True) == 0.30
+    # har batch narxi jonli narx bilan birga e'lon qilingan bo'lishi shart
+    assert set(BATCH_PRICES) <= set(PRICES)
+
+
 # ─── Claude prompt caching ───────────────────────────────────────────────────
 
 
@@ -539,7 +554,8 @@ async def test_node_search_without_terms_or_vector_is_empty() -> None:
 
 
 async def test_node_hits_to_messages_maps_back_to_level_zero_ids() -> None:
-    session = _FakeSession([(501, 10, 1), (502, 11, 1), (503, 12, 1)])
+    # L5: endi har tugun uchun alohida so'rov — ustunlar `(id, tg_msg_id)`
+    session = _FakeSession([(501, 10), (502, 11), (503, 12)])
     node_hits = [S.NodeHit(5, 1, 1, 0.9, "node_tsv", msg_lo=10, msg_hi=12)]
     hits = await S.node_hits_to_messages(session, node_hits, per_node=2)  # type: ignore[arg-type]
     assert [(h.message_id, h.tg_msg_id) for h in hits] == [(501, 10), (502, 11)]
@@ -590,7 +606,7 @@ async def test_hybrid_multi_folds_node_channel_into_rrf() -> None:
         [],  # vektor
         [(_node_row(5, lo=10, hi=11), 0.4)],  # tugun tsv
         [],  # tugun vektor
-        [(501, 10, 1)],  # tugun → level 0 xabarlar
+        [(501, 10)],  # tugun → level 0 xabarlar
     )
     hits = await S.hybrid_search_multi(session, 7, "crypto", llm=llm)  # type: ignore[arg-type]
     assert [h.message_id for h in hits] == [501]
@@ -602,3 +618,122 @@ async def test_hybrid_multi_without_terms_does_no_sql() -> None:
     session = _FakeSession()
     assert await S.hybrid_search_multi(session, 7, "и в на") == []  # type: ignore[arg-type]
     assert session.sql == []
+
+
+# ─── entity kanali (phase4/A) ────────────────────────────────────────────────
+
+
+async def test_entity_search_sql_shape() -> None:
+    session = _FakeSession([(11, 101, 3), (12, 102, 3)])
+    hits = await S.entity_search(  # type: ignore[arg-type]
+        session,
+        7,
+        ["@Nurbek", "#deploy", "nima gap"],
+        chat_ids=[3],
+        since=NOW - timedelta(days=7),
+        limit=20,
+    )
+    sql = session.sql[0]
+    assert "JOIN node_entities" in sql and "JOIN chats" in sql
+    assert "node_entities.account_id" in sql and "node_entities.kind" in sql
+    assert "chats.account_id" in sql and "messages.chat_id IN" in sql
+    assert "messages.published_at >=" in sql
+    assert "deleted_at IS NULL" in sql
+    assert "ORDER BY messages.published_at DESC" in sql
+    assert [(h.message_id, h.source) for h in hits] == [(11, "entity"), (12, "entity")]
+    assert hits[0].score > hits[1].score  # yangilik tartibi → kamayuvchi ball
+
+
+async def test_entity_search_without_recognizable_shapes_does_no_sql() -> None:
+    session = _FakeSession()
+    assert await S.entity_search(session, 7, ["to'lov muddati", ""]) == []  # type: ignore[arg-type]
+    assert await S.entity_search(session, 7, []) == []  # type: ignore[arg-type]
+    assert session.sql == []
+
+
+async def test_hybrid_multi_adds_the_entity_list_only_when_entities_are_given() -> None:
+    llm = _EmbedLLM()
+    without = _FakeSession([], [], [], [], [])
+    await S.hybrid_search_multi(without, 7, "crypto", llm=llm)  # type: ignore[arg-type]
+    assert all("node_entities" not in s for s in without.sql)
+
+    llm2 = _EmbedLLM()
+    with_ents = _FakeSession([], [], [], [], [], [(11, 101, 3)])
+    hits = await S.hybrid_search_multi(  # type: ignore[arg-type]
+        with_ents, 7, "crypto", llm=llm2, entities=["@nurbek"]
+    )
+    assert any("node_entities" in s for s in with_ents.sql)
+    assert [h.message_id for h in hits] == [11]
+    assert S.ENTITY_MULTI_RRF_WEIGHTS == (1.0, 1.0, 0.6, 1.2, 0.8, 1.1)
+    assert S.W_ENTITY == 1.1
+
+
+async def test_hybrid_multi_runs_for_entities_even_without_keywords() -> None:
+    """Savolda faqat stop-so'z bo'lsa ham entity kanali ishlaydi.
+
+    Bu holatda leksik/trigram kanallari umuman SQL bajarmaydi (termlar yo'q),
+    shuning uchun navbatda faqat: vektor → tugun (vektor) → entity.
+    """
+    llm = _EmbedLLM()
+    session = _FakeSession([], [], [(11, 101, 3)])
+    hits = await S.hybrid_search_multi(  # type: ignore[arg-type]
+        session, 7, "и в на", llm=llm, entities=["@nurbek"]
+    )
+    assert [h.message_id for h in hits] == [11]
+
+
+# ─── F1: embedding modeli filtri va tugun adolati ────────────────────────────
+
+
+async def test_node_hits_to_messages_gives_every_node_its_share() -> None:
+    """L5: umumiy `LIMIT` o'rniga har tugun uchun alohida so'rov.
+
+    Ilgari bitta `OR` so'rovi `chat_id, tg_msg_id` bo'yicha tartiblanib
+    kesilardi — birinchi chatlar butun byudjetni yeb, ro'yxat oxiridagi
+    tugunlarga hech narsa qolmasdi.
+    """
+    session = _FakeSession([(501, 10)], [(901, 10)], [(701, 10)])
+    node_hits = [
+        S.NodeHit(1, 1, 1, 0.9, "node_tsv", msg_lo=10, msg_hi=12),
+        S.NodeHit(2, 9, 1, 0.8, "node_tsv", msg_lo=10, msg_hi=12),
+        S.NodeHit(3, 5, 1, 0.7, "node_tsv", msg_lo=10, msg_hi=12),
+    ]
+    hits = await S.node_hits_to_messages(session, node_hits, per_node=1)  # type: ignore[arg-type]
+    assert len(session.sql) == 3  # har tugun — o'z so'rovi
+    assert [h.chat_id for h in hits] == [1, 9, 5]  # RRF tartibi saqlanadi
+    assert [h.message_id for h in hits] == [501, 901, 701]
+
+
+def _embed_model_name() -> str:
+    from app.llm import embed_model_name
+
+    return embed_model_name()
+
+
+async def test_vector_channels_filter_by_the_current_embed_model() -> None:
+    """phase4/B: turli modellarning vektorlari bitta cosine'da aralashmaydi."""
+    want = _embed_model_name()
+    llm = _EmbedLLM()
+
+    session = _FakeSession([(1,)], [(1, 101, 0.2)])
+    await S.vector_search(session, 1, "to'lov", llm=llm)  # type: ignore[arg-type]
+    assert all("message_embeddings.model" in q for q in session.sql)
+    assert want  # konfiguratsiyada model nomi bor — filtr haqiqatan qo'yiladi
+
+    multi = _FakeSession([], [], [(1, 101, 1, 0.2)], [], [])
+    await S.hybrid_search_multi(multi, 7, "crypto", llm=_EmbedLLM())  # type: ignore[arg-type]
+    vector_sql = [q for q in multi.sql if "message_embeddings" in q]
+    assert vector_sql and all("message_embeddings.model" in q for q in vector_sql)
+
+
+async def test_node_vector_channel_filters_by_the_current_embed_model() -> None:
+    session = _FakeSession([], [(_node_row(9, level=2), 0.1)])
+    await S.node_search(session, 7, [0.1, 0.2], text="to'lov")  # type: ignore[arg-type]
+    node_sql = [q for q in session.sql if "retrieval_node_embeddings" in q]
+    assert node_sql and all("retrieval_node_embeddings.model" in q for q in node_sql)
+
+
+async def test_fetch_vectors_filters_by_the_current_embed_model() -> None:
+    session = _FakeSession([])
+    await S.fetch_vectors(session, [1, 2, 3])  # type: ignore[arg-type]
+    assert "message_embeddings.model" in session.sql[0]

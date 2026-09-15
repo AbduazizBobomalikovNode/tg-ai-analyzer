@@ -28,12 +28,13 @@ render yo'lidan foydalanadi, ikkinchisini sinxron saqlashga hojat yo'q.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Chat, ChatType, Message, RetrievalNode, RetrievalNodeEmbedding
@@ -404,6 +405,16 @@ async def build_episodes(
         report.deleted = len(stale)
 
     await session.flush()
+    if report.updated:
+        # L6: qayta qurilgan epizodning vektori o'chirildi — tugun endi
+        # qidiruvning vektor kanalidan **tushib qoladi**. Cron 15 daqiqada bir
+        # keladi, lekin uni darhol turtib qo'yamiz (job id bitta — dublikat
+        # yig'ilmaydi). Navbat yo'q bo'lsa (test, redis o'chiq) — jim o'tamiz.
+        with contextlib.suppress(Exception):
+            from app.worker.queue import enqueue
+
+            await enqueue("embed_nodes_task", job_id="embed_nodes:after_episodes", defer_by=30)
+    await link_entities(session, chat_id, from_msg_id=from_msg_id)
     log.info(
         "episodes.built",
         chat_id=chat_id,
@@ -414,6 +425,42 @@ async def build_episodes(
         deleted=report.deleted,
     )
     return report
+
+
+#: `node_entities.node_id` ni epizod oynasi bo'yicha to'ldiruvchi **bitta**
+#: `UPDATE`. Entity xabar bilan birga yoziladi (epizoddan oldin), shuning uchun
+#: bog'lanish shu yerda — epizodlar qurilgach — qo'yiladi. `msg_lo/msg_hi`
+#: `tg_msg_id` fazosida, `node_entities.message_id` esa `messages.id` — shu
+#: sabab `messages` bo'ylab join bor.
+_LINK_ENTITIES_SQL = """
+UPDATE node_entities e
+   SET node_id = n.id
+  FROM messages m, retrieval_nodes n
+ WHERE e.message_id = m.id
+   AND m.chat_id = :chat_id
+   AND m.tg_msg_id >= :from_msg_id
+   AND n.chat_id = :chat_id
+   AND n.level = :level
+   AND m.tg_msg_id BETWEEN n.msg_lo AND n.msg_hi
+   AND e.node_id IS DISTINCT FROM n.id
+"""
+
+
+async def link_entities(session: AsyncSession, chat_id: int, *, from_msg_id: int = 0) -> int:
+    """`node_entities.node_id` ← epizod oynasi (phase4/A) — bitta `UPDATE`.
+
+    Xatosi epizod qurishni **to'xtatmaydi**: bog'lanish qulaylik kanali
+    (tugun darajasidagi entity statistikasi), epizodning o'zi emas.
+    """
+    try:
+        res = await session.execute(
+            text(_LINK_ENTITIES_SQL),
+            {"chat_id": chat_id, "from_msg_id": int(from_msg_id), "level": LEVEL_EPISODE},
+        )
+    except Exception as exc:  # jadval hali yo'q bo'lsa (migratsiya 0012 gacha) ham tinch
+        log.warning("episodes.link_entities_failed", chat_id=chat_id, error=str(exc)[:200])
+        return 0
+    return int(getattr(res, "rowcount", 0) or 0)
 
 
 def _to_node(ep: Episode, *, account_id: int, chat_id: int) -> RetrievalNode:
@@ -449,6 +496,7 @@ __all__ = [
     "build_from_messages",
     "content_hash",
     "episode_text",
+    "link_entities",
     "make_episode",
     "reply_components",
     "segment",
