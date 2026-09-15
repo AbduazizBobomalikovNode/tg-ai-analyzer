@@ -184,6 +184,161 @@
     } catch (err) { console.warn(err); }
   });
 
+  // ── deep search (SSE) ────────────────────────────────────────────────────
+  // `EventSource` POST qila olmaydi → `fetch` + ReadableStream. Javob matni
+  // faqat md.js orqali chiziladi (yagona renderer), qolgan hamma narsa
+  // `textContent` yoki `esc()` bilan.
+  const safeHref = (u) => (typeof u === "string" && /^(https?:\/\/|tg:\/\/)/i.test(u) ? u : null);
+
+  function deepNode() {
+    const div = document.createElement("div");
+    div.className = "msg assistant deep";
+    div.innerHTML = `<div class="deep-status"><span class="typing"><i></i><i></i><i></i></span> <span class="deep-step"></span></div>
+      <div class="deep-chips" hidden></div>
+      <div class="deep-answer"></div>
+      <div class="deep-coverage" hidden></div>
+      <span class="meta" hidden></span>`;
+    return div;
+  }
+
+  function renderChips(wrap, clusters) {
+    if (!clusters || !clusters.length) return;
+    wrap.innerHTML = clusters.slice(0, 12).map((c) => {
+      const when = [c.first_seen, c.last_seen].filter(Boolean).map((d) => String(d).slice(0, 10)).join(" … ");
+      const title = [(c.chats || []).join(", "), when].filter(Boolean).join(" · ");
+      return `<span class="chip" title="${esc(title)}">${esc(c.label || "…")} <b>${c.size}</b></span>`;
+    }).join("");
+    wrap.hidden = false;
+  }
+
+  function renderCoverage(wrap, cov, cost) {
+    const r = cov.range || {};
+    const rows = [
+      `${esc(t("web.deep.cov_chats"))}: <b>${cov.chats_searched}/${cov.chats_total}</b>`,
+      `${esc(t("web.deep.cov_scanned"))}: <b>${cov.messages_scanned}</b>`,
+      `${esc(t("web.deep.cov_rounds"))}: <b>${cov.rounds}</b>`,
+      `${esc(t("web.deep.cov_confidence"))}: <b>${esc(t(`web.deep.conf_${cov.confidence}`))}</b>`,
+    ];
+    if (r.from && r.to) rows.splice(2, 0, `${esc(t("web.deep.cov_range"))}: <b>${esc(String(r.from).slice(0, 10))} … ${esc(String(r.to).slice(0, 10))}</b>`);
+    if (cost != null) rows.push(`${esc(t("web.deep.cov_cost"))}: <b>$${cost < 0.01 ? cost.toFixed(4) : cost.toFixed(3)}</b>`);
+    let html = `<div class="cov-head">${esc(t("web.deep.coverage"))}</div><div class="cov-rows">${rows.join(" · ")}</div>`;
+    if (cov.gaps && cov.gaps.length) {
+      html += `<div class="cov-gaps">⚠️ ${esc(t("web.deep.gaps"))}: ${esc(cov.gaps.slice(0, 8).join(", "))}${cov.gaps.length > 8 ? ` (+${cov.gaps.length - 8})` : ""}</div>`;
+    }
+    if (cov.truncated) html += `<div class="cov-gaps">⚠️ ${esc(t("web.deep.truncated"))}</div>`;
+    wrap.innerHTML = html;
+    wrap.hidden = false;
+  }
+
+  // Sitatalar (#123) → havola. DOM matn tugunlari bo'ylab yuriladi — HTML
+  // qayta parse qilinmaydi, ya'ni escape-first invarianti buzilmaydi.
+  function linkifyCitations(root, links) {
+    if (!links || !Object.keys(links).length) return;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const targets = [];
+    while (walker.nextNode()) {
+      const n = walker.currentNode;
+      if (!n.parentElement || n.parentElement.closest("a, code, pre")) continue;
+      if (/#\d/.test(n.nodeValue || "")) targets.push(n);
+    }
+    for (const n of targets) {
+      const s = n.nodeValue;
+      const frag = document.createDocumentFragment();
+      let last = 0;
+      const re = /#(\d{1,12})/g;
+      let m;
+      while ((m = re.exec(s)) !== null) {
+        frag.appendChild(document.createTextNode(s.slice(last, m.index)));
+        const url = safeHref(links[m[1]]);
+        if (url) {
+          const a = document.createElement("a");
+          a.href = url; a.target = "_blank"; a.rel = "noopener noreferrer"; a.className = "cite";
+          a.textContent = m[0];
+          frag.appendChild(a);
+        } else frag.appendChild(document.createTextNode(m[0]));
+        last = m.index + m[0].length;
+      }
+      frag.appendChild(document.createTextNode(s.slice(last)));
+      n.parentNode.replaceChild(frag, n);
+    }
+  }
+
+  function parseFrame(frame) {
+    let kind = "message", data = "";
+    for (const line of frame.split("\n")) {
+      if (line.startsWith("event:")) kind = line.slice(6).trim();
+      else if (line.startsWith("data:")) data += line.slice(5).trim();
+    }
+    if (!data) return null;
+    try { return { kind, data: JSON.parse(data) }; } catch (_) { return null; }
+  }
+
+  async function sendDeep(text, node) {
+    const stepEl = node.querySelector(".deep-step");
+    const chips = node.querySelector(".deep-chips");
+    const answerEl = node.querySelector(".deep-answer");
+    const covEl = node.querySelector(".deep-coverage");
+    const metaEl = node.querySelector(".meta");
+    const status = node.querySelector(".deep-status");
+    const step = (k, vars) => { stepEl.textContent = t(k, vars); };
+    step("web.deep.step_plan");
+
+    const res = await fetch("/api/deep/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Requested-With": "fetch" },
+      body: JSON.stringify({ conversation_id: state.convId, question: text, deep: true }),
+      credentials: "same-origin",
+    });
+    if (res.status === 401) { window.location.href = "/login"; throw new Error("unauthorized"); }
+    if (!res.ok || !res.body) {
+      let d = {};
+      try { d = (await res.json()).detail || {}; } catch (_) { /* bo'sh */ }
+      const err = new Error(t(d.code || "error.generic") + (d.detail ? ` (${d.detail})` : ""));
+      err.code = d.code; throw err;
+    }
+
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "", answer = "", total = 0, searched = 0, failed = null;
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf("\n\n")) >= 0) {
+        const ev = parseFrame(buf.slice(0, idx));
+        buf = buf.slice(idx + 2);
+        if (!ev) continue;
+        const d = ev.data || {};
+        if (ev.kind === "plan") { total = (d.subqueries || []).length; step("web.deep.step_search", { n: 0, m: total }); }
+        else if (ev.kind === "search") { searched++; step("web.deep.step_search", { n: searched, m: total || searched }); }
+        else if (ev.kind === "cluster") { renderChips(chips, d.clusters); step("web.deep.step_cluster", { n: (d.clusters || []).length }); }
+        else if (ev.kind === "rerank") { step("web.deep.step_rank", { n: d.kept || 0 }); }
+        else if (ev.kind === "token") { answer += d.text || ""; answerEl.innerHTML = md(answer); step("web.deep.step_write"); scrollBottom(); }
+        else if (ev.kind === "coverage") { renderCoverage(covEl, d, null); }
+        else if (ev.kind === "done") {
+          status.hidden = true;
+          const links = {};
+          for (const c of d.citations || []) if (c.link) links[String(c.id)] = c.link;
+          linkifyCitations(answerEl, links);
+          if (d.cost_usd != null) { const rows = covEl.querySelector(".cov-rows"); if (rows) rows.insertAdjacentHTML("beforeend", ` · ${esc(t("web.deep.cov_cost"))}: <b>$${d.cost_usd < 0.01 ? d.cost_usd.toFixed(4) : d.cost_usd.toFixed(3)}</b>`); }
+          metaEl.textContent = `${d.provider || ""} · ${d.model || ""} · ${fmtN(d.tokens_in || 0)}→${fmtN(d.tokens_out || 0)}${d.latency_ms ? ` · ${(d.latency_ms / 1000).toFixed(1)}s` : ""}`;
+          metaEl.hidden = false;
+          if (d.assistant_message_id) node.dataset.mid = d.assistant_message_id;
+        } else if (ev.kind === "error") {
+          failed = new Error(t(`chat.err.${d.code}`) === `chat.err.${d.code}` ? (d.detail || d.code) : t(`chat.err.${d.code}`));
+          failed.code = `chat.err.${d.code}`;
+        }
+      }
+    }
+    if (failed) throw failed;
+    window.TGAI.hydrate(node).then(scrollBottom);
+    await loadConvs();
+    const cur = state.conversations.find((c) => c.id === state.convId);
+    if (cur) el.convTitle.textContent = cur.title || t("web.chat.title");
+    el.del.hidden = false;
+  }
+
   function renderMessages(items) {
     el.messages.innerHTML = "";
     if (!items.length) { el.messages.appendChild(el.empty); el.empty.hidden = false; return; }
@@ -370,13 +525,22 @@
     const typing = document.createElement("div");
     typing.className = "msg assistant"; typing.innerHTML = `<span class="typing"><i></i><i></i><i></i></span> <span class="muted">${esc(t("web.chat.thinking"))}</span>`;
     el.messages.appendChild(typing); scrollBottom();
+    let live = typing;
     el.input.value = ""; autosize();
     try {
       if (!state.convId) {
         const c = await api("POST", "/api/conversations", { account_id: state.accountId });
         state.convId = c.id;
       }
-      const body = { text, deep: el.deep.checked, mode: el.mode.value, account_id: state.accountId || null };
+      if (el.deep.checked) {
+        // "Chuqur tahlil" — alohida quvur (/api/deep/stream), oqimli javob.
+        const dn = deepNode();
+        typing.replaceWith(dn);
+        live = dn;
+        await sendDeep(text, dn);
+        return;
+      }
+      const body = { text, deep: false, mode: el.mode.value, account_id: state.accountId || null };
       if (state.peerId && state.accountId) body.context = { account_id: state.accountId, peer_id: state.peerId, limit: +el.ctxLimit.value, strategy: el.strategy.value };
       const r = await api("POST", `/api/conversations/${state.convId}/messages`, body);
       const node = msgNode({ id: r.assistant_message_id, role: "assistant", content: r.text, model: r.model, provider: r.provider, tokens_in: r.tokens_in, tokens_out: r.tokens_out, context: r.context, latency_ms: r.latency_ms, cost_usd: r.cost_usd, actions: r.actions || [] });
@@ -388,7 +552,7 @@
       if (cur) el.convTitle.textContent = cur.title || t("web.chat.title");
       el.del.hidden = false;
     } catch (err) {
-      typing.className = "msg error"; typing.textContent = err.message;
+      live.className = "msg error"; live.textContent = err.message;
       if (err.code === "pool.err.session_revoked") { el.accountWarn.textContent = t("web.chat.session_revoked"); el.accountWarn.hidden = false; }
     } finally {
       state.busy = false; el.send.disabled = false; scrollBottom(); el.input.focus();

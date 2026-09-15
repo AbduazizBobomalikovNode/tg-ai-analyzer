@@ -135,7 +135,9 @@ async def delete_conversation(session: AsyncSession, user_id: int, conversation_
 # ─── javob ───────────────────────────────────────────────────────────────────
 
 
-MODES = ("auto", "agent", "direct")
+# `deep` — `services/deep_search.py` quvuri (hech qachon `auto` dan tanlanmaydi:
+# u ≈10x qimmat, foydalanuvchi uni UI'da aniq yoqadi — arxitektura v2, 11-bo'lim).
+MODES = ("auto", "agent", "direct", "deep")
 _GREETING = re.compile(
     r"^\s*(salom|assalomu|hello|hi|hey|привет|здравствуй|rahmat|спасибо|thanks|ok|xop|ha|yo'q)\b[\s!.,]*$",
     re.I,
@@ -150,7 +152,7 @@ def choose_mode(
     Agent: ma'lumot ustida ishlash kerak (sinxron chat bor), savol salomlashish emas,
     va foydalanuvchi aniq strategiya tanlamagan (aniq `search/window/recent` — direct arzon).
     """
-    if mode in ("agent", "direct"):
+    if mode in ("agent", "direct", "deep"):
         return mode
     if not has_synced_chats:
         return "direct"
@@ -208,6 +210,23 @@ async def send_message(
     chosen = choose_mode(
         mode, text=text, has_synced_chats=await _has_synced_chats(session, acc_id), context=context
     )
+    if chosen == "deep":
+        # Deep quvuri o'z sessiyalarini ochadi (parallel kanallar) va ikkala
+        # turn'ni **o'zi** yozadi — shuning uchun user qatorini bu yerda
+        # yaratmaymiz (ikki yozuvchi bo'lmasin).
+        if acc_id is None:
+            raise ChatError("context", "no_account")
+        return await _send_via_deep(
+            user_id=user_id,
+            conversation=conversation,
+            text=text,
+            account_id=acc_id,
+            locale=locale,
+            deep=deep,
+            started=started,
+            llm=llm,
+        )
+
     # User turn'i **bir marta** yoziladi: agent yo'li uzilsa ham (LLMError →
     # direct rejim) shu yozuv qayta ishlatiladi, ikkinchi nusxa yaratilmaydi.
     user_row = ConversationMessage(conversation_id=conversation.id, role="user", content=text)
@@ -338,6 +357,66 @@ async def send_message(
         context_used=context_used,
         latency_ms=latency_ms,
         cost_usd=cost,
+    )
+
+
+async def _send_via_deep(
+    *,
+    user_id: int,
+    conversation: Conversation,
+    text: str,
+    account_id: int,
+    locale: str,
+    deep: bool,
+    started: float,
+    llm: LLM | None = None,
+) -> Reply:
+    """`mode="deep"` → `services/deep_search.run_deep_search` (oqimsiz variant).
+
+    Oqimli variant `web/routers/deep.py` da; ikkalasi ham **bitta** quvurni
+    chaqiradi va yozuvni o'sha quvur bajaradi.
+    """
+    from app.db.base import session_scope
+    from app.services.deep_search import DeepSearchError, run_deep_search
+
+    try:
+        result = await run_deep_search(
+            session_scope,
+            account_id,
+            conversation.id,
+            text,
+            locale=locale,
+            deep=deep,
+            llm=llm,
+        )
+    except DeepSearchError as exc:
+        raise ChatError(exc.code, exc.detail) from exc
+
+    context_used: dict[str, Any] = {
+        "mode": "deep",
+        "strategy": "deep",
+        "source": "deep",
+        "account_id": account_id,
+        "messages": result.evidence_count,
+        "coverage": result.coverage.to_dict(),
+        "clusters": result.clusters,
+        "citations": result.citations,
+        "rounds": result.coverage.rounds,
+        "candidates": result.candidates,
+        "run_id": result.run_id,
+    }
+    return Reply(
+        conversation_id=conversation.id,
+        user_message_id=result.user_message_id or 0,
+        assistant_message_id=result.assistant_message_id or 0,
+        text=result.answer,
+        model=result.model,
+        provider=result.provider,
+        tokens_in=result.tokens_in,
+        tokens_out=result.tokens_out,
+        context_used=context_used,
+        latency_ms=result.latency_ms or int((time.monotonic() - started) * 1000),
+        cost_usd=result.cost_usd,
     )
 
 

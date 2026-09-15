@@ -21,6 +21,10 @@ from app.db.models import Conversation, ConversationMessage
 from app.web.security import RateLimiter
 
 chat_rate = RateLimiter(get_settings().chat_rate_per_minute, 60)
+# Deep search alohida, qattiqroq shift: bitta deep so'rov ≈ 10x oddiy so'rov
+# narxi (arxitektura v2, 11-bo'lim), shuning uchun umumiy chat kvotasidan
+# alohida hisoblanadi.
+deep_rate = RateLimiter(max(get_settings().deep_rate_per_minute, 1), 60)
 
 
 @dataclass(slots=True)
@@ -84,6 +88,16 @@ async def daily_usage(session: AsyncSession, user_id: int) -> Usage:
     )
 
 
+async def check_daily_budget(session: AsyncSession, user_id: int) -> str | None:
+    """Byudjet holati — **xato ko'tarmaydi**: `"tokens"` / `"cost"` / `None`.
+
+    Deep search uchun kerak: u so'rovni HTTP xatosi bilan emas, `error`
+    hodisasi bilan to'xtatadi (SSE oqimi allaqachon ochilgan bo'lishi mumkin),
+    shuning uchun tekshiruv va uni qanday e'lon qilish bir-biridan ajratilgan.
+    """
+    return (await daily_usage(session, user_id)).exceeded
+
+
 async def assert_within_budget(session: AsyncSession, user_id: int) -> Usage:
     from app.services.chat_service import ChatError
 
@@ -95,3 +109,10 @@ async def assert_within_budget(session: AsyncSession, user_id: int) -> Usage:
 
 def check_chat_rate(user_id: int) -> bool:
     return chat_rate.check(str(user_id))
+
+
+def check_deep_rate(user_id: int) -> bool:
+    """Deep so'rov shifti. `DEEP_RATE_PER_MINUTE=0` — rejim o'chiq (hech biri o'tmaydi)."""
+    if get_settings().deep_rate_per_minute <= 0:
+        return False
+    return deep_rate.check(str(user_id))

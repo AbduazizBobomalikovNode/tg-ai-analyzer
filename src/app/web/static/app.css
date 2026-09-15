@@ -858,3 +858,33 @@ a.topbar-ctx:hover { background: var(--accent-soft-2); }
   .topbar { padding: .55rem .65rem; gap: .35rem; }
   .topbar-title { font-size: .94rem; }
 }
+
+/* ── deep search (SSE): holat chizig'i, klaster chiplari, qamrov paneli ───── */
+.msg.deep .deep-status {
+  display: flex; align-items: center; gap: .45rem;
+  font-size: .74rem; color: var(--faint); margin-bottom: .45rem;
+}
+.msg.deep .deep-chips {
+  display: flex; flex-wrap: wrap; gap: .3rem; margin-bottom: .55rem;
+}
+.msg.deep .chip {
+  font-size: .72rem; line-height: 1.5; padding: .12rem .5rem;
+  border: 1px solid var(--border); border-radius: 999px;
+  background: var(--panel-2); color: var(--text); max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.msg.deep .chip b { color: var(--accent-text); font-weight: 600; }
+.msg.deep .deep-coverage {
+  margin-top: .7rem; padding: .5rem .6rem; font-size: .72rem;
+  border: 1px solid var(--border-soft); border-radius: var(--r-md, 8px);
+  background: var(--panel-2); color: var(--muted);
+}
+.msg.deep .cov-head {
+  font-weight: 600; color: var(--text); margin-bottom: .2rem;
+  text-transform: uppercase; letter-spacing: .04em; font-size: .66rem;
+}
+.msg.deep .cov-gaps { margin-top: .3rem; color: var(--faint); }
+.msg a.cite {
+  font-variant-numeric: tabular-nums; text-decoration: none;
+  color: var(--accent-text); border-bottom: 1px dotted currentColor;
+}

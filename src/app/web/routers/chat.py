@@ -47,8 +47,9 @@ class MessageIn(BaseModel):
     context: ContextIn | None = None
     deep: bool = False
     # auto — agent (tool'lar) yoki direct'ni o'zi tanlaydi; agent — majburan tool'lar;
-    # direct — faqat oldindan berilgan kontekst
-    mode: str = Field(default="auto", pattern="^(auto|agent|direct)$")
+    # direct — faqat oldindan berilgan kontekst; deep — `deep_search` quvuri
+    # (oqimsiz yo'l; SSE varianti `routers/deep.py` da)
+    mode: str = Field(default="auto", pattern="^(auto|agent|direct|deep)$")
     account_id: int | None = None  # agent rejimi uchun (chat tanlanmagan bo'lsa ham)
 
 

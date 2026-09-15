@@ -8,6 +8,8 @@
     tgai_llm_cost_usd_total{provider,model}
     tgai_tool_calls_total{tool,ok}, tgai_write_actions_total{tool,status}
     tgai_sync_messages_total, tgai_floodwait_total, tgai_snapshot_posts_total
+    tgai_deep_runs_total{status}, tgai_deep_rounds, tgai_deep_candidates,
+    tgai_deep_cost_usd_total, tgai_deep_latency_seconds
   api: `GET /metrics` (`METRICS_TOKEN` bo'lsa `?token=`/Bearer talab qilinadi).
   worker jarayoni alohida — uning metrikalari heartbeat + DB orqali (`/api/stats`).
 * Heartbeat — worker har cron/ish oxirida Redis'ga `tgai:hb:<name>` = ISO vaqt
@@ -54,6 +56,20 @@ LLM_LATENCY = Histogram(
     buckets=(0.5, 1, 2, 5, 10, 20, 40, 90),
 )
 TOOL_CALLS = Counter("tgai_tool_calls_total", "Agent tool chaqiruvlari", ["tool", "ok"])
+# Deep search (2-bosqich): status = ok | timeout | budget | error
+DEEP_RUNS = Counter("tgai_deep_runs_total", "Deep search yugurishlari", ["status"])
+DEEP_ROUNDS = Histogram("tgai_deep_rounds", "Deep search raundlari", buckets=(1, 2, 3))
+DEEP_CANDIDATES = Histogram(
+    "tgai_deep_candidates",
+    "Deep search nomzodlari (RRF'dan keyin)",
+    buckets=(0, 10, 25, 50, 100, 200, 400),
+)
+DEEP_COST = Counter("tgai_deep_cost_usd_total", "Deep search taxminiy xarajati, USD")
+DEEP_LATENCY = Histogram(
+    "tgai_deep_latency_seconds",
+    "Deep search to'liq vaqti",
+    buckets=(5, 10, 20, 30, 60, 90, 120, 180),
+)
 WRITE_ACTIONS = Counter("tgai_write_actions_total", "Yozish amallari", ["tool", "status"])
 SYNC_MESSAGES = Counter("tgai_sync_messages_total", "Sinxronlangan xabarlar")
 FLOODWAIT = Counter("tgai_floodwait_total", "FloodWait hodisalari")

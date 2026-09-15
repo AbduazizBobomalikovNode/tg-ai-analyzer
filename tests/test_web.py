@@ -352,3 +352,194 @@ def test_auth_resend_unknown_flow(client: TestClient) -> None:
     r = client.post("/api/auth/resend", json={"flow_id": "yo-q-bunday-flow"}, headers=H)
     assert r.status_code == 400
     assert r.json()["detail"]["code"] == "auth.err.flow_expired"
+
+
+# ─── deep search API (2-bosqich) ─────────────────────────────────────────────
+
+
+@pytest.fixture
+def deep_client(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    """`/api/deep*` uchun: egalik tekshiruvi soxta DB ustida."""
+    from app.web.routers import deep as deep_router
+
+    class _Session:
+        async def get(self, model: Any, pk: int) -> Any:
+            return SimpleNamespace(id=pk, user_id=7)
+
+    class _Scope:
+        async def __aenter__(self) -> Any:
+            return _Session()
+
+        async def __aexit__(self, *a: Any) -> None: ...
+
+    async def fake_conv(db: Any, user_id: int, conversation_id: int) -> Any:
+        if conversation_id == 404:
+            raise cs.ChatError("not_found")
+        return SimpleNamespace(id=conversation_id, user_id=user_id, account_id=3)
+
+    monkeypatch.setattr(deep_router, "session_scope", lambda: _Scope())
+    monkeypatch.setattr(deep_router.cs, "get_conversation", fake_conv)
+    monkeypatch.setattr(deep_router.limits, "check_deep_rate", lambda uid: True)
+    return client
+
+
+def test_deep_api_requires_login_and_csrf(deep_client: TestClient) -> None:
+    body = {"conversation_id": 1, "question": "q"}
+    # CSRF header'siz — 403 (dependency identity'dan oldin ishlaydi)
+    for path in ("/api/deep", "/api/deep/stream"):
+        r = deep_client.post(path, json=body)
+        assert r.status_code == 403 and r.json()["detail"]["code"] == "csrf"
+    # header bor, lekin login yo'q — 401
+    assert deep_client.post("/api/deep", json=body, headers=H).status_code == 401
+    assert deep_client.post("/api/deep/stream", json=body, headers=H).status_code == 401
+
+
+def test_deep_api_validates_and_maps_errors(
+    deep_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.services import deep_search as DS
+    from app.web.routers import deep as deep_router
+
+    deep_client.cookies.set(sec.SESSION_COOKIE, sec.issue_session(7))
+    assert deep_client.post("/api/deep", json={"conversation_id": 1}, headers=H).status_code == 422
+    r = deep_client.post("/api/deep", json={"conversation_id": 404, "question": "q"}, headers=H)
+    assert r.status_code == 404 and r.json()["detail"]["code"] == "chat.err.not_found"
+
+    async def over_budget(*a: Any, **kw: Any) -> Any:
+        raise DS.DeepSearchError("budget", "cost")
+
+    monkeypatch.setattr(deep_router.DS, "run_deep_search", over_budget)
+    r = deep_client.post("/api/deep", json={"conversation_id": 1, "question": "q"}, headers=H)
+    assert r.status_code == 429 and r.json()["detail"]["code"] == "chat.err.budget"
+
+    monkeypatch.setattr(deep_router.limits, "check_deep_rate", lambda uid: False)
+    r = deep_client.post("/api/deep", json={"conversation_id": 1, "question": "q"}, headers=H)
+    assert r.status_code == 429 and r.json()["detail"]["code"] == "chat.err.rate_limited"
+
+
+def test_deep_once_returns_result_json(
+    deep_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.services import deep_search as DS
+    from app.web.routers import deep as deep_router
+
+    async def fake_run(factory: Any, account_id: int, conv_id: int, q: str, **kw: Any) -> Any:
+        assert account_id == 3 and conv_id == 1
+        return DS.DeepResult(answer="javob #101", citations=[{"id": 101, "link": "x"}])
+
+    monkeypatch.setattr(deep_router.DS, "run_deep_search", fake_run)
+    deep_client.cookies.set(sec.SESSION_COOKIE, sec.issue_session(7))
+    r = deep_client.post("/api/deep", json={"conversation_id": 1, "question": "q"}, headers=H)
+    assert r.status_code == 200
+    assert r.json()["answer"] == "javob #101" and r.json()["coverage"]["chats_total"] == 0
+
+
+def test_deep_stream_yields_ordered_sse_events(
+    deep_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.services import deep_search as DS
+    from app.web.routers import deep as deep_router
+
+    async def fake_stream(factory: Any, account_id: int, conv_id: int, q: str, **kw: Any) -> Any:
+        for kind, data in (
+            ("plan", {"subqueries": ["a"]}),
+            ("search", {"hits": 2}),
+            ("token", {"text": 'ja"vob'}),
+            ("done", {"citations": [], "cost_usd": 0.01}),
+        ):
+            yield DS.DeepEvent(kind, data)
+
+    monkeypatch.setattr(deep_router.DS, "stream_deep_search", fake_stream)
+    deep_client.cookies.set(sec.SESSION_COOKIE, sec.issue_session(7))
+    r = deep_client.post(
+        "/api/deep/stream", json={"conversation_id": 1, "question": "q"}, headers=H
+    )
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/event-stream")
+    kinds = [ln[len("event: ") :] for ln in r.text.splitlines() if ln.startswith("event: ")]
+    assert kinds == ["plan", "search", "token", "done"]
+    assert '"text": "ja\\"vob"' in r.text
+
+
+def test_deep_disabled_by_config(deep_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.web.routers import deep as deep_router
+
+    s = deep_router.get_settings()
+    monkeypatch.setattr(s, "deep_search_enabled", False)
+    deep_client.cookies.set(sec.SESSION_COOKIE, sec.issue_session(7))
+    r = deep_client.post("/api/deep", json={"conversation_id": 1, "question": "q"}, headers=H)
+    assert r.status_code == 403 and r.json()["detail"]["code"] == "chat.err.disabled"
+
+
+def test_chat_page_has_deep_toggle(client: TestClient) -> None:
+    client.cookies.set(sec.SESSION_COOKIE, sec.issue_session(7))
+    r = client.get("/chat?lang=en")
+    assert 'id="deep"' in r.text and 'id="deep-wrap"' in r.text
+
+
+def test_chat_api_accepts_deep_mode(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`POST /api/conversations/{id}/messages` da `mode="deep"` — 422 emas.
+
+    Router `mode` ni regex bilan cheklaydi; `deep` ro'yxatda bo'lmasa deep
+    search'ga oqimsiz yo'l butunlay yopiq qolardi (SSE'dan boshqa yo'l yo'q).
+    """
+    from app.services import limits as LIM
+    from app.web.routers import chat as chat_router
+
+    class _Session:
+        async def get(self, model: Any, pk: int) -> Any:
+            return SimpleNamespace(id=pk, user_id=7)
+
+    class _Scope:
+        async def __aenter__(self) -> Any:
+            return _Session()
+
+        async def __aexit__(self, *a: Any) -> None: ...
+
+    async def fake_conv(db: Any, user_id: int, conversation_id: int) -> Any:
+        return SimpleNamespace(id=conversation_id, user_id=user_id, account_id=3)
+
+    async def no_budget(db: Any, user_id: int) -> None:
+        return None
+
+    seen: dict[str, Any] = {}
+
+    async def fake_send(db: Any, **kw: Any) -> Any:
+        seen.update(kw)
+        return SimpleNamespace(
+            conversation_id=1,
+            user_message_id=10,
+            assistant_message_id=11,
+            text="chuqur javob #101",
+            model="fake",
+            provider="fake",
+            tokens_in=1,
+            tokens_out=2,
+            context_used={"mode": "deep"},
+            latency_ms=5,
+            cost_usd=0.0,
+        )
+
+    async def no_eval(*a: Any, **kw: Any) -> None:
+        return None
+
+    monkeypatch.setattr(chat_router, "session_scope", lambda: _Scope())
+    monkeypatch.setattr(chat_router.cs, "get_conversation", fake_conv)
+    monkeypatch.setattr(chat_router.cs, "send_message", fake_send)
+    monkeypatch.setattr(LIM, "check_chat_rate", lambda uid: True)
+    monkeypatch.setattr(LIM, "assert_within_budget", no_budget)
+    monkeypatch.setattr(chat_router.ev, "auto_evaluate", no_eval)
+
+    client.cookies.set(sec.SESSION_COOKIE, sec.issue_session(7))
+    r = client.post(
+        "/api/conversations/1/messages", json={"text": "savol", "mode": "deep"}, headers=H
+    )
+    assert r.status_code == 200, r.text
+    assert seen["mode"] == "deep"
+    assert r.json()["text"] == "chuqur javob #101"
+
+    # noma'lum rejim hamon rad etiladi
+    bad = client.post(
+        "/api/conversations/1/messages", json={"text": "savol", "mode": "turbo"}, headers=H
+    )
+    assert bad.status_code == 422
