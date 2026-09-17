@@ -56,6 +56,13 @@ def test_metrics_payload_has_our_metrics() -> None:
     assert "text/plain" in ctype
 
 
+def test_agent_fallback_counter_exists() -> None:
+    """Agent → direct degradatsiyasi ko'rinadigan bo'lishi kerak (2026-09-17)."""
+    O.AGENT_FALLBACKS.labels("LLMError").inc()
+    assert _metric_value("tgai_agent_fallbacks_total", reason="LLMError") >= 1
+    assert b"tgai_agent_fallbacks_total" in O.metrics_payload()[0]
+
+
 def test_scrub_masks_secrets() -> None:
     event = {
         "extra": {"session_string": "abc", "nested": [{"password": "x", "ok": 1}]},

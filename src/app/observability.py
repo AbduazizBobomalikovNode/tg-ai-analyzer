@@ -7,6 +7,7 @@
     tgai_llm_requests_total{provider,model,task,ok}, tgai_llm_tokens_total{provider,model,dir}
     tgai_llm_cost_usd_total{provider,model}
     tgai_tool_calls_total{tool,ok}, tgai_write_actions_total{tool,status}
+    tgai_agent_fallbacks_total{reason}
     tgai_sync_messages_total, tgai_floodwait_total, tgai_snapshot_posts_total
     tgai_deep_runs_total{status}, tgai_deep_rounds, tgai_deep_candidates,
     tgai_deep_cost_usd_total, tgai_deep_latency_seconds
@@ -58,6 +59,14 @@ LLM_LATENCY = Histogram(
     buckets=(0.5, 1, 2, 5, 10, 20, 40, 90),
 )
 TOOL_CALLS = Counter("tgai_tool_calls_total", "Agent tool chaqiruvlari", ["tool", "ok"])
+# Agent yo'li uzilib direct rejimga tushgan holatlar. `reason` — istisno sinfi
+# nomi (`LLMError`, `CapabilityError`, …), matn emas: kardinallik past qolsin.
+# Bu hisoblagich jimgina degradatsiyani ko'rinadigan qiladi — 2026-09-17 da
+# Gemini 3 thought_signature xatosi tufayli deploy qilingan agent tool'larni
+# umuman ishlatmay qolgani **hech qayerda** ko'rinmagan edi.
+AGENT_FALLBACKS = Counter(
+    "tgai_agent_fallbacks_total", "Agent → direct rejimga tushishlar", ["reason"]
+)
 # Deep search (2-bosqich): status = ok | timeout | budget | error
 DEEP_RUNS = Counter("tgai_deep_runs_total", "Deep search yugurishlari", ["status"])
 DEEP_ROUNDS = Histogram("tgai_deep_rounds", "Deep search raundlari", buckets=(1, 2, 3))

@@ -170,6 +170,38 @@ async def test_agent_failover_writes_single_user_row() -> None:
     assert failed and failed[0].finished_at is not None
 
 
+async def test_agent_failover_is_visible() -> None:
+    """Failover **jim** bo'lmasligi kerak: log + metrika + javob metadata'si.
+
+    2026-09-17: Gemini 3 `thought_signature` xatosi tufayli tool chaqirgan
+    har bir yugurish shu yo'lga tushardi va buni hech kim sezmadi.
+    """
+    from prometheus_client import REGISTRY
+
+    from app.observability import AGENT_FALLBACKS
+
+    def total() -> float:
+        val = REGISTRY.get_sample_value("tgai_agent_fallbacks_total", {"reason": "LLMError"})
+        return float(val or 0.0)
+
+    AGENT_FALLBACKS.labels("LLMError")  # metrika mavjud bo'lsin (0 dan boshlab)
+    before = total()
+
+    reply = await cs.send_message(
+        _Session(),  # type: ignore[arg-type]
+        user_id=1,
+        conversation=SimpleNamespace(id=1, title="", account_id=1, updated_at=None),
+        text="kanalda bu hafta nima bo'ldi?",
+        context=None,
+        llm=_FailoverLLM(),  # type: ignore[arg-type]
+        mode="agent",
+        account_id=1,
+    )
+    assert reply.context_used is not None
+    assert reply.context_used["degraded"] == {"from": "agent", "reason": "LLMError"}
+    assert total() == before + 1
+
+
 async def test_run_agent_marks_failed_run() -> None:
     db = _Session()
     llm = _FailoverLLM()

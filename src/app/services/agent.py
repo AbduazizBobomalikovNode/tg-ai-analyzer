@@ -183,7 +183,10 @@ async def run_agent(
             final_text = res.text.strip() if not res.tool_calls else ""
             break
 
-        messages.append(Msg.assistant(res.text, res.tool_calls))
+        # `res.tool_calls` ichidagi `signature` (Gemini 3 thought signature) shu
+        # yerdan keyingi so'rovga o'tadi — aks holda ikkinchi iteratsiya
+        # `400 INVALID_ARGUMENT … missing a thought_signature` bilan yiqiladi.
+        messages.append(Msg.assistant(res.text, res.tool_calls, signature=res.signature))
         for call in res.tool_calls[:MAX_CALLS_PER_TURN]:
             t0 = time.monotonic()
             # ── takroriy chaqiruvlar qopqog'i ──────────────────────────────

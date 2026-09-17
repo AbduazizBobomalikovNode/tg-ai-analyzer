@@ -100,7 +100,12 @@ class _LLM:
         return self.script.pop(0)
 
 
-def _res(text: str = "", calls: list[ToolCall] | None = None) -> ChatResult:
+def _res(
+    text: str = "",
+    calls: list[ToolCall] | None = None,
+    *,
+    signature: bytes | None = None,
+) -> ChatResult:
     return ChatResult(
         text=text,
         tool_calls=calls or [],
@@ -108,6 +113,7 @@ def _res(text: str = "", calls: list[ToolCall] | None = None) -> ChatResult:
         provider="p",
         usage=Usage(100, 20),
         finish_reason="tool_use" if calls else "end_turn",
+        signature=signature,
     )
 
 
@@ -218,6 +224,40 @@ async def test_agent_caps_calls_per_turn_and_result_budget(
     assert any("already called" in m.content for m in tool_msgs)  # tool qopqog'i
     assert any("result budget exhausted" in m.content for m in tool_msgs)
     assert out.result_tokens <= 1500 + 400
+
+
+async def test_agent_history_round_trips_thought_signature(
+    fake_tool: list[dict[str, Any]],
+) -> None:
+    """Gemini 3 imzosi tarixga o'tishi shart — usiz 2-iteratsiya 400 bilan yiqiladi.
+
+    Jonli xato (2026-09-17): `Function call is missing a thought_signature in
+    functionCall parts` → har tool yugurishi yiqilib direct rejimga tushardi.
+    """
+    llm = _LLM(
+        [
+            _res(
+                "olaman",
+                calls=[ToolCall("c1", "get_chat_stats", {"days": 7}, signature=b"sig-1")],
+                signature=b"sig-text",
+            ),
+            _res("12 ta post."),
+        ]
+    )
+    await A.run_agent(
+        _Session(),  # type: ignore[arg-type]
+        user_id=1,
+        account_id=5,
+        question="q",
+        history=[],
+        pinned_chat=None,
+        locale="uz",
+        llm=llm,  # type: ignore[arg-type]
+    )
+    msgs = llm.calls[1]["messages"]
+    assistant = next(m for m in msgs if m.role.value == "assistant")
+    assert assistant.tool_calls[0].signature == b"sig-1"
+    assert assistant.signature == b"sig-text"
 
 
 async def test_agent_blocks_identical_repeat_calls(fake_tool: list[dict[str, Any]]) -> None:

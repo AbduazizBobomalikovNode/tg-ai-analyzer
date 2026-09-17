@@ -32,6 +32,7 @@ from app.llm import LLM, LLMError, Msg, Task
 from app.llm.pricing import estimate_cost
 from app.logging import get_logger
 from app.mtproto.pool import MessageInfo, PoolError, pool
+from app.observability import AGENT_FALLBACKS
 from app.services import search as S
 from app.services import untrusted as U
 from app.services.prompts import CHAT_SYSTEM_PROMPT, runtime_note
@@ -389,6 +390,7 @@ async def send_message(
     chosen = choose_mode(
         mode, text=text, has_synced_chats=await _has_synced_chats(session, acc_id), context=context
     )
+    degraded: dict[str, str] | None = None
     if chosen == "deep":
         # Deep quvuri o'z sessiyalarini ochadi (parallel kanallar) va ikkala
         # turn'ni **o'zi** yozadi — shuning uchun user qatorini bu yerda
@@ -430,8 +432,23 @@ async def send_message(
                 events=events,
             )
         except LLMError as exc:
-            # tool'li provider yo'q (masalan claude_code) — direct rejimga tushamiz
-            log.warning("chat.agent_unavailable", error=str(exc)[:200])
+            # tool'li provider yo'q (masalan claude_code) — direct rejimga tushamiz.
+            #
+            # Bu yo'l **ko'rinadigan** bo'lishi shart. 2026-09-17 gacha u jim
+            # edi: Gemini 3 `thought_signature` xatosi tufayli tool chaqirgan
+            # har bir agent yugurishi yiqilib, deploy qilingan tizim direct
+            # rejimda ishlayotgani (37/37 tool yugurishi) hech qayerdan
+            # sezilmasdi. Endi: warning + `tgai_agent_fallbacks_total{reason}`
+            # + javob metadata'sidagi `degraded` (API/UI/eval ko'radi).
+            reason = type(exc).__name__
+            log.warning(
+                "chat.agent_fallback",
+                conversation_id=conversation.id,
+                reason=reason,
+                error=str(exc)[:200],
+            )
+            AGENT_FALLBACKS.labels(reason).inc()
+            degraded = {"from": "agent", "reason": reason}
 
     context_block = ""
     context_used: dict[str, Any] | None = None
@@ -457,10 +474,16 @@ async def send_message(
             "map_tokens": (extra_in + extra_out) or None,
         }
 
+    if degraded is not None:
+        # Kontekst bo'lmasa ham ko'rinsin — `context_used` javob metadata'sining
+        # yagona kanali (`Reply.context_used` → `/api/chat` → UI/eval).
+        context_used = {**(context_used or {}), "degraded": degraded}
+
     note = runtime_note(
         now_iso=datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC"),
         locale=locale,
-        pinned_chat=context_used["title"] if context_used else None,
+        # `.get` — `context_used` kontekstsiz ham (faqat `degraded` bilan) bo'lishi mumkin
+        pinned_chat=context_used.get("title") if context_used else None,
     )
     llm_messages = build_messages(history, f"{text}\n\n({note})", context_block)
 

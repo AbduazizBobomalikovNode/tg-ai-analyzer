@@ -10,6 +10,7 @@ from typing import Any
 
 import httpx
 import pytest
+from google.genai import types
 
 from app.llm.base import Capability, LLMError, Msg, ToolCall, ToolSpec, sanitize_json_schema
 from app.llm.deepseek import DeepSeekProvider
@@ -438,3 +439,166 @@ def test_estimate_tokens_heuristic_matches_char_over_four() -> None:
 
     assert estimate_tokens_heuristic([]) == 0
     assert estimate_tokens_heuristic(["", "abcd", "abcde"]) == 1 + 2  # bo'sh satr hisobga kirmaydi
+
+
+# ─── 2026-09-17: Gemini 3 thought_signature (tool sikli 400 bilan yiqilardi) ──
+#
+# Jonli xato: ikkinchi iteratsiyada
+#   400 INVALID_ARGUMENT … Function call is missing a thought_signature in
+#   functionCall parts. This is required for tools to work correctly.
+# Sabab: `resp.function_calls` tekislangan ro'yxat — imzo part'da qoladi va
+# yo'qoladi. Quyidagi testlar imzoning **ikkala** yo'nalishda (javobdan
+# ToolCall'ga va ToolCall'dan keyingi so'rov Content'iga) o'tishini qo'riqlaydi.
+
+_SIG_A = b"sig-alpha"
+_SIG_TXT = b"sig-text"
+
+
+class _FakeChatModels:
+    """`client.aio.models` o'rnini bosadi: `contents` ni yozib oladi."""
+
+    def __init__(self, responses: list[Any]) -> None:
+        self.responses = list(responses)
+        self.calls: list[dict[str, Any]] = []
+
+    async def generate_content(self, *, model: str, contents: Any, config: Any) -> Any:
+        self.calls.append({"model": model, "contents": contents, "config": config})
+        return self.responses.pop(0)
+
+
+def _gemini_chat(responses: list[Any]) -> tuple[Any, _FakeChatModels]:
+    from app.llm.gemini import GeminiProvider
+
+    provider = GeminiProvider(api_key="test-key")  # soxta kalit — tarmoqqa chiqmaydi
+    fake = _FakeChatModels(responses)
+    provider._client = SimpleNamespace(aio=SimpleNamespace(models=fake))
+    return provider, fake
+
+
+def _resp(parts: list[Any], *, finish: str = "STOP") -> Any:
+    return SimpleNamespace(
+        candidates=[SimpleNamespace(content=SimpleNamespace(parts=parts), finish_reason=finish)],
+        usage_metadata=SimpleNamespace(
+            prompt_token_count=10, candidates_token_count=2, cached_content_token_count=0
+        ),
+        # Ataylab bor: adapter bu tekislangan ro'yxatni **ishlatmasligi** kerak
+        # (unda imzo yo'q). Imzosiz nusxa bilan to'ldiramiz.
+        function_calls=[types.FunctionCall(id="c1", name="get_chat_stats", args={"days": 7})],
+    )
+
+
+async def test_parse_chat_keeps_thought_signature_from_part() -> None:
+    parts = [
+        types.Part(text="Statistikani olaman", thought_signature=_SIG_TXT),
+        types.Part(
+            function_call=types.FunctionCall(id="c1", name="get_chat_stats", args={"days": 7}),
+            thought_signature=_SIG_A,
+        ),
+    ]
+    provider, _ = _gemini_chat([_resp(parts)])
+    res = await provider.chat(
+        [Msg.user("bu hafta nechta post?")], model="gemini-3.5-flash", tools=[SEARCH_TOOL]
+    )
+
+    assert len(res.tool_calls) == 1
+    call = res.tool_calls[0]
+    assert (call.id, call.name, call.arguments) == ("c1", "get_chat_stats", {"days": 7})
+    assert call.signature == _SIG_A
+    assert res.text == "Statistikani olaman"
+    assert res.signature == _SIG_TXT  # oxirgi matn part'idagi imzo ham saqlanadi
+    await provider.aclose()
+
+
+async def test_second_call_echoes_thought_signature_back() -> None:
+    """Ikkinchi so'rovning `contents` ida aynan o'sha imzo bo'lishi shart."""
+    first = _resp(
+        [
+            types.Part(
+                function_call=types.FunctionCall(id="c1", name="get_chat_stats", args={"days": 7}),
+                thought_signature=_SIG_A,
+            )
+        ]
+    )
+    second = _resp([types.Part(text="12 ta post.")])
+    provider, fake = _gemini_chat([first, second])
+
+    res1 = await provider.chat([Msg.user("q")], model="gemini-3.5-flash", tools=[SEARCH_TOOL])
+    await provider.chat(
+        [
+            Msg.user("q"),
+            Msg.assistant(res1.text, res1.tool_calls, signature=res1.signature),
+            Msg.tool_result("c1", "get_chat_stats", '{"posts":12}'),
+        ],
+        model="gemini-3.5-flash",
+        tools=[SEARCH_TOOL],
+    )
+
+    contents = fake.calls[1]["contents"]
+    model_turn = next(c for c in contents if c.role == "model")
+    fc_part = next(p for p in (model_turn.parts or []) if p.function_call is not None)
+    assert fc_part.thought_signature == _SIG_A
+    await provider.aclose()
+
+
+def test_split_messages_echoes_text_signature() -> None:
+    _, contents = _split_messages([Msg.assistant("javob", signature=_SIG_TXT)])
+    part = (contents[0].parts or [])[0]
+    assert part.text == "javob"
+    assert part.thought_signature == _SIG_TXT
+
+
+def test_split_messages_omits_signature_when_absent() -> None:
+    """Imzosiz (boshqa provider / eski tarix) — maydon umuman yuborilmaydi."""
+    _, contents = _split_messages(
+        [Msg.assistant("javob", tool_calls=[ToolCall("c1", "f", {"a": 1})])]
+    )
+    parts = contents[0].parts or []
+    assert all(p.thought_signature is None for p in parts)
+
+
+def test_split_messages_groups_tool_results_of_one_turn() -> None:
+    """Bir raunddagi parallel javoblar bitta `Content(role="user")` ichida."""
+    _, contents = _split_messages(
+        [
+            Msg.user("q"),
+            Msg.assistant(
+                tool_calls=[ToolCall("c1", "f", {}), ToolCall("c2", "g", {})],
+            ),
+            Msg.tool_result("c1", "f", '{"a":1}'),
+            Msg.tool_result("c2", "g", '{"b":2}'),
+            Msg.user("davom et"),
+        ]
+    )
+    roles = [c.role for c in contents]
+    assert roles == ["user", "model", "user", "user"]
+    tool_turn = contents[2]
+    names = [p.function_response.name for p in (tool_turn.parts or [])]
+    assert names == ["f", "g"]
+
+
+# ─── boshqa adapterlar imzoni jimgina e'tiborsiz qoldiradi ───────────────────
+
+
+async def test_deepseek_ignores_signature() -> None:
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    p = make_provider(handler)
+    await p.chat(
+        [Msg.assistant(tool_calls=[ToolCall("c1", "f", {}, signature=_SIG_A)])],
+        model="deepseek-chat",
+    )
+    assert "sig-alpha" not in json.dumps(seen)  # imzo tashqariga chiqmaydi
+    await p.aclose()
+
+
+def test_claude_ignores_signature() -> None:
+    from app.llm.claude import split_messages
+
+    msg = Msg.assistant(tool_calls=[ToolCall("c1", "f", {}, signature=_SIG_A)])
+    _, blocks = split_messages([msg])
+    assert "sig-alpha" not in json.dumps(blocks, default=str)
+    assert blocks[0]["content"][0]["type"] == "tool_use"

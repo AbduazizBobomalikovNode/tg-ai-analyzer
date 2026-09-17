@@ -64,6 +64,19 @@ class ToolCall:
     id: str
     name: str
     arguments: dict[str, Any]
+    #: Gemini 3 "thought signature" — modelning o'z reasoning'ini keyingi
+    #: so'rovda tiklashi uchun **opaque** qiymat (`types.Part.thought_signature`,
+    #: google-genai 2.23 da `Optional[bytes]`). Uni tahlil qilmaymiz va
+    #: o'zgartirmaymiz: qaytgan turini o'zgarishsiz saqlab, keyingi turn'da
+    #: aynan o'sha `function_call` part'iga qaytaramiz.
+    #:
+    #: Nega muhim: usiz Gemini 3 ikkinchi turn'da
+    #: `400 INVALID_ARGUMENT … Function call is missing a thought_signature in
+    #: functionCall parts` beradi va butun agent sikli (tool chaqirgan **har**
+    #: yugurish) yiqiladi. Boshqa provider'lar (`claude`, `deepseek`) bu
+    #: maydonni oddiygina e'tiborsiz qoldiradi — u provider-xos ma'lumot,
+    #: lekin `ToolCall` provider chegarasidan o'tadigan yagona idish.
+    signature: bytes | str | None = None
 
 
 @dataclass(slots=True)
@@ -75,6 +88,10 @@ class Msg:
     # role=TOOL bo'lganda: qaysi chaqiruvga javob
     tool_call_id: str | None = None
     name: str | None = None
+    #: assistant **matn** part'iga biriktirilgan thought signature (Gemini 3 uni
+    #: ba'zan tool chaqiruvi emas, oxirgi matn part'iga qo'yadi). `ToolCall.signature`
+    #: bilan bir xil qoida: opaque, o'zgarishsiz qaytariladi.
+    signature: bytes | str | None = None
 
     @classmethod
     def system(cls, text: str) -> Msg:
@@ -85,8 +102,14 @@ class Msg:
         return cls(Role.USER, text)
 
     @classmethod
-    def assistant(cls, text: str = "", tool_calls: list[ToolCall] | None = None) -> Msg:
-        return cls(Role.ASSISTANT, text, tool_calls or [])
+    def assistant(
+        cls,
+        text: str = "",
+        tool_calls: list[ToolCall] | None = None,
+        *,
+        signature: bytes | str | None = None,
+    ) -> Msg:
+        return cls(Role.ASSISTANT, text, tool_calls or [], signature=signature)
 
     @classmethod
     def tool_result(cls, call_id: str, name: str, content: str) -> Msg:
@@ -119,6 +142,11 @@ class ChatResult:
     finish_reason: str = ""
     # DeepSeek reasoner'ning `reasoning_content` maydoni — bor bo'lsa
     reasoning: str | None = None
+    #: Gemini 3: oxirgi **matn** part'iga biriktirilgan thought signature.
+    #: Bu matn tarixga assistant turn'i bo'lib qaytsa — `Msg.signature` ga
+    #: ko'chiriladi (`ToolCall.signature` izohiga qarang). Boshqa provider'larda
+    #: doim `None`.
+    signature: bytes | str | None = None
 
 
 # Embedding vazifasi: indekslashda hujjat, qidiruvda so'rov (asimmetrik retrieval).

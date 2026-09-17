@@ -387,9 +387,30 @@ def _to_declaration(t: ToolSpec) -> types.FunctionDeclaration:
 
 
 def _split_messages(messages: list[Msg]) -> tuple[str, list[types.Content]]:
-    """SYSTEM'ni ajratadi, qolganini Gemini Content'lariga o'giradi."""
+    """SYSTEM'ni ajratadi, qolganini Gemini Content'lariga o'giradi.
+
+    Ikki nozik joy (Gemini 3):
+
+    1. **thought_signature qaytariladi.** Modelning `function_call` part'i bilan
+       kelgan opaque imzo aynan o'sha part'ga qayta biriktiriladi. Usiz ikkinchi
+       turn `400 INVALID_ARGUMENT … Function call is missing a thought_signature
+       in functionCall parts` bilan yiqiladi — ya'ni tool chaqirgan **har**
+       agent yugurishi. Matn part'idagi imzo ham (`Msg.signature`) shu qoida
+       bilan qaytariladi.
+    2. **Bir turn'dagi tool javoblari bitta Content'ga yig'iladi.** Model bir
+       raundda bir nechta funksiya chaqirsa, API javoblarni bitta
+       `Content(role="user")` ning parallel `function_response` part'lari
+       sifatida kutadi (SDK: `Content.parts` — "ordered parts that constitute
+       a single message"). Ilgari har `Msg.tool_result` alohida Content bo'lardi.
+    """
     system_parts: list[str] = []
     contents: list[types.Content] = []
+    pending_tool: list[types.Part] = []  # bitta turn'dagi function_response'lar
+
+    def flush_tools() -> None:
+        if pending_tool:
+            contents.append(types.Content(role="user", parts=list(pending_tool)))
+            pending_tool.clear()
 
     for m in messages:
         if m.role is Role.SYSTEM:
@@ -398,24 +419,23 @@ def _split_messages(messages: list[Msg]) -> tuple[str, list[types.Content]]:
             continue
 
         if m.role is Role.TOOL:
-            payload = _as_json_object(m.content)
-            contents.append(
-                types.Content(
-                    role="user",
-                    parts=[
-                        types.Part.from_function_response(name=m.name or "tool", response=payload)
-                    ],
+            pending_tool.append(
+                types.Part.from_function_response(
+                    name=m.name or "tool", response=_as_json_object(m.content)
                 )
             )
             continue
 
+        flush_tools()
+
         parts: list[types.Part] = []
         if m.content:
-            parts.append(types.Part.from_text(text=m.content))
+            parts.append(_text_part(m.content, m.signature))
         for tc in m.tool_calls:
             parts.append(
                 types.Part(
-                    function_call=types.FunctionCall(id=tc.id, name=tc.name, args=tc.arguments)
+                    function_call=types.FunctionCall(id=tc.id, name=tc.name, args=tc.arguments),
+                    **_sig_kwargs(tc.signature),
                 )
             )
         if not parts:
@@ -425,7 +445,24 @@ def _split_messages(messages: list[Msg]) -> tuple[str, list[types.Content]]:
             types.Content(role="model" if m.role is Role.ASSISTANT else "user", parts=parts)
         )
 
+    flush_tools()
     return "\n\n".join(system_parts), contents
+
+
+def _sig_kwargs(signature: bytes | str | None) -> dict[str, Any]:
+    """`thought_signature=None` ni **yubormaslik** uchun kwargs.
+
+    `types.Part.__init__` faqat `None` bo'lmagan maydonlarni to'playdi, lekin
+    aniqlik uchun shu yerda ham kesamiz — signature'siz eski/boshqa provider
+    tarixida maydon umuman paydo bo'lmaydi.
+    """
+    return {"thought_signature": signature} if signature else {}
+
+
+def _text_part(text: str, signature: bytes | str | None = None) -> types.Part:
+    if signature:
+        return types.Part(text=text, thought_signature=signature)  # type: ignore[arg-type]
+    return types.Part.from_text(text=text)
 
 
 def _as_json_object(raw: str) -> dict[str, Any]:
@@ -446,17 +483,32 @@ def _parts_of(resp: Any) -> list[Any]:
 
 
 def _parse_chat(resp: Any, *, model: str) -> ChatResult:
-    tool_calls = [
-        ToolCall(id=fc.id or "", name=fc.name or "", arguments=dict(fc.args or {}))
-        for fc in (getattr(resp, "function_calls", None) or [])
-    ]
+    # Part'lar bo'yicha yuramiz, `resp.function_calls` emas: u tekislangan
+    # ro'yxat va `thought_signature` ni **yo'qotadi** (u part'da, FunctionCall
+    # ichida emas). Imzosiz keyingi turn 400 bilan yiqiladi — CLAUDE.md,
+    # `ToolCall.signature`.
+    tool_calls: list[ToolCall] = []
+    text_chunks: list[str] = []
+    text_signature: bytes | str | None = None
 
-    # `.text` tool_call bo'lganda istisno tashlashi mumkin — qo'lda yig'amiz
-    text_chunks = [
-        p.text
-        for p in _parts_of(resp)
-        if getattr(p, "text", None) and not getattr(p, "thought", False)
-    ]
+    for p in _parts_of(resp):
+        sig = getattr(p, "thought_signature", None)
+        fc = getattr(p, "function_call", None)
+        if fc is not None:
+            tool_calls.append(
+                ToolCall(
+                    id=getattr(fc, "id", None) or "",
+                    name=getattr(fc, "name", None) or "",
+                    arguments=dict(getattr(fc, "args", None) or {}),
+                    signature=sig,
+                )
+            )
+            continue
+        # `.text` tool_call bo'lganda istisno tashlashi mumkin — qo'lda yig'amiz
+        if getattr(p, "text", None) and not getattr(p, "thought", False):
+            text_chunks.append(p.text)
+            if sig:
+                text_signature = sig
 
     u = getattr(resp, "usage_metadata", None)
     finish = ""
@@ -475,6 +527,7 @@ def _parse_chat(resp: Any, *, model: str) -> ChatResult:
             cached_tokens=int(getattr(u, "cached_content_token_count", 0) or 0),
         ),
         finish_reason=finish,
+        signature=text_signature,
     )
 
 
