@@ -34,9 +34,11 @@ let filter = "";
 
 /* ── ro'yxat ──────────────────────────────────────────────────────── */
 
+/** Akkaunt yorlig'i (`@username (status)` — status "active" bo'lsa qisqa). */
 function accountLabel(id) {
   const acc = S.accounts.find((a) => a.id === id);
-  return acc ? (acc.label || `id${acc.tg_account_id}`) : "";
+  if (!acc) return "";
+  return `${acc.label || acc.tg_account_id}${acc.status !== "active" ? ` (${acc.status})` : ""}`;
 }
 
 function paintList() {
@@ -345,8 +347,6 @@ function openConvMenu() {
   openSheet(conv?.title || t("web.ask.title"), items);
 }
 
-const accountLabel = (a) => `${a.label || a.tg_account_id}${a.status !== "active" ? ` (${a.status})` : ""}`;
-
 /**
  * Akkaunt tanlagich (ro'yxat `/api/me` dan keladi).
  *
@@ -360,11 +360,10 @@ export function paintAccounts() {
   replace(sel, S.accounts.map((a) => el("option", {
     value: String(a.id),
     selected: a.id === S.accountId,
-    title: accountLabel(a),
-  }, accountLabel(a))));
+    title: accountLabel(a.id),
+  }, accountLabel(a.id))));
   if (!S.accounts.length) {
     sel.appendChild(el("option", { value: "" }, t("web.chat.no_accounts")));
   }
-  const current = S.accounts.find((a) => a.id === S.accountId);
-  sel.title = current ? accountLabel(current) : "";
+  sel.title = S.accountId ? accountLabel(S.accountId) : "";
 }

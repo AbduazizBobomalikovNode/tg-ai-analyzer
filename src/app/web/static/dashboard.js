@@ -1,4 +1,6 @@
 /* Dashboard — SVG chart'lar (kutubxonasiz), tooltip, jadval ko'rinishi. */
+import { usd } from "./lib/fmt.js";
+
 (function () {
   const S = window.TGAI.strings;
   const t = (k, vars) => {
@@ -14,7 +16,6 @@
   const SPRITE = (window.TGAI && window.TGAI.sprite) || "/static/icons.svg";
   const ico = (name) => `<svg class="icon" aria-hidden="true" focusable="false"><use href="${SPRITE}#${name}"></use></svg>`;
   const fmt = (n) => n == null ? "—" : n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e4 ? (n / 1e3).toFixed(0) + "k" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(Math.round(n));
-  const money = (v) => v == null ? "—" : "$" + (v < 1 ? v.toFixed(3) : v.toFixed(2));
   const ms = (v) => v == null || v === 0 ? "—" : v >= 1000 ? (v / 1000).toFixed(1) + " s" : v + " ms";
   const cssVar = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 
@@ -111,7 +112,7 @@
       const rows = [
         [t("web.dash.db"), okTxt(sys.db)],
         [t("web.dash.redis"), okTxt(sys.redis)],
-        [t("web.dash.budget"), `${fmt(b.tokens || 0)} tok${b.token_limit ? ` / ${fmt(b.token_limit)} (${b.tokens_pct}%)` : ""} · ${money(b.cost_usd || 0)}${b.cost_limit ? ` / ${money(b.cost_limit)}` : ""}`],
+        [t("web.dash.budget"), `${fmt(b.tokens || 0)} tok${b.token_limit ? ` / ${fmt(b.token_limit)} (${b.tokens_pct}%)` : ""} · ${usd(b.cost_usd || 0)}${b.cost_limit ? ` / ${usd(b.cost_limit)}` : ""}`],
         [t("web.dash.heartbeats"), hb.length ? hb.map(([k, v]) => `${esc(k)}: ${esc((v && v.at || "").slice(0, 16).replace("T", " "))}`).join("<br>") : t("web.dash.no_heartbeats")],
         ["v", esc(sys.version || "")],
       ];
@@ -122,7 +123,7 @@
     set("requests", fmt(T.requests));
     set("tokens", fmt(T.tokens_in + T.tokens_out));
     set("tokens_split", `${fmt(T.tokens_in)} in · ${fmt(T.tokens_out)} out`);
-    set("cost", money(T.cost_usd));
+    set("cost", usd(T.cost_usd));
     set("latency", ms(T.latency_p50_ms));
     set("latency_sub", `${t("web.dash.avg")} ${ms(T.latency_avg_ms)}`);
     set("satisfaction", T.satisfaction == null ? "—" : T.satisfaction + "%");
@@ -148,7 +149,7 @@
       { key: "requests", label: t("web.dash.requests"), num: true, fmt: fmt },
       { key: "tokens_in", label: t("web.dash.tokens_in"), num: true, fmt: fmt },
       { key: "tokens_out", label: t("web.dash.tokens_out"), num: true, fmt: fmt },
-      { key: "cost_usd", label: t("web.dash.cost"), num: true, fmt: money },
+      { key: "cost_usd", label: t("web.dash.cost"), num: true, fmt: usd },
       { key: "latency_avg_ms", label: t("web.dash.latency"), num: true, fmt: ms },
       { key: "auto_relevance", label: t("web.dash.relevance"), num: true, fmt: stars },
     ], ov.models);

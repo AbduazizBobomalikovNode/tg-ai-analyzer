@@ -90,4 +90,4 @@
 </div>
 {% endblock %}
 
-{% block scripts %}{{ super() }}<script src="{{ asset('dashboard.js') }}"></script>{% endblock %}
+{% block scripts %}{{ super() }}<script type="module" src="{{ asset('dashboard.js') }}"></script>{% endblock %}

@@ -13,6 +13,7 @@ Qo'riqlaydi:
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from datetime import date
@@ -263,16 +264,52 @@ process.stdout.write(JSON.stringify({{
     assert out["usdNormal"] == "$1.50"
 
 
+#: Top-level `import`/`export` — modul belgisi. Faqat qator boshida (ichki
+#: matn/izohlardagi so'zlarni emas).
+_MODULE_SYNTAX = re.compile(r"(?m)^\s*(?:import\s|export\s|export\{)")
+
+
 def test_every_js_file_parses() -> None:
-    """`node --check` — har bir fayl (klassik ham, modul ham)."""
+    """`node --check` — har bir fayl (klassik ham, modul ham).
+
+    `lib/**` va `pages/**` doim `<script type="module">` orqali yuklanadi
+    (yoki bir-biridan `import`/`export` qiladi); ildizdagi bir nechta fayl
+    (`briefings.js`, `dashboard.js`) ham xuddi shunday. Muammo: plain
+    `node --check FILE` — agar faylda top-level `import` bo'lsa-yu, u
+    haqiqiy modul sifatida **to'liq** tekshirilmaydi (Node'ning CJS/ESM
+    avto-aniqlashi import bor faylni "modulga o'xshaydi" deb jimgina
+    o'tkazib yuboradi — sintaksisi butunlay buzilgan bo'lsa ham, masalan
+    ochilmagan qavs — `rc=0`!). Import yo'q klassik skriptda esa
+    modul-ko'lam xatolari sezilmaydi: bir xil nom bir marta `function`,
+    keyin yana `const` bilan top-level'da e'lon qilinsa (`accountLabel` —
+    I5) CommonJS skriptda jim o'tadi, ES modulda esa
+    `SyntaxError: Identifier 'x' has already been declared` beradi.
+
+    Shuning uchun `import`/`export` ishlatadigan har bir fayl (papkasidan
+    qat'i nazar) **ES modul** sifatida tekshiriladi — `--input-type=module`,
+    stdin orqali (fayl nomi/yo'li kerak emas, chunki `--check` importlarni
+    yechmaydi, faqat sintaksisni tekshiradi — va bu yo'l real fayl yo'liga
+    bog'liq CJS/ESM avto-aniqlash xatosidan xoli).
+    """
     assert NODE is not None
     files = files_js(STATIC)
     assert len(files) >= 15, "fayllar topilmadi — yo'l o'zgarganmi?"
     bad: list[str] = []
     for path in files:
-        proc = subprocess.run(  # noqa: S603
-            [NODE, "--check", str(path)], capture_output=True, text=True, timeout=30
-        )
+        text = path.read_text(encoding="utf-8")
+        if _MODULE_SYNTAX.search(text):
+            proc = subprocess.run(  # noqa: S603
+                [NODE, "--input-type=module", "--check"],
+                input=text,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=30,
+            )
+        else:
+            proc = subprocess.run(  # noqa: S603
+                [NODE, "--check", str(path)], capture_output=True, text=True, timeout=30
+            )
         if proc.returncode != 0:
             bad.append(f"{path.name}: {proc.stderr.splitlines()[:3]}")
     assert not bad, bad
