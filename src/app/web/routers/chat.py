@@ -340,6 +340,7 @@ async def send_message(
         body.text,
         reply.text,
         had_context=reply.context_used is not None,
+        **ev.run_flags(reply.context_used),
     )
     return _reply_out(reply, actions)
 
@@ -434,6 +435,7 @@ async def _stream_turn(
                     text,
                     reply.text,
                     had_context=reply.context_used is not None,
+                    **ev.run_flags(reply.context_used),
                 )
             )
             await queue.put(("done", _reply_out(reply, actions)))
@@ -556,6 +558,7 @@ async def regenerate(
         text,
         reply.text,
         had_context=reply.context_used is not None,
+        **ev.run_flags(reply.context_used),
     )
     return _reply_out(reply, actions)
 

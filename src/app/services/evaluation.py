@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -33,11 +34,36 @@ from app.services.prompts import JUDGE_PROMPT  # noqa: E402
 JUDGE_CONVERSATION = "Judge"
 
 
+#: `grounded` shundan past bo'lsa — javob "asossiz" deb yoziladi (`auto_grounded`).
+GROUNDED_OK = 3
+#: Degradatsiyalangan yugurishda `grounded` shu qiymatdan oshmaydi.
+DEGRADED_GROUNDED_CAP = 2
+DEGRADED_NOTE = "agent degraded"
+
+#: "Qidiruv yiqildi, o'zingiz qiling" javobining belgilari — uch tilda.
+_HOMEWORK_RE = re.compile(
+    r"sinxron|sync\b|qayta\s+urin|qayta\s+so'?ra|takrorlab\s+so'?ra|"
+    r"синхрониз|повтор(?:ите|и)\s+запрос|переформулир|"
+    r"re-?run|re-?sync|rephrase|restate|try\s+again",
+    re.I,
+)
+
+
+def looks_like_homework(answer: str) -> bool:
+    """Javob savolga emas, foydalanuvchining **ishiga** aylantirilganmi.
+
+    Faqat degradatsiya belgisi bilan birga ma'noga ega: sog'lom yugurishda
+    "sinxronlang" — halol maslahat, degradatsiyada esa agentning o'z
+    nosozligini foydalanuvchiga yuklash.
+    """
+    return bool(_HOMEWORK_RE.search(answer or ""))
+
+
 @dataclass(slots=True)
 class Judgement:
     relevance: int
     usefulness: int
-    grounded: bool
+    grounded: int
     note: str
     tokens_in: int = 0
     tokens_out: int = 0
@@ -69,19 +95,45 @@ def parse_judgement(text: str) -> Judgement | None:
             return None
     if not isinstance(data, dict):
         return None
+    raw = data.get("grounded", 5)
+    # Eski (bool) shakl ham qabul qilinadi: `true` → 5, `false` → 1.
+    grounded = _clamp(5 if raw else 1) if isinstance(raw, bool) else _clamp(raw)
     return Judgement(
         relevance=_clamp(data.get("relevance")),
         usefulness=_clamp(data.get("usefulness")),
-        grounded=bool(data.get("grounded", True)),
+        grounded=grounded,
         note=str(data.get("note") or "")[:256],
     )
 
 
+def cap_for_degraded(j: Judgement, *, degraded: bool, answer: str) -> Judgement:
+    """Degradatsiyalangan yugurishda "sinxronlang" javobi yuqori baho olmaydi.
+
+    Nega kodda, promptda emas: judge arzon model (`Task.ROUTE`) va u javobning
+    **qanday yugurish**dan chiqqanini ko'rmaydi — degradatsiya belgisi bizda.
+    Prompt ham shu qoidani aytadi, lekin oxirgi so'z kodniki.
+    """
+    if not degraded or not looks_like_homework(answer):
+        return j
+    j.grounded = min(j.grounded, DEGRADED_GROUNDED_CAP)
+    if DEGRADED_NOTE not in j.note.lower():
+        j.note = f"{DEGRADED_NOTE}; {j.note}"[:256]
+    return j
+
+
 async def judge(
-    question: str, answer: str, *, had_context: bool, llm: LLM | None = None
+    question: str,
+    answer: str,
+    *,
+    had_context: bool,
+    had_tools: bool = True,
+    degraded: bool = False,
+    llm: LLM | None = None,
 ) -> Judgement | None:
     user = (
-        f"Context provided: {'yes' if had_context else 'no'}\n\n"
+        f"Context provided: {'yes' if had_context else 'no'}\n"
+        f"Tools available: {'yes' if had_tools else 'no'}\n"
+        f"Run degraded: {'yes' if degraded else 'no'}\n\n"
         f"<question>\n{question[:2000]}\n</question>\n\n"
         f"<answer>\n{answer[:4000]}\n</answer>"
     )
@@ -94,6 +146,7 @@ async def judge(
         return None
     j = parse_judgement(res.text)
     if j is not None:
+        j = cap_for_degraded(j, degraded=degraded, answer=answer)
         j.tokens_in, j.tokens_out = res.usage.tokens_in, res.usage.tokens_out
         j.model, j.provider = res.model, res.provider
     return j
@@ -153,14 +206,38 @@ async def _record_judge_usage(db: AsyncSession, row: ConversationMessage, j: Jud
     await db.flush()
 
 
-async def auto_evaluate(message_id: int, question: str, answer: str, *, had_context: bool) -> None:
+def run_flags(context: Any) -> dict[str, bool]:
+    """Assistant xabarining `context` metama'lumotidan judge bayroqlari.
+
+    `context` — `chat_service` yozgan `context_used` lug'ati (yoki `None`).
+    Ikkala kalit ham **ixtiyoriy**: eski qatorlarda ular yo'q, shuning uchun
+    `.get` bilan o'qiladi va yo'qligi "degradatsiya yo'q" deb o'qiladi.
+    Chaqiruv joyida `**run_flags(...)` bo'lib tarqatiladi.
+    """
+    if not isinstance(context, dict):
+        return {"had_tools": False, "degraded": False}
+    had_tools = bool(context.get("tool_calls")) or bool(context.get("tools_available"))
+    return {"had_tools": had_tools, "degraded": bool(context.get("degraded"))}
+
+
+async def auto_evaluate(
+    message_id: int,
+    question: str,
+    answer: str,
+    *,
+    had_context: bool,
+    had_tools: bool = True,
+    degraded: bool = False,
+) -> None:
     """Fon vazifasi: baholab `conversation_messages.auto_*` ga yozadi. Xato — jim log."""
     s = get_settings()
     if not s.web_auto_eval:
         return
     if s.web_auto_eval_sample < 1.0 and random.random() > s.web_auto_eval_sample:  # noqa: S311
         return
-    j = await judge(question, answer, had_context=had_context)
+    j = await judge(
+        question, answer, had_context=had_context, had_tools=had_tools, degraded=degraded
+    )
     if j is None:
         return
     async with session_scope() as db:
@@ -169,7 +246,7 @@ async def auto_evaluate(message_id: int, question: str, answer: str, *, had_cont
             return
         row.auto_relevance = j.relevance
         row.auto_usefulness = j.usefulness
-        row.auto_grounded = j.grounded
+        row.auto_grounded = j.grounded >= GROUNDED_OK
         row.auto_note = j.note
         await _record_judge_usage(db, row, j)
     log.info(

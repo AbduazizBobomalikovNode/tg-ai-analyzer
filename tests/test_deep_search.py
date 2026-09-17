@@ -215,6 +215,7 @@ def use_multi(
         expand: bool = False,
         llm: Any = None,
         entities: Any = None,
+        levels: Any = (1, 2, 3),
     ) -> list[S.Hit]:
         seen.append(question)
         if entity_log is not None:

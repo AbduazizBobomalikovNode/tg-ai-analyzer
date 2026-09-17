@@ -865,3 +865,40 @@ class EmbedBatch(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     error: Mapped[str | None] = mapped_column(String(500))
     cost_usd: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+
+
+# ─── jo'natuvchi nomlari (0019) ──────────────────────────────────────────────
+
+
+class Sender(Base):
+    """Bitta akkaunt ko'rgan Telegram foydalanuvchisining **ko'rinadigan** nomi.
+
+    Nega alohida jadval: `messages.sender_id` xom raqam, tool natijasi esa
+    modelga `user:124972562` bo'lib tushardi — model uni javobda shundayligicha
+    takrorlardi va foydalanuvchi kimligini bilmasdi. Ism `GetHistory` javobidagi
+    `m.sender` keshidan olinadi, ya'ni **qo'shimcha RPC yo'q** va allowlist
+    buzilmaydi (`get_sender()` chaqirilmaydi).
+
+    PK `(account_id, tg_user_id)`: bir xil odam ikki akkauntda boshqa nom bilan
+    ko'rinishi mumkin (kontakt nomi), va bir akkauntning ko'rgani boshqasiga
+    oqib o'tmasligi kerak.
+
+    **Telefon raqami bu yerda yo'q va hech qachon bo'lmaydi** — jadval qiymati
+    LLM promptiga tushadi, raqam esa u yerda kerak emas (`list_members` bilan
+    bir mezon). Yangi ustun qo'shishdan oldin: "buni modelga berish shartmi?"
+    """
+
+    __tablename__ = "senders"
+    __table_args__ = (
+        Index("ix_senders_account_username", "account_id", "username"),
+        Index("ix_senders_account_name", "account_id", "display_name"),
+    )
+
+    account_id: Mapped[int] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True
+    )
+    tg_user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    display_name: Mapped[str] = mapped_column(String(96), default="", server_default="")
+    username: Mapped[str | None] = mapped_column(String(64))
+    is_bot: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now())

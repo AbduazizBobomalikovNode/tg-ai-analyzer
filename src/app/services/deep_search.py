@@ -46,7 +46,7 @@ import re
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import AbstractAsyncContextManager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -100,6 +100,14 @@ DEEP_RESULT_TOKENS = 20_000  # dalillar konvertining qattiq chegarasi
 SOFT_WALL_S = 60.0  # bundan keyin reflect/2-raund o'tkazib yuboriladi
 HARD_WALL_S = 120.0  # bundan keyin bor narsa bilan sintez, coverage.truncated
 MARGINAL_YIELD = 0.10  # 2-raund shundan kam yangi klaster bersa — natijasi tashlanadi
+# Fan-out **o'z** deadline'i bilan yuradi. Nega: `_run_pipeline` hammasini bitta
+# `asyncio.timeout(hard_wall)` ichiga o'raydi, `asyncio.gather` esa bekor
+# qilinganda **tugagan** subquery natijalarini ham tashlab yuboradi — akkaunt
+# bo'ylab (`chats=None`) qidiruvda aynan shu sodir bo'lardi: `candidates == []`,
+# "ko'rilgan xabarlar: 0", dalilsiz javob. Endi `fan_out` `asyncio.wait` bilan
+# tugaganini oladi, qolganini bekor qiladi.
+FAN_OUT_RESERVE_S = 20.0  # sintez + qamrov uchun qattiq devordan qoldiriladi
+FAN_OUT_MIN_S = 5.0
 HYDE_MAX_WORDS = 12
 SYNTH_MAX_TOKENS = 4_000
 PLAN_MAX_TOKENS = 700
@@ -151,6 +159,29 @@ SERVER_LIMIT = 20
 EXTERNAL_ID_BASE = -1_000_000
 
 _JSON_RE = re.compile(r"\{.*\}", re.S)
+
+#: "Men ularda yo'qman" — `server_scope="discover"` ni **majburlaydigan** naqsh.
+#: Nega kodda: model bunday savolda `global` ni tanlab qo'yardi va javob
+#: egasining o'z kanallaridan chiqmasdi (eval `global-04`). Prompt ham shu
+#: misollarni beradi, lekin oxirgi so'z kodniki — `parse_plan` ga qarang.
+#: Apostrof har xil ko'chadi (to'g'ri tirnoq, modifikator, qiyshiq) — sinf bilan.
+_APO = "['\u2018\u2019\u02bb\u02bc`\u00b4]?"
+DISCOVER_RE = re.compile(
+    "|".join(
+        (
+            rf"a{_APO}zo\s+bo{_APO}lmagan",
+            rf"obuna\s+bo{_APO}lmagan",
+            r"не\s+подписан",
+            r"не\s+состою",
+            r"not\s+subscribed",
+            r"not\s+a\s+member",
+            r"butun\s+telegram",
+            r"по\s+всему\s+telegram",
+            r"across\s+telegram",
+        )
+    ),
+    re.I,
+)
 # Sitata tokeni **chat bilan birga** (H3): `#c<chat_id>m<tg_msg_id>`. Ilgari
 # token faqat `#<tg_msg_id>` edi — `tg_msg_id` esa chat ichida unikal, ya'ni
 # chatlararo yugurishda ikki xil chatning bir xil raqamli xabari bir-biriga
@@ -830,6 +861,10 @@ def parse_plan(
     plan.use_hyde = bool(data.get("use_hyde")) and plan.intent == "lookup"
     plan.use_hyde = plan.use_hyde and len(plan.standalone_question.split()) < HYDE_MAX_WORDS
     plan.server_scope = parse_server_scope(data.get("server_scope"))
+    if DISCOVER_RE.search(plan.standalone_question):
+        # Savolning o'zi "men ularda yo'qman" deyapti — model `global` deb
+        # qo'ysa ham serverning ochiq qismiga chiqiladi.
+        plan.server_scope = "discover"
     return _apply_follow_up(plan, history)
 
 
@@ -1032,6 +1067,12 @@ async def _search_one(
                 limit=PER_SUBQUERY_LIMIT,
                 expand=True,
                 llm=llm,
+                # Tugun kanali quyida, rejaning **o'z** darajalari bilan
+                # yuguradi. Bo'sh `levels` — `hybrid_search_multi` ichidagi
+                # nusxasini o'chiradi: ilgari har subquery tugunlarni ikki
+                # marta qidirardi (shu yerda `(1, 2, 3)` sukuti bilan, keyin
+                # pastda reja darajalari bilan) — subquery narxi qo'shaloq.
+                levels=(),
                 # phase4/A: rejadagi identifikatorlar (`@nurbek`, `#deploy`,
                 # `example.com`) — `node_entities` bo'yicha oltinchi RRF kanali.
                 entities=plan.entities or None,
@@ -1069,6 +1110,25 @@ async def _search_one(
         return await _hydrate(session, hits[:PER_SUBQUERY_LIMIT], account_id=account_id)
 
 
+def widen_plan(plan: DeepPlan) -> DeepPlan:
+    """Nol nomzoddan keyingi **bitta** qayta urinish uchun kengaytirilgan reja.
+
+    Uchta cheklov olib tashlanadi, chunki nol natijaning uchta odatiy sababi
+    aynan shular: tor sana oynasi, faqat tugun (level > 0) darajalari va
+    kengaytirilmagan so'rov. `chats` tegilmaydi — foydalanuvchi chatni aniq
+    aytgan bo'lsa, uni "topilmadi" deb kengaytirish javobni yolg'on qiladi.
+    """
+    return replace(
+        plan,
+        levels=[0],
+        since=None,
+        until=None,
+        expansion=True,
+        use_hyde=False,
+        hyde_text="",
+    )
+
+
 async def _fallback_search(
     session: AsyncSession,
     *,
@@ -1104,20 +1164,43 @@ async def fan_out(
     subqueries: Sequence[str],
     meter: _Meter,
     events: EventSink | None,
+    budget_s: float | None = None,
 ) -> list[S.Hit]:
-    """Parallel subquery'lar → `search.rrf` → 400 nomzod qopqog'i."""
+    """Parallel subquery'lar → `search.rrf` → 400 nomzod qopqog'i.
+
+    `budget_s` — shu bosqichning **o'z** deadline'i. Undan oshgan subquery
+    bekor qilinadi, tugaganlari saqlanadi. Buni `asyncio.gather` bilan qilib
+    bo'lmaydi: tashqi `asyncio.timeout` uni bekor qilsa, allaqachon tugagan
+    subquery natijalari ham yo'qoladi va quvur nol nomzod bilan qoladi.
+    """
     if not subqueries:
         return []
     tasks = [
-        _search_one(session_factory, account_id=account_id, subquery=sq, plan=plan, meter=meter)
+        asyncio.ensure_future(
+            _search_one(session_factory, account_id=account_id, subquery=sq, plan=plan, meter=meter)
+        )
         for sq in subqueries
     ]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    _, pending = await asyncio.wait(tasks, timeout=budget_s)
+    if pending:
+        for t in pending:
+            t.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        log.warning(
+            "deep.fan_out_timeout", pending=len(pending), total=len(tasks), budget_s=budget_s
+        )
+        await _emit(events, "search", subquery="", hits=0, timeout=True, pending=len(pending))
     lists: list[list[S.Hit]] = []
-    for i, res in enumerate(results):
+    for i, task in enumerate(tasks):
+        res: Any = asyncio.CancelledError() if task.cancelled() else (
+            task.exception() or task.result()
+        )
         if isinstance(res, BaseException):
-            log.warning("deep.subquery_failed", subquery=subqueries[i][:80], error=str(res)[:200])
-            await _emit(events, "search", subquery=subqueries[i], hits=0, error=True, index=i)
+            if not isinstance(res, asyncio.CancelledError):
+                log.warning(
+                    "deep.subquery_failed", subquery=subqueries[i][:80], error=str(res)[:200]
+                )
+                await _emit(events, "search", subquery=subqueries[i], hits=0, error=True, index=i)
             continue
         lists.append(res)
         levels = sorted({int(getattr(h, "level", 0) or 0) for h in res}) or [0]
@@ -1720,11 +1803,16 @@ def build_coverage(
     marginal_stop: bool,
     server: ServerOutcome | None = None,
 ) -> Coverage:
+    # Halollik: bitta xabar ham ko'rilmagan bo'lsa "213/213 chat qaraldi" deb
+    # yozish yolg'on. Fan-out nol nomzod bergan yugurishda `searched_chats`
+    # butun ro'yxatga tushib qolardi — endi u nolga tushadi (bo'shliqlar ham:
+    # qidirilmagan chatning "tarixi to'liq emas" ogohlantirishi ma'nosiz).
+    searched = list(searched_chats) if messages_scanned else []
     dates = [h.date for h in scanned_hits if h.date]
-    gaps = [c.title for c in searched_chats if (c.synced_min_id or 0) != 1]
+    gaps = [c.title for c in searched if (c.synced_min_id or 0) != 1]
     srv = server or ServerOutcome()
     cov = Coverage(
-        chats_searched=len(searched_chats),
+        chats_searched=len(searched),
         chats_total=chats_total,
         messages_scanned=messages_scanned,
         range_from=min(dates) if dates else None,
@@ -1756,6 +1844,7 @@ _COVERAGE_LABELS: dict[str, dict[str, str]] = {
         "range": "oraliq",
         "gaps": "ma'lum bo'shliq (tarix to'liq sinxronlanmagan)",
         "rounds": "raund",
+        "nothing": "hech narsa skanlanmadi",
         "truncated": "byudjet tugadi — dalillarning bir qismi tashlandi",
         "confidence": "ishonch",
         "server": "Telegram server qidiruvi",
@@ -1769,6 +1858,7 @@ _COVERAGE_LABELS: dict[str, dict[str, str]] = {
         "range": "период",
         "gaps": "известный пробел (история синхронизирована не полностью)",
         "rounds": "раунд",
+        "nothing": "ничего не просканировано",
         "truncated": "бюджет исчерпан — часть свидетельств отброшена",
         "confidence": "уверенность",
         "server": "Поиск на сервере Telegram",
@@ -1782,6 +1872,7 @@ _COVERAGE_LABELS: dict[str, dict[str, str]] = {
         "range": "range",
         "gaps": "known gap (history not fully synced)",
         "rounds": "round",
+        "nothing": "nothing was scanned",
         "truncated": "budget exhausted — some evidence was dropped",
         "confidence": "confidence",
         "server": "Telegram server search",
@@ -1800,6 +1891,10 @@ def render_coverage(cov: Coverage, *, locale: str = "uz") -> str:
         f"{lab['rounds']}: {cov.rounds}",
         f"{lab['confidence']}: {cov.confidence}",
     ]
+    if not cov.messages_scanned:
+        # Qidiruv hech narsa keltirmadi — buni birinchi bo'lib aytamiz,
+        # "0/213" ni o'quvchi o'zi yig'ib olishiga qoldirmaymiz.
+        parts.insert(0, lab["nothing"])
     if cov.range_from and cov.range_to:
         parts.insert(
             2,
@@ -2099,6 +2194,10 @@ async def _run_pipeline(
     def elapsed() -> float:
         return time.monotonic() - started
 
+    def fan_budget() -> float:
+        """Fan-out uchun qolgan vaqt — qattiq devorgacha, sintezga zaxira bilan."""
+        return max(FAN_OUT_MIN_S, min(soft_wall, hard_wall - elapsed() - FAN_OUT_RESERVE_S))
+
     # ── byudjet: **har qanday LLM chaqirig'idan oldin** ──────────────────────
     async with session_factory() as session:
         ctx = await load_run_context(
@@ -2238,7 +2337,25 @@ async def _run_pipeline(
                     subqueries=subqueries,
                     meter=meter,
                     events=events,
+                    budget_s=fan_budget(),
                 )
+                if not candidates:
+                    # **Bitta** kengaytirilgan qayta urinish: oyna olib
+                    # tashlanadi, faqat level 0, so'rov kengaytiriladi. Undan
+                    # keyin ham bo'sh bo'lsa — "topilmadi" halol javob.
+                    plan = widen_plan(plan)
+                    retry_subqueries = [search_question, *plan.subqueries][:MAX_SUBQUERIES]
+                    log.info("deep.zero_candidates_retry", subqueries=len(retry_subqueries))
+                    await _emit(events, "search", subquery="", hits=0, retry=True)
+                    candidates = await fan_out(
+                        session_factory,
+                        account_id=account_id,
+                        plan=plan,
+                        subqueries=retry_subqueries,
+                        meter=meter,
+                        events=events,
+                        budget_s=fan_budget(),
+                    )
                 taint.add_hits(candidates)  # M1 — reflect'dan **oldin**
                 candidates = await maybe_escalate(candidates)
                 taint.add_hits(candidates)
@@ -2286,6 +2403,7 @@ async def _run_pipeline(
                         subqueries=extra,
                         meter=meter,
                         events=events,
+                        budget_s=fan_budget(),
                     )
                     taint.add_hits(more)
                     merged = S.rrf(candidates, more)[:MAX_CANDIDATES]
@@ -2340,7 +2458,10 @@ async def _run_pipeline(
     searched_chats = [
         chats_by_id[cid] for cid in sorted({h.chat_id for h in deduped}) if cid in chats_by_id
     ]
-    if not searched_chats:
+    if not searched_chats and candidates:
+        # Nomzod bor, lekin `deduped` chat id'siz (server/tashqi topilma) —
+        # rejadagi chatlarga tayanamiz. Nomzod **umuman** bo'lmasa bu yerga
+        # tushmaymiz: `build_coverage` uni baribir nolga tushiradi.
         searched_chats = (
             [chats_by_id[c] for c in plan.chats if c in chats_by_id] if plan.chats else chat_rows
         )
@@ -2503,6 +2624,7 @@ async def stream_deep_search(
 __all__ = [
     "DEEP_HISTORY_TURNS",
     "DEEP_RESULT_TOKENS",
+    "DISCOVER_RE",
     "FOLLOW_UPS",
     "HARD_WALL_S",
     "MARGINAL_YIELD",
@@ -2549,4 +2671,5 @@ __all__ = [
     "stream_deep_search",
     "to_evidence",
     "validate_citations",
+    "widen_plan",
 ]

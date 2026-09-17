@@ -241,7 +241,10 @@ def test_render_bundle_marks_search_selection() -> None:
 def test_parse_judgement(raw: str) -> None:
     j = ev.parse_judgement(raw)
     assert j is not None
-    assert j.relevance == 4 and j.usefulness == 5 and j.grounded is True and j.note == "ok"
+    # `grounded` endi 1-5 shkalada (eski `true` → 5): degradatsiyalangan
+    # yugurishda "qisman asosli" ni bool bilan ifodalab bo'lmasdi.
+    assert j.relevance == 4 and j.usefulness == 5
+    assert j.grounded == 5 and j.note == "ok"
 
 
 def test_parse_judgement_garbage() -> None:
@@ -263,7 +266,8 @@ async def test_judge_uses_cheap_task_and_json_mode() -> None:
             )
 
     j = await ev.judge("q", "a", had_context=False, llm=_L())  # type: ignore[arg-type]
-    assert j is not None and j.relevance == 2 and j.grounded is False and j.tokens_in == 50
+    assert j is not None and j.relevance == 2 and j.tokens_in == 50
+    assert j.grounded == 1  # `false` → shkalaning eng pasti
 
 
 # ─── pricing ─────────────────────────────────────────────────────────────────

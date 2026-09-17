@@ -12,17 +12,17 @@ from __future__ import annotations
 
 import inspect
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from functools import lru_cache
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.db.models import Chat, Message
+from app.db.models import Chat, Message, Sender
 from app.llm import LLM, ToolSpec
 from app.logging import get_logger
 from app.mtproto.ratelimit import MethodBuckets
@@ -31,6 +31,7 @@ from app.services import tg_search as TS
 from app.services import untrusted as U
 from app.services.analytics import chat_stats, msg_link
 from app.services.digests import digests_for_window
+from app.services.textnorm import uz_fold
 
 log = get_logger(__name__)
 
@@ -114,12 +115,103 @@ async def _resolve_chat(ctx: ToolContext, args: dict[str, Any]) -> Chat | None:
     return row
 
 
-def _line(chat: Chat, m: Message, *, with_link: bool = True) -> str:
+SENDER_SCAN_MAX = 5_000  # `from_user` fold-skanida ko'riladigan maksimal qator
+SENDER_MATCH_MAX = 50  # `sender_id IN (...)` qopqog'i
+
+
+async def sender_names(
+    session: AsyncSession, account_id: int, ids: Iterable[int]
+) -> dict[int, str]:
+    """`sender_id` → `Ism (@username)` — bitta so'rovlik **chaqiruv keshi**.
+
+    Nega kesh: `_line` har satr uchun chaqiriladi, jadval esa bitta
+    `IN (...)` bilan o'qiladi. Natija prompt chegarasidan o'tadi, shuning
+    uchun `untrusted.neutralize` — ism ham begona matn (odam o'z nomini
+    `</untrusted_data>` deb qo'yishi mumkin).
+
+    Telefon raqami qaytarilmaydi: `senders` da bunday ustun yo'q.
+    """
+    wanted = {int(i) for i in ids if i}
+    if not wanted:
+        return {}
+    rows = (
+        await session.execute(
+            select(Sender.tg_user_id, Sender.display_name, Sender.username).where(
+                Sender.account_id == account_id, Sender.tg_user_id.in_(sorted(wanted))
+            )
+        )
+    ).all()
+    out: dict[int, str] = {}
+    for uid, display, username in rows:
+        name = U.neutralize(display or "").strip()
+        uname = U.neutralize(username or "").strip()
+        if name and uname:
+            out[int(uid)] = f"{name} (@{uname})"
+        elif name or uname:
+            out[int(uid)] = name or f"@{uname}"
+    return out
+
+
+async def resolve_senders(session: AsyncSession, account_id: int, needle: str) -> list[int]:
+    """`from_user` (username yoki ism bo'lagi) → `senders.tg_user_id` ro'yxati.
+
+    Ikki qadam, ataylab shu tartibda:
+
+    1. SQL `ILIKE %needle%` — arzon, indeksdan foydalanadi, ko'p holatda yetadi;
+    2. topilmasa — `uz_fold` bo'yicha skan: lotin va kirill yozuvidagi bir xil
+       ism bir-biriga tushadi.
+       Skan `SENDER_SCAN_MAX` bilan chegaralangan: bu qulaylik kanali, to'liq
+       qidiruv emas.
+    """
+    needle = (needle or "").strip().lstrip("@")
+    if len(needle) < 2:
+        return []
+    like = f"%{needle}%"
+    rows = (
+        await session.execute(
+            select(Sender.tg_user_id)
+            .where(
+                Sender.account_id == account_id,
+                or_(Sender.username.ilike(like), Sender.display_name.ilike(like)),
+            )
+            .limit(SENDER_MATCH_MAX)
+        )
+    ).all()
+    if rows:
+        return [int(r[0]) for r in rows]
+
+    folded = uz_fold(needle)
+    if not folded:
+        return []
+    scan = (
+        await session.execute(
+            select(Sender.tg_user_id, Sender.display_name, Sender.username)
+            .where(Sender.account_id == account_id)
+            .order_by(Sender.updated_at.desc())
+            .limit(SENDER_SCAN_MAX)
+        )
+    ).all()
+    out: list[int] = []
+    for uid, display, username in scan:
+        if folded in uz_fold(display or "") or folded in (username or "").lower():
+            out.append(int(uid))
+            if len(out) >= SENDER_MATCH_MAX:
+                break
+    return out
+
+
+def _line(
+    chat: Chat, m: Message, *, with_link: bool = True, names: Mapping[int, str] | None = None
+) -> str:
     when = m.published_at.strftime("%Y-%m-%d %H:%M") if m.published_at else "?"
     who = (
         chat.title
         if chat.type == "channel" and not m.sender_id
-        else (f"user:{m.sender_id}" if m.sender_id else "—")
+        else (
+            (names or {}).get(int(m.sender_id)) or f"user:{m.sender_id}"
+            if m.sender_id
+            else "—"
+        )
     )
     body = S.compact_text(m.text or "", max_chars=500) or (
         f"[{m.media_type}]" if m.media_type else ""
@@ -203,18 +295,35 @@ async def search_messages(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     if not query:
         return ToolResult("error: `query` is required", ok=False)
     limit = max(1, min(int(args.get("limit") or 15), SEARCH_LIMIT_MAX))
-    hits = await S.hybrid_search(ctx.session, chat.id, query, limit=limit)
-    since = _parse_days(args.get("days"))
+    window = _parse_days(args.get("days"))
+    since = ctx.now - window if window else None
+    from_user = str(args.get("from_user") or "").strip()
+    sender_ids: list[int] | None = None
+    if from_user:
+        sender_ids = await resolve_senders(ctx.session, ctx.account_id, from_user)
+        if not sender_ids:
+            return ToolResult(
+                f'no known sender matching "{from_user}" in this account '
+                "(names come from synced history; try a username or a shorter fragment)",
+                meta={"chat": chat.title, "hits": 0},
+            )
+    # `days` / `from_user` **SQL ichida**: ilgari filtr reytingdan keyin
+    # qo'llanardi — top-N avval kesilib, keyin oynadan tashqarisi tashlanardi
+    # va natija jimgina 15 dan 2 ga tushardi.
+    hits = await S.hybrid_search(
+        ctx.session, chat.id, query, limit=limit, since=since, sender_ids=sender_ids
+    )
     if not hits:
         return ToolResult(
             f'no matches for "{query}" in "{chat.title}"', meta={"chat": chat.title, "hits": 0}
         )
     ids = [h.tg_msg_id for h in hits]
     q = select(Message).where(Message.chat_id == chat.id, Message.tg_msg_id.in_(ids))
-    if since:
-        q = q.where(Message.published_at >= ctx.now - since)
     rows = {m.tg_msg_id: m for m in (await ctx.session.execute(q)).scalars().all()}
-    lines = [_line(chat, rows[i]) for i in ids if i in rows]
+    names = await sender_names(
+        ctx.session, ctx.account_id, (m.sender_id for m in rows.values() if m.sender_id)
+    )
+    lines = [_line(chat, rows[i], names=names) for i in ids if i in rows]
     head = f'chat="{chat.title}" query="{query}" hits={len(lines)} (ranked, best first)'
     return ToolResult(
         _clip(head + "\n" + "\n".join(lines)), meta={"chat": chat.title, "hits": len(lines)}
@@ -233,7 +342,10 @@ async def get_recent_messages(ctx: ToolContext, args: dict[str, Any]) -> ToolRes
         .limit(limit)
     )
     msgs = list(reversed(rows.scalars().all()))
-    lines = [_line(chat, m) for m in msgs]
+    names = await sender_names(
+        ctx.session, ctx.account_id, (m.sender_id for m in msgs if m.sender_id)
+    )
+    lines = [_line(chat, m, names=names) for m in msgs]
     head = f'chat="{chat.title}" latest {len(lines)} messages (oldest first)'
     return ToolResult(
         _clip(head + "\n" + "\n".join(lines)), meta={"chat": chat.title, "n": len(lines)}
@@ -257,7 +369,12 @@ async def get_message_context(ctx: ToolContext, args: dict[str, Any]) -> ToolRes
     msgs = rows.scalars().all()
     if not msgs:
         return ToolResult(f'no messages around #{mid} in "{chat.title}"', ok=False)
-    lines = [("→ " if m.tg_msg_id == mid else "  ") + _line(chat, m) for m in msgs]
+    names = await sender_names(
+        ctx.session, ctx.account_id, (m.sender_id for m in msgs if m.sender_id)
+    )
+    lines = [
+        ("→ " if m.tg_msg_id == mid else "  ") + _line(chat, m, names=names) for m in msgs
+    ]
     return ToolResult(
         _clip(f'chat="{chat.title}" around #{mid}\n' + "\n".join(lines)), meta={"chat": chat.title}
     )
@@ -1367,7 +1484,9 @@ READ_TOOLS: dict[str, Tool] = {
             "search_messages",
             "Find messages in one chat matching a query (keyword + semantic search, ranked). "
             "Use for 'find / where / who said / posts about X'. Returns up to `limit` lines "
-            "with #id, date, author, metrics, text and t.me link.",
+            "with #id, date, author name, metrics, text and t.me link. Narrow with "
+            "`from_user` (a name or @username seen in the synced history) and `days`; both "
+            "are applied inside the search, so `limit` still returns that many matches.",
             {
                 "type": "object",
                 "properties": {
@@ -1385,6 +1504,11 @@ READ_TOOLS: dict[str, Tool] = {
                     "days": {
                         "type": "integer",
                         "description": "Only messages from the last N days (optional)",
+                    },
+                    "from_user": {
+                        "type": "string",
+                        "description": "Only messages from one sender: @username or a "
+                        "fragment of their display name (optional)",
                     },
                 },
                 "required": ["query"],

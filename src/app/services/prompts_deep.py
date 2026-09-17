@@ -144,7 +144,11 @@ clearly about recent, already-indexed material and a server round-trip would onl
 time. "global" when the question names no chat and the answer could be anywhere in the \
 owner's chats. "discover" ONLY when the user asks about Telegram at large — public \
 channels they do not belong to, "what are channels saying about X" — because it reaches \
-outside the owner's own archive.
+outside the owner's own archive. Any turn that says the user is NOT in the channels it \
+asks about is a "discover" turn, in every language: "men a'zo bo'lmagan kanallar", "obuna \
+bo'lmaganlarini ham ko'r", "butun Telegram bo'ylab", "каналы, на которые я не подписан", \
+"я не состою в них", "по всему Telegram", "channels I am not subscribed to", "not a member \
+of", "across Telegram".
 
 Everything else (subqueries, entities, window, chats) must describe the \
 standalone_question, never the literal fragment the user typed.

@@ -43,6 +43,7 @@ from app.db.models import (
     ChatType,
     Message,
     MessageMetricSnapshot,
+    Sender,
     SyncState,
 )
 from app.logging import get_logger
@@ -444,6 +445,66 @@ def message_to_row(chat_id: int, m: Any) -> dict[str, Any] | None:
     }
 
 
+SENDER_NAME_CHARS = 96
+
+
+def sender_to_row(account_id: int, sender: Any) -> dict[str, Any] | None:
+    """Telethon `User` → `senders` qatori. Foydalanuvchi bo'lmasa — `None`.
+
+    Manba `m.sender` — `GetHistory` javobi bilan **birga** kelgan entity keshi,
+    ya'ni qo'shimcha RPC yo'q va allowlist chegarasi joyida (`get_sender()`
+    chaqirilmaydi, u allowlist'da yo'q metodlarga borishi mumkin).
+
+    Kanal/guruh (anonim admin posti) — `None`: `senders` faqat odamlar uchun,
+    kanal nomini `chats.title` allaqachon beradi.
+
+    **Telefon raqami olinmaydi.** `User.phone` bor bo'lsa ham o'qilmaydi:
+    qator qiymati LLM promptiga tushadi.
+
+    Matn `strip_invisible` dan o'tadi (saqlash chegarasi, `message_to_row`
+    bilan bir xil qoida); prompt chegarasidagi `neutralize` — `tools._line` da.
+    """
+    uid = getattr(sender, "id", None)
+    if not isinstance(uid, int) or isinstance(uid, bool):
+        return None
+    if not hasattr(sender, "first_name"):  # Channel / Chat — odam emas
+        return None
+    parts = [
+        str(getattr(sender, attr, "") or "").strip() for attr in ("first_name", "last_name")
+    ]
+    display = strip_invisible(" ".join(x for x in parts if x)).strip()[:SENDER_NAME_CHARS]
+    username = strip_invisible(str(getattr(sender, "username", "") or "").strip())[:64]
+    if not display and not username:
+        return None
+    return {
+        "account_id": int(account_id),
+        "tg_user_id": int(uid),
+        "display_name": display,
+        "username": username or None,
+        "is_bot": bool(getattr(sender, "bot", False)),
+    }
+
+
+async def upsert_senders(rows: list[dict[str, Any]]) -> int:
+    """`senders` upsert. Xatosi sync'ni to'xtatmaydi — nom qulaylik kanali."""
+    if not rows:
+        return 0
+    async with session_scope() as db:
+        stmt = pg_insert(Sender).values(rows)
+        await db.execute(
+            stmt.on_conflict_do_update(
+                index_elements=["account_id", "tg_user_id"],
+                set_={
+                    "display_name": stmt.excluded.display_name,
+                    "username": stmt.excluded.username,
+                    "is_bot": stmt.excluded.is_bot,
+                    "updated_at": func.now(),
+                },
+            )
+        )
+    return len(rows)
+
+
 def raw_peer_id(peer: Any) -> int | None:
     """Telethon `Peer*` / `InputPeer*` → **xom** (musbat) id.
 
@@ -666,11 +727,16 @@ async def _pull(
     # biroz oshib ketishi mumkin — u faqat progress ko'rsatkichi va keyingi
     # sync boshidagi COUNT uni to'g'irlaydi.
     counter = await _message_count(chat_id)
+    account_id = await _account_of(chat_id)
     phase = "backfill" if backfill else "new"
     batch: list[dict[str, Any]] = []
     # phase4/A: `mention_name` faqat Telegram entity'laridan olinadi — matn
     # bilan birga batch'gacha olib boriladi (`messages` da saqlanmaydi).
     batch_entities: dict[tuple[int, int], Any] = {}
+    # Jo'natuvchi nomlari: `m.sender` **shu javob bilan** kelgan entity keshidan
+    # (qo'shimcha RPC yo'q). Batch ichida id bo'yicha yig'iladi — bir odam yuz
+    # marta yozgan bo'lsa ham bitta qator.
+    batch_senders: dict[int, dict[str, Any]] = {}
     total_estimate: int | None = None
     it = client.iter_messages(
         peer, limit=budget, min_id=min_id, offset_id=offset_id, wait_time=WAIT_BETWEEN_BATCHES
@@ -685,10 +751,15 @@ async def _pull(
             ents = getattr(m, "entities", None)
             if ents:
                 batch_entities[(chat_id, int(m.id))] = ents
+            if account_id is not None:
+                srow = sender_to_row(account_id, getattr(m, "sender", None))
+                if srow is not None:
+                    batch_senders[srow["tg_user_id"]] = srow
         report.newest_id = max(report.newest_id or 0, int(m.id))
         report.oldest_id = min(report.oldest_id or int(m.id), int(m.id))
         if len(batch) >= BATCH:
             written = await upsert_messages(batch, tg_entities=batch_entities)
+            await _flush_senders(batch_senders)
             report.inserted_or_updated += written
             counter += written
             await _progress(
@@ -701,10 +772,12 @@ async def _pull(
             )
             batch = []
             batch_entities = {}
+            batch_senders = {}
     if batch:
         written = await upsert_messages(batch, tg_entities=batch_entities)
         report.inserted_or_updated += written
         counter += written
+    await _flush_senders(batch_senders)
     report.fetched += fetched
     if fetched:
         SYNC_MESSAGES.inc(fetched)
@@ -722,6 +795,33 @@ async def _pull(
         chat_id, report, total_estimate, synced_total=counter, phase=phase, fetched=report.fetched
     )
     return fetched
+
+
+async def _account_of(chat_id: int) -> int | None:
+    """Chat egasi (`chats.account_id`) — `senders` qatori uchun, bir marta.
+
+    Topilmasa (yoki so'rov yiqilsa) `None`: jo'natuvchi nomlari **qulaylik**
+    kanali, ingest esa asosiy yo'l — nom uchun sync to'xtamaydi.
+    """
+    try:
+        async with session_scope() as db:
+            row = (
+                await db.execute(select(Chat.account_id).where(Chat.id == chat_id))
+            ).scalar_one_or_none()
+        return int(row) if row is not None else None
+    except Exception as exc:
+        log.warning("ingest.sender_account_lookup_failed", chat_id=chat_id, error=str(exc)[:200])
+        return None
+
+
+async def _flush_senders(rows: dict[int, dict[str, Any]]) -> None:
+    """Nomlar sync'ni yiqitmaydi: xato — log, ingest davom etadi."""
+    if not rows:
+        return
+    try:
+        await upsert_senders(list(rows.values()))
+    except Exception as exc:  # nom qulaylik kanali, asosiy yo'l emas
+        log.warning("ingest.senders_failed", error=str(exc)[:200], n=len(rows))
 
 
 async def _message_count(chat_id: int) -> int:

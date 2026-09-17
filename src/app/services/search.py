@@ -243,12 +243,13 @@ async def _run_tsv(
     chat_id: int,
     limit: int,
     source: str,
+    extra: Sequence[Any] = (),
 ) -> list[Hit]:
     q = func.to_tsquery(config, tsq)
     score = func.ts_rank_cd(col, q).label("score")
     stmt = (
         select(Message.id, Message.tg_msg_id, score)
-        .where(Message.chat_id == chat_id, *_alive(), col.op("@@")(q))
+        .where(Message.chat_id == chat_id, *_alive(), *extra, col.op("@@")(q))
         .order_by(score.desc())
         .limit(limit)
     )
@@ -257,7 +258,12 @@ async def _run_tsv(
 
 
 async def fts_uz_search(
-    session: AsyncSession, chat_id: int, terms: Sequence[str], *, limit: int = 20
+    session: AsyncSession,
+    chat_id: int,
+    terms: Sequence[str],
+    *,
+    limit: int = 20,
+    extra: Sequence[Any] = (),
 ) -> list[Hit]:
     """`tsv_uz` (simple config, fold qilingan matn) + prefiks mos.
 
@@ -273,18 +279,37 @@ async def fts_uz_search(
     if not and_q:
         return []
     hits = await _run_tsv(
-        session, col, config="simple", tsq=and_q, chat_id=chat_id, limit=limit, source="tsv_uz"
+        session,
+        col,
+        config="simple",
+        tsq=and_q,
+        chat_id=chat_id,
+        limit=limit,
+        source="tsv_uz",
+        extra=extra,
     )
     if hits or len(folded) < 2:
         return hits
     or_q = _tsquery(folded, prefix=True, op=" | ")
     return await _run_tsv(
-        session, col, config="simple", tsq=or_q, chat_id=chat_id, limit=limit, source="tsv_uz"
+        session,
+        col,
+        config="simple",
+        tsq=or_q,
+        chat_id=chat_id,
+        limit=limit,
+        source="tsv_uz",
+        extra=extra,
     )
 
 
 async def fts_ru_search(
-    session: AsyncSession, chat_id: int, terms: Sequence[str], *, limit: int = 20
+    session: AsyncSession,
+    chat_id: int,
+    terms: Sequence[str],
+    *,
+    limit: int = 20,
+    extra: Sequence[Any] = (),
 ) -> list[Hit]:
     """`tsv_ru` (`russian` config \u2014 stemming ishlaydi, shuning uchun prefiks yo'q)."""
     col = getattr(Message, "tsv_ru", None)
@@ -297,18 +322,37 @@ async def fts_ru_search(
     if not and_q:
         return []
     hits = await _run_tsv(
-        session, col, config="russian", tsq=and_q, chat_id=chat_id, limit=limit, source="tsv_ru"
+        session,
+        col,
+        config="russian",
+        tsq=and_q,
+        chat_id=chat_id,
+        limit=limit,
+        source="tsv_ru",
+        extra=extra,
     )
     if hits or len(clean) < 2:
         return hits
     or_q = _tsquery(clean, prefix=False, op=" | ")
     return await _run_tsv(
-        session, col, config="russian", tsq=or_q, chat_id=chat_id, limit=limit, source="tsv_ru"
+        session,
+        col,
+        config="russian",
+        tsq=or_q,
+        chat_id=chat_id,
+        limit=limit,
+        source="tsv_ru",
+        extra=extra,
     )
 
 
 async def trigram_search(
-    session: AsyncSession, chat_id: int, terms: Sequence[str], *, limit: int = 20
+    session: AsyncSession,
+    chat_id: int,
+    terms: Sequence[str],
+    *,
+    limit: int = 20,
+    extra: Sequence[Any] = (),
 ) -> list[Hit]:
     """Imlo xatosi/qo'shimcha farqi \u2014 so'z chegarasida o'lchangan trigram."""
     col = getattr(Message, "text_fold", None)
@@ -324,7 +368,7 @@ async def trigram_search(
         op=STRICT_TRGM_OP,
         threshold=STRICT_TRGM_THRESHOLD,
         terms=folded,
-        conds=[Message.chat_id == chat_id, *_alive()],
+        conds=[Message.chat_id == chat_id, *_alive(), *extra],
         limit=limit,
     )
     if hits:
@@ -338,7 +382,7 @@ async def trigram_search(
         op=TRGM_OP,
         threshold=TRGM_THRESHOLD,
         terms=folded,
-        conds=[Message.chat_id == chat_id, *_alive()],
+        conds=[Message.chat_id == chat_id, *_alive(), *extra],
         limit=limit,
     )
 
@@ -423,7 +467,13 @@ async def fts_search(
 
 
 async def vector_search(
-    session: AsyncSession, chat_id: int, question: str, *, limit: int = 20, llm: LLM | None = None
+    session: AsyncSession,
+    chat_id: int,
+    question: str,
+    *,
+    limit: int = 20,
+    llm: LLM | None = None,
+    extra: Sequence[Any] = (),
 ) -> list[Hit]:
     """Embedding bor bo'lsa — cosine yaqinlik. Yo'q bo'lsa bo'sh (jimgina emas — log)."""
     has_any = (
@@ -449,7 +499,12 @@ async def vector_search(
     stmt = (
         select(Message.id, Message.tg_msg_id, dist)
         .join(MessageEmbedding, MessageEmbedding.message_id == Message.id)
-        .where(Message.chat_id == chat_id, *_alive(), *_embed_model(MessageEmbedding.model))
+        .where(
+            Message.chat_id == chat_id,
+            *_alive(),
+            *extra,
+            *_embed_model(MessageEmbedding.model),
+        )
         .order_by(dist)
         .limit(limit)
     )
@@ -511,12 +566,21 @@ async def hybrid_search(
     expand: bool = False,
     llm: LLM | None = None,
     weights: Sequence[float] | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    sender_ids: Sequence[int] | None = None,
 ) -> list[Hit]:
     """To'rt kanal (tsv_uz, tsv_ru, trigram, vektor) → og'irlikli RRF.
 
     `expand=True` bo'lsa (yoki tayyor `expansion` berilsa) so'rov ko'p tilli
     variantlarga yoyiladi. Default `False` — mavjud chaqiruvchilar (`tools.py`)
     xatti-harakati o'zgarmaydi.
+
+    `since` / `until` / `sender_ids` — `hybrid_search_multi` dagi `_scope` bilan
+    **bir xil** semantika (`published_at >= since`, `< until`, `sender_id IN`).
+    Ular SQL ichiga tushadi, ya'ni filtr reytingdan **oldin** ishlaydi: ilgari
+    chaqiruvchilar (`tools.search_messages` ning `days` argumenti) top-N ni
+    olib, keyin filtrlardi va natija jimgina qisqarardi.
 
     Kanallar **ketma-ket** yuradi: bitta `AsyncSession` ustida parallel so'rov
     xavfsiz emas (`asyncio.gather` bu yerda InterfaceError beradi).
@@ -536,11 +600,19 @@ async def hybrid_search(
     if not uz_terms and not ru_terms:
         return []
 
+    extra: list[Any] = []
+    if since is not None:
+        extra.append(Message.published_at >= since)
+    if until is not None:
+        extra.append(Message.published_at < until)
+    if sender_ids:
+        extra.append(Message.sender_id.in_(list(sender_ids)))
+
     wide = limit * 2
-    uz = await fts_uz_search(session, chat_id, uz_terms, limit=wide)
-    ru = await fts_ru_search(session, chat_id, ru_terms, limit=wide)
-    tri = await trigram_search(session, chat_id, uz_terms or ru_terms, limit=wide)
-    vec = await vector_search(session, chat_id, question, limit=wide, llm=llm)
+    uz = await fts_uz_search(session, chat_id, uz_terms, limit=wide, extra=extra)
+    ru = await fts_ru_search(session, chat_id, ru_terms, limit=wide, extra=extra)
+    tri = await trigram_search(session, chat_id, uz_terms or ru_terms, limit=wide, extra=extra)
+    vec = await vector_search(session, chat_id, question, limit=wide, llm=llm, extra=extra)
 
     fused = rrf(uz, ru, tri, vec, weights=weights or DEFAULT_RRF_WEIGHTS)
     log.debug(
@@ -1025,7 +1097,9 @@ async def hybrid_search_multi(
         expansion: tayyor ko'p tilli kengaytma; `expand=True` bo'lsa o'zi oladi.
         llm: LLM fasadi (embedding va kengaytirish uchun).
         weights: besh kanal og'irligi.
-        levels: tugun kanalidagi darajalar.
+        levels: tugun kanalidagi darajalar. **Bo'sh** ketma-ketlik — kanal
+            umuman yugurmaydi (chaqiruvchi tugunlarni o'zi qidiradi yoki
+            reja faqat level-0 so'ragan).
         entities: planner ajratgan identifikatorlar (`@nurbek`, `#deploy`,
             `example.com`). Berilsa — **oltinchi** RRF kirishi
             (`entity_search`, og'irlik `W_ENTITY`); berilmasa kanal umuman
@@ -1095,18 +1169,21 @@ async def hybrid_search_multi(
     qvec = await _query_vector(question, llm)
     vec = await _vector_multi(session, qvec, conds=conds, limit=wide) if qvec else []
 
-    node_hits = await node_search(
-        session,
-        account_id,
-        qvec if qvec is not None else question,
-        text=question,
-        levels=levels,
-        chat_ids=chat_ids,
-        since=since,
-        until=until,
-        limit=NODE_CITE_NODES,
-    )
-    nodes = await node_hits_to_messages(session, node_hits)
+    node_hits: list[NodeHit] = []
+    nodes: list[Hit] = []
+    if levels:
+        node_hits = await node_search(
+            session,
+            account_id,
+            qvec if qvec is not None else question,
+            text=question,
+            levels=levels,
+            chat_ids=chat_ids,
+            since=since,
+            until=until,
+            limit=NODE_CITE_NODES,
+        )
+        nodes = await node_hits_to_messages(session, node_hits)
 
     ents: list[Hit] = []
     if ent_terms:
