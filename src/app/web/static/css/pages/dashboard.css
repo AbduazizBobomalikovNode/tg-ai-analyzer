@@ -1,0 +1,241 @@
+/* pages/dashboard.css — `/dashboard` (ui/R4).
+ *
+ * Qoidalar:
+ *   * KPI panjarasi `auto-fit, minmax(220px, 1fr)` — 390px da bitta ustun,
+ *     1440px da to'rtta, oraliqda o'zi joylashadi (media query kerak emas).
+ *   * Grafik kartalari `container-type: inline-size` — ichki o'lchamlar
+ *     ekran emas, **konteyner** kengligiga qarab o'zgaradi.
+ *   * 640px dan pastda jadval qatorlari kartaga aylanadi.
+ *   * 390px da gorizontal skroll yo'q: hamma narsa `min-inline-size: 0`.
+ */
+
+/* ── Davr almashtirgichi ─────────────────────────────────────────────── */
+.dash-period button { min-block-size: var(--tap); }
+
+@media (max-width: 520px) {
+  .dash-period { inline-size: 100%; }
+  .dash-period button { flex: 1 1 0; padding-inline: var(--s-2); }
+}
+
+/* ── (b) KPI kartalari ───────────────────────────────────────────────── */
+.dash-kpis {
+  display: grid; gap: var(--s-3);
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+.kpi {
+  display: flex; flex-direction: column; gap: var(--s-1);
+  min-inline-size: 0;
+  padding: var(--s-3) var(--s-4);
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: var(--r-lg, 16px); box-shadow: var(--sh-1);
+}
+.kpi-head { display: flex; align-items: center; gap: var(--s-2); min-inline-size: 0; }
+.kpi-head .spacer { flex: 1 1 auto; }
+.kpi-ico { display: inline-flex; color: var(--muted); flex: none; }
+.kpi-label {
+  margin: 0; font-size: var(--fs-sm); font-weight: 600; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-inline-size: 0;
+}
+.kpi-value {
+  margin: 0; display: flex; align-items: baseline; gap: var(--s-1); flex-wrap: wrap;
+}
+.kpi-value b {
+  font-size: var(--fs-2xl); font-weight: 700; letter-spacing: -.02em;
+  font-variant-numeric: tabular-nums; line-height: 1.1;
+}
+.kpi-unit { font-size: var(--fs-sm); color: var(--muted); }
+
+/* Kontekst qatori — delta / "n=" / byudjet. Rang **yolg'iz** ma'no
+ * tashimaydi: o'q belgisi va matn ham bor (docs/ui-v2.md § 7). */
+.kpi-ctx {
+  display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
+  font-size: var(--fs-xs); color: var(--muted); line-height: var(--lh-body);
+}
+.kpi-ctx.is-good b { color: var(--ok); }
+.kpi-ctx.is-bad b { color: var(--danger); }
+.kpi-ctx.kpi-kv { gap: var(--s-1); }
+.kpi-ctx.kpi-kv b { color: var(--text); }
+.kpi-ctx .delta-arrow { display: inline-flex; }
+.kpi-ctx.is-good .delta-arrow { color: var(--ok); }
+.kpi-ctx.is-bad .delta-arrow { color: var(--danger); }
+.delta-arrow .icon { inline-size: 14px; block-size: 14px; }
+.delta-arrow.is-down { transform: rotate(180deg); }
+
+.kpi-spark { inline-size: 100%; block-size: 24px; margin-block-start: auto; opacity: .85; }
+.kpi-budget { display: grid; gap: 4px; margin-block-start: auto; }
+.kpi-empty { grid-column: 1 / -1; }
+.kpi.is-loading { gap: var(--s-2); min-block-size: 120px; }
+.kpi.is-loading .skeleton { block-size: .9em; border-radius: var(--r-sm, 6px); }
+.kpi.is-loading .skeleton.l1 { inline-size: 55%; block-size: 1.6em; }
+.kpi.is-loading .skeleton.l2 { inline-size: 80%; }
+
+/* Telefonda to'rtta karta bitta ustunda deyarli butun ekranni egallaydi —
+ * "10 soniyada tushunarli" degani shu emas. Qiymatlar qisqa ("10",
+ * "$0,32", "52,0s", "0%"), shuning uchun 520px dan pastda ikki ustun.
+ * Blok **KPI qoidalaridan keyin** turadi: bir xil spetsifiklikda keyingisi
+ * yutadi, aks holda bu tuzatishlar jimgina ishlamaydi. */
+@media (max-width: 520px) {
+  .dash-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s-2); }
+  .kpi { padding: var(--s-2) var(--s-3); }
+  .kpi-value b { font-size: var(--fs-xl); }
+  .kpi-spark { block-size: 18px; }
+  /* Tor kartada "Javob tezligi" bir qatorga sig'maydi — kesib tashlash
+   * o'rniga ikkinchi qatorga o'tsin (yorliq har doim to'liq o'qilsin). */
+  .kpi-label { white-space: normal; overflow: visible; line-height: var(--lh-tight); }
+}
+
+/* ── O'lchagich (byudjet · model ulushi · chat faolligi) ─────────────── */
+.meter {
+  inline-size: 100%; block-size: 6px; border-radius: var(--r-full, 999px);
+  background: var(--panel-2); overflow: hidden;
+}
+.meter.sm { block-size: 4px; }
+.meter > i {
+  display: block; block-size: 100%; inline-size: 0;
+  background: var(--accent); border-radius: inherit;
+  transition: inline-size var(--t-card, 140ms) var(--ease, ease);
+}
+.meter > i.is-hot { background: var(--danger); }
+
+/* ── ⓘ izoh ──────────────────────────────────────────────────────────── */
+/* Slot **flex** bo'lishi shart: inline konteynerda tugma tagida baseline
+ * bo'sh joyi qoladi va karta sarlavhasi 64px ga cho'ziladi (mobil QA). */
+.hint-slot { display: inline-flex; align-items: center; flex: none; }
+.hint { position: relative; display: inline-flex; flex: none; }
+.hint-btn {
+  position: relative;
+  display: inline-flex; align-items: center; justify-content: center;
+  inline-size: 28px; block-size: 28px; padding: 0; flex: none;
+  border: 0; border-radius: var(--r-full, 999px);
+  background: none; color: var(--faint); cursor: pointer;
+}
+.hint-btn:hover { color: var(--text); background: var(--panel-2); }
+.hint-btn .icon { inline-size: 16px; block-size: 16px; }
+/* Teginish nishoni 44px — lekin **layout'ni kengaytirmasdan**: tugmaning
+ * o'zi 28px bo'lib qoladi (aks holda karta sarlavhasi telefonda 64px ga
+ * cho'ziladi), nishon esa ko'rinmas `::after` bilan kengaytiriladi. */
+.hint-btn::after {
+  content: ""; position: absolute; inset: calc((28px - var(--tap, 44px)) / 2);
+}
+.hint-pop {
+  position: absolute; inset-block-start: calc(100% + 4px); inset-inline-end: 0;
+  z-index: 5; margin: 0; inline-size: max-content; max-inline-size: min(260px, 72vw);
+  padding: var(--s-2) var(--s-3);
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: var(--r-md, 12px); box-shadow: var(--sh-2);
+  font-size: var(--fs-xs); font-weight: 400; color: var(--text);
+  line-height: var(--lh-body); text-transform: none; letter-spacing: normal;
+}
+
+/* ── (d) Grafiklar ───────────────────────────────────────────────────── */
+.dash-charts, .dash-cols {
+  display: grid; gap: var(--s-4);
+  grid-template-columns: minmax(0, 1fr);
+}
+@media (min-width: 861px) {
+  .dash-charts, .dash-cols { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+.dash-charts > .card-v2 { container-type: inline-size; }
+
+.chart-box { min-inline-size: 0; }
+.chart-canvas { min-inline-size: 0; }
+.chart-svg { inline-size: 100%; block-size: auto; display: block; }
+.chart-legend {
+  display: flex; gap: var(--s-3); flex-wrap: wrap;
+  font-size: var(--fs-xs); color: var(--muted); margin-block-end: var(--s-2);
+}
+.chart-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.chart-legend .sw { inline-size: 10px; block-size: 10px; border-radius: 3px; flex: none; }
+
+/* Jadval muqobili — yig'ilgan, lekin klaviatura bilan ochiladi. */
+.chart-table { margin-block-start: var(--s-2); }
+.chart-table summary {
+  cursor: pointer; font-size: var(--fs-xs); color: var(--muted);
+  min-block-size: var(--tap); display: flex; align-items: center;
+}
+.chart-table table { inline-size: 100%; border-collapse: collapse; font-size: var(--fs-xs); }
+.chart-table th, .chart-table td { padding: 4px 6px; border-block-end: 1px solid var(--border-soft); text-align: start; }
+.chart-table td.num { text-align: end; font-variant-numeric: tabular-nums; }
+
+@container (max-width: 380px) {
+  .chart-legend { gap: var(--s-2); }
+}
+
+/* ── (e) Modellar ────────────────────────────────────────────────────── */
+.model-list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--s-2); }
+.model-row {
+  display: grid; gap: var(--s-1);
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas: "main nums" "bar bar";
+  align-items: center;
+  padding: var(--s-2) 0;
+  border-block-end: 1px solid var(--border-soft);
+}
+.model-row:last-child { border-block-end: 0; }
+.model-main { grid-area: main; min-inline-size: 0; display: grid; gap: 2px; }
+.model-name {
+  font-weight: 600; font-size: var(--fs-sm);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.model-sub { font-size: var(--fs-xs); color: var(--muted); }
+.model-nums {
+  grid-area: nums; display: flex; gap: var(--s-3); align-items: baseline;
+  font-size: var(--fs-xs); color: var(--muted); white-space: nowrap;
+}
+.model-nums b { color: var(--text); font-variant-numeric: tabular-nums; }
+.model-nums small { font-size: var(--fs-xs); }
+.model-row .meter { grid-area: bar; }
+
+/* 640px dan pastda — sonlar ostki qatorga (kartaga o'xshab). */
+@media (max-width: 640px) {
+  .model-row { grid-template-columns: minmax(0, 1fr); grid-template-areas: "main" "nums" "bar"; }
+  .model-nums { gap: var(--s-3); flex-wrap: wrap; white-space: normal; }
+}
+
+/* ── (f) Eng faol chatlar ────────────────────────────────────────────── */
+.chat-list { display: grid; gap: 2px; }
+.chat-list .row-body { gap: 6px; }
+.chat-list .row-aside { gap: 4px; font-size: var(--fs-xs); color: var(--muted); }
+.chat-list .row-aside b { color: var(--text); font-variant-numeric: tabular-nums; }
+
+/* ── (g) Ko'rib chiqish ──────────────────────────────────────────────── */
+.review-list {
+  display: grid; gap: var(--s-2);
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+.review-card {
+  display: grid; gap: var(--s-2); min-inline-size: 0;
+  padding: var(--s-3); text-decoration: none; color: inherit;
+  background: var(--panel-2); border: 1px solid var(--border-soft);
+  border-radius: var(--r-md, 12px);
+  min-block-size: var(--tap);
+  transition: box-shadow var(--t-card, 140ms) var(--ease, ease);
+}
+.review-card:hover { box-shadow: var(--sh-2); }
+.review-head { display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap; font-size: var(--fs-xs); color: var(--muted); }
+.review-head .spacer { flex: 1 1 auto; }
+.review-q {
+  margin: 0; font-size: var(--fs-sm); line-height: var(--lh-body);
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+.review-open { display: inline-flex; align-items: center; gap: 4px; font-size: var(--fs-xs); color: var(--accent-text); }
+
+/* ── (h) Tizim ───────────────────────────────────────────────────────── */
+.dash-system { padding: 0; }
+.dash-system > summary {
+  display: flex; align-items: center; gap: var(--s-2);
+  padding: var(--s-3) var(--s-4); min-block-size: var(--tap);
+  cursor: pointer; font-weight: 600;
+}
+.dash-system > summary .spacer { flex: 1 1 auto; }
+.dash-system > summary .icon { color: var(--muted); }
+.dash-system[open] > summary .chev { transform: rotate(180deg); }
+.dash-system > div { padding: 0 var(--s-4) var(--s-4); }
+.kv { display: grid; gap: var(--s-2); }
+.kv-row {
+  display: flex; align-items: flex-start; gap: var(--s-3);
+  font-size: var(--fs-sm); flex-wrap: wrap;
+}
+.kv-row > span:first-child { color: var(--muted); flex: 1 1 auto; min-inline-size: 0; }
+.kv-row > b, .kv-row > .pill { flex: none; text-align: end; }
+.hb-list { display: grid; gap: 2px; font-size: var(--fs-xs); color: var(--muted); text-align: end; }

@@ -592,8 +592,19 @@ input[type="checkbox"], input[type="radio"] { inline-size: auto; block-size: aut
   animation: tgai-sync-shimmer 1.6s linear infinite;
 }
 @keyframes tgai-sync-shimmer { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+/* Taxmin yo'q (`total_estimate` noma'lum) — 0% deb ko'rsatmaymiz, o'rniga
+   "band" holatini bildiruvchi siljib turuvchi chiziqcha. */
+.sync-bar.is-indeterminate > i {
+  inline-size: 40% !important;
+  animation: tgai-sync-indeterminate 1.4s ease-in-out infinite;
+}
+@keyframes tgai-sync-indeterminate {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(250%); }
+}
 @media (prefers-reduced-motion: reduce) {
   .sync-bar.is-live > i::after { display: none; }
+  .sync-bar.is-indeterminate > i { animation: none; inline-size: 100%; opacity: .35; }
   .icon-btn-v2.is-syncing::after { display: none; }
 }
 

@@ -508,6 +508,8 @@ function startSyncCenter() {
     const li = refs.rows?.querySelector(`.chat-row[data-id="${id}"]`);
     if (!li) return;
     const info = liveChat(status, id);
+    // `liveChat().percent` yaxlitlanmagan (sync-center.js) — chiziq shundan
+    // silliq to'ladi, `aria-valuenow` esa yaxlitlangan qiymatni ko'rsatadi.
     const pct = info.percent == null ? 0 : info.percent;
     li.classList.add("is-syncing");
     liveRow = li;
@@ -519,8 +521,8 @@ function startSyncCenter() {
       }, el("i"));
       li.appendChild(node);
     }
-    node.setAttribute("aria-valuenow", String(pct));
-    node.firstChild.style.inlineSize = `${pct}%`;
+    node.setAttribute("aria-valuenow", String(Math.round(pct)));
+    node.firstChild.style.inlineSize = `${pct.toFixed(2)}%`;
   });
 }
 

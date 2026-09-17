@@ -12,6 +12,7 @@ Qo'riqlaydi:
 
 from __future__ import annotations
 
+import itertools
 import json
 import re
 import shutil
@@ -504,3 +505,109 @@ def test_page_modules_only_use_icons_that_exist() -> None:
         used |= set(re.findall(r'\bicon(?:Button)?\(\s*"([a-z0-9-]+)"', text))
     assert used, "sahifa modullarida ikonka ishlatilmayapti — regex eskirganmi?"
     assert not (used - have), f"sprite'da yo'q ikonkalar: {sorted(used - have)}"
+
+
+# ─── ui/R4: `/dashboard` grafik yordamchilari ────────────────────────────────
+#
+# `niceMax` / `tickValues` / `tickIndices` / `linePath` / `deltaPct` —
+# DOM'siz sof funksiyalar, shuning uchun node'da to'g'ridan-to'g'ri
+# o'lchanadi. Ular grafikning o'qini va yorliq zichligini belgilaydi:
+# xato bo'lsa yorliqlar bir-birining ustiga chiqadi yoki o'q "3,7k" kabi
+# o'qib bo'lmaydigan sonlar bilan to'ladi.
+
+DASH_JS = STATIC / "pages/dashboard.js"
+
+
+def _dash_module(script: str, payload: object) -> object:
+    assert NODE is not None
+    src = (
+        f"const M = await import({json.dumps(DASH_JS.as_uri())});\n"
+        "const { readFileSync } = await import('node:fs');\n"
+        "const INPUT = JSON.parse(readFileSync(0, 'utf8'));\n"
+        f"{script}\n"
+    )
+    proc = subprocess.run(  # noqa: S603
+        [NODE, "--input-type=module", "-e", src],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=30,
+    )
+    if proc.returncode != 0:
+        raise AssertionError(f"node xatosi: {proc.stderr[-2000:]}")
+    return json.loads(proc.stdout)
+
+
+def test_nice_max_rounds_the_axis_to_a_readable_number() -> None:
+    out = _dash_module(
+        "process.stdout.write(JSON.stringify(INPUT.map((v) => M.niceMax(v))));",
+        [0, -5, 1, 3, 7, 12, 23, 47, 99, 1234, 0.004],
+    )
+    assert out[0] == 1 and out[1] == 1  # nol/manfiy — bo'sh grafik ham chiziladi
+    assert out == [1, 1, 1, 5, 10, 20, 25, 50, 100, 2000, 0.005]
+    # Har doim qiymatdan kichik bo'lmasligi shart (ustun kesilib qolmasin).
+    for value, top in zip([1, 3, 7, 12, 23, 47, 99, 1234], out[2:10], strict=True):
+        assert top >= value
+
+
+def test_tick_values_pick_a_readable_step_not_a_fixed_count() -> None:
+    """Qadam "chiroyli" bo'lmasa o'q "0 · 1,7 · 3,3 · 5" ko'rinishida
+    chiqadi — sonlar o'qilmaydi. Chiziqlar soni shunga moslashadi."""
+    out = _dash_module(
+        "process.stdout.write(JSON.stringify(INPUT.map(([m, o]) => M.tickValues(m, 4, o))));",
+        [[7, {}], [5, {"integer": True}], [100, {"integer": True}], [500000, {}]],
+    )
+    for ticks in out:
+        assert ticks[0] == 0
+        assert ticks == sorted(ticks)
+    assert out[0][-1] == 10 and 2.5 in out[0]        # 0 · 2,5 · 5 · 7,5 · 10
+    assert out[1] == [0, 1, 2, 3, 4, 5]              # savollar — butun sonlar
+    assert out[2] == [0, 25, 50, 75, 100]
+    assert all(float(v).is_integer() for v in out[3])
+
+
+def test_tick_indices_thin_labels_so_they_never_collide() -> None:
+    """Yorliqlar orasidagi masofa **kamida** bitta yorliq kengligicha."""
+    out = _dash_module(
+        "process.stdout.write(JSON.stringify(INPUT.map(([n, w]) => M.tickIndices(n, w))));",
+        [[0, 6], [7, 6], [30, 6], [30, 2], [90, 8]],
+    )
+    assert out[0] == []
+    assert out[1] == [0, 2, 4, 6]  # 7 kun, 6 yorliq o'rni → har ikkinchisi
+    assert len(out[2]) <= 6 and out[2][0] == 0
+    assert out[3] == [0, 15]  # tor konteyner — ikkitagina yorliq
+    for indices in out[1:]:
+        # tartib o'sadi va qadam bir xil (yorliqlar "sakramaydi")
+        steps = {b - a for a, b in itertools.pairwise(indices)}
+        assert len(steps) <= 1, indices
+        assert indices == sorted(indices)
+    # "oxirgisi majburiy" yo'q: 30 kun / 6 yorliq → oxirgi indeks 29 emas
+    assert 29 not in out[2] or len(out[2]) == 30
+
+
+def test_line_path_breaks_where_a_day_has_no_measurement() -> None:
+    """`null` kun — chiziq uziladi (nolga tushgandek ko'rinmasin)."""
+    out = _dash_module(
+        "process.stdout.write(JSON.stringify(INPUT.map((pts) => M.linePath(pts))));",
+        [
+            [],
+            [{"x": 0, "y": 10}, {"x": 5, "y": 2}],
+            [{"x": 0, "y": 1}, None, {"x": 9, "y": 3}],
+        ],
+    )
+    assert out[0] == ""
+    assert out[1] == "M0.00,10.00L5.00,2.00"
+    assert out[2].count("M") == 2 and "L" not in out[2]
+
+
+def test_delta_pct_is_null_without_a_previous_period() -> None:
+    out = _dash_module(
+        "process.stdout.write(JSON.stringify(INPUT.map(([a, b]) => M.deltaPct(a, b))));",
+        [[10, 0], [10, 5], [5, 10], [0, 4], [7, 7]],
+    )
+    assert out[0] is None          # bo'lish yo'q — sahifa matn bilan aytadi
+    assert out[1] == 1.0
+    assert out[2] == -0.5
+    assert out[3] == -1.0
+    assert out[4] == 0.0

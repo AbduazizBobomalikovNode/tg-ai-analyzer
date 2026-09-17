@@ -784,17 +784,8 @@ a.topbar-ctx:hover { background: var(--accent-soft-2); }
   border-radius: var(--r-md); padding: 1rem 1.1rem; min-width: 0; box-shadow: var(--sh-1);
 }
 .card h3 { margin: 0 0 .7rem; font-size: .92rem; letter-spacing: -.01em; }
-.chart { width: 100%; }
-.chart svg text { font-family: var(--font); fill: var(--muted); }
-.chart-table { margin-top: .5rem; font-size: .8rem; }
-.chart-table summary { cursor: pointer; color: var(--muted); }
-.chart-table summary:hover { color: var(--text); }
-.chart-table table { margin-top: .35rem; }
-
-.legend { display: flex; gap: 1rem; font-size: .76rem; color: var(--muted); margin-bottom: .4rem; flex-wrap: wrap; }
-.legend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: .35rem; vertical-align: -1px; }
-.sw.s1 { background: var(--series-1); } .sw.s2 { background: var(--series-2); }
-.sw.good { background: var(--good); } .sw.bad { background: var(--bad); }
+/* Eski `/dashboard` uslublari (`.chart`, `.legend`, `.sw`, `.kv`) olib
+ * tashlandi — sahifa `css/pages/dashboard.css` ga ko'chdi (ui/R4). */
 
 .table-wrap { overflow-x: auto; }
 .card table { width: 100%; border-collapse: collapse; font-size: .85rem; }
@@ -804,8 +795,6 @@ a.topbar-ctx:hover { background: var(--accent-soft-2); }
 .card th { color: var(--faint); font-weight: 700; font-size: .68rem; text-transform: uppercase; letter-spacing: .06em; }
 .card td.num { text-align: right; font-variant-numeric: tabular-nums; }
 
-.kv .kv-row { display: flex; justify-content: space-between; gap: 1rem; padding: .4rem 0; border-bottom: 1px solid var(--border-soft); font-size: .88rem; }
-.kv .kv-row:last-child { border-bottom: 0; }
 .review { list-style: none; margin: 0; padding: 0; }
 .review li { padding: .55rem 0; border-bottom: 1px solid var(--border-soft); font-size: .87rem; }
 .review li:last-child { border-bottom: 0; }

@@ -114,14 +114,31 @@ function briefingCard(row, { stale }) {
   return out;
 }
 
+/**
+ * Avval ro'yxat (`/api/briefings?limit=2`) — bugun/kecha kunlari **haqiqatan
+ * bor**mi shuni ko'rsatadi. To'liq briefing (`/api/briefings/{day}`) faqat
+ * ro'yxatda bo'lgan kun uchun so'raladi — "hali tayyor emas" holati endi
+ * console'da 404 chiqarmaydi (bekorga so'rov yo'q).
+ */
 async function loadBriefing(accountId) {
   const box = $("#brief-card");
   if (!box) return;
   const badge = $("#brief-badge");
   const q = accountId ? `?account_id=${accountId}` : "";
+  const listQ = accountId ? `?account_id=${accountId}&limit=2` : "?limit=2";
+
+  let items = [];
+  try {
+    items = (await get(`/api/briefings${listQ}`)).items || [];
+  } catch {
+    replace(box, briefingEmpty());
+    return;
+  }
+  const byDay = new Set(items.map((r) => r.day));
 
   for (const [offset, stale] of [[0, false], [-1, true]]) {
     const day = dayKey(offset);
+    if (!byDay.has(day)) continue;
     try {
       const row = await get(`/api/briefings/${day}${q}`);
       replace(box, briefingCard(row, { stale }));
@@ -131,8 +148,9 @@ async function loadBriefing(accountId) {
         badge.className = stale ? "pill warn" : "pill ok";
       }
       return;
-    } catch (err) {
-      if (err && err.status !== 404) { replace(box, briefingEmpty()); return; }
+    } catch {
+      replace(box, briefingEmpty());
+      return;
     }
   }
   replace(box, briefingEmpty());

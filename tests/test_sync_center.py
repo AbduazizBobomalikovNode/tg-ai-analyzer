@@ -538,6 +538,14 @@ out.chat = [
   S.chatPercent(null),
   S.chatPercent({{ synced_total: 250, total_estimate: 1000 }}),
   S.chatPercent({{ synced_total: 5 }}),
+  S.chatPercent({{ synced_total: 0, total_estimate: 0 }}),
+];
+// 600k xabarli chatda ham chiziq "muzlamasin" — chatPercent/overallPercent
+// **yaxlitlanmagan** qiymat qaytaradi, yaxlitlash faqat `roundPct()` da.
+out.chatFraction = S.chatPercent({{ synced_total: 1, total_estimate: 3 }});
+out.overallFraction = S.overallPercent({{ counts: {{ done: 1, total: 3 }} }});
+out.round = [
+  S.roundPct(33.333333), S.roundPct(33.5), S.roundPct(-5), S.roundPct(140), S.roundPct(null),
 ];
 out.countdown = [
   S.countdownText(iso(1000 + 201000), 1000),
@@ -586,7 +594,15 @@ process.stdout.write(JSON.stringify(out));
     ]
 
     assert got["overall"] == [0, 42, 75, 100]
-    assert got["chat"] == [None, 25, None]
+    assert got["chat"] == [None, 25, None, None]
+
+    # Yaxlitlanmagan: chiziq/halqa shundan chiziladi, yaxlitlash faqat
+    # `roundPct()` da (aria-valuenow/yorliq uchun) — L1 (progress freeze fix).
+    assert got["chatFraction"] == pytest.approx(33.3333, abs=0.01)
+    assert got["chatFraction"] != 33  # yaxlitlanmagan — butun son emas
+    assert got["overallFraction"] == pytest.approx(33.3333, abs=0.01)
+    assert got["round"] == [33, 34, 0, 100, 0]
+
     assert got["countdown"] == ["03:21", None]
     assert got["elapsed"] == ["2:05", "1:02:05"]
 

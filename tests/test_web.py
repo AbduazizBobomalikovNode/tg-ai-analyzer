@@ -1926,9 +1926,13 @@ def test_actions_page_humanizes_tools_and_flags_blocked_calls() -> None:
 def test_dashboard_chart_ticks_are_thinned_to_avoid_collisions() -> None:
     """M7: X-o'q yorliqlari `floor(width/64)` bilan cheklanadi. Avval "har
     N-chidan bittasi" **va** "oxirgisi majburiy" birga ishlatilardi — ular
-    yonma-yon tushib qolganda matnlar bir-birining ustiga chiqardi."""
-    src = (_WEB / "static/dashboard.js").read_text(encoding="utf-8")
-    assert "Math.floor(iw / 64)" in src
+    yonma-yon tushib qolganda matnlar bir-birining ustiga chiqardi.
+
+    ui/R4: mantiq `pages/dashboard.js::tickIndices()` sof funksiyasiga
+    ko'chdi (`test_js_lib.py` uni node'da o'lchaydi)."""
+    src = (_WEB / "static/pages/dashboard.js").read_text(encoding="utf-8")
+    assert "export function tickIndices" in src
+    assert "/ 64" in src, "yorliq soni konteyner kengligidan hisoblanishi kerak"
     assert "i === n - 1" not in src, "'oxirgisi majburiy' mantiqi qaytib kelmasin"
 
 
@@ -1948,3 +1952,79 @@ def test_tool_label_map_covers_every_registered_tool() -> None:
     for lang, data in locales.items():
         missing = sorted(n for n in names if not data.get(f"web.tools.{n}"))
         assert not missing, f"{lang}: {missing}"
+
+
+# ─── ui/R4: `/dashboard` qayta ishlangan ─────────────────────────────────────
+#
+# Foydalanuvchi hukmi: "kontekstsiz sonlar, moslashmaydi, xunuk, nima
+# ekanini tushunish uchun yarim soat ketadi". Shu uchta test aynan shuni
+# qo'riqlaydi: axborot ierarxiyasi shablonda bor, eski (ESM bo'lmagan)
+# modul qaytib kelmaydi va sahifada xom metrika jargoni yo'q.
+
+
+def test_dashboard_page_has_the_new_information_hierarchy() -> None:
+    """Yuqoridan pastga: davr → KPI → sync → grafiklar → jadval/ro'yxatlar
+    → ko'rib chiqish → yig'ilgan "Tizim"."""
+    html = (_WEB / "templates/dashboard.html").read_text(encoding="utf-8")
+    for anchor in (
+        'id="dash-period"',      # (a) davr almashtirgichi
+        'id="dash-kpis"',        # (b) 4 ta KPI
+        'id="dash-sync"',        # (c) sync salomatligi
+        'id="chart-volume"',     # (d) savollar + xarajat
+        'id="chart-latency"',    # (d) javob vaqti
+        'id="dash-models"',      # (e) modellar
+        'id="dash-chats"',       # (f) eng faol chatlar
+        'id="dash-review"',      # (g) ko'rib chiqish
+        'id="dash-system"',      # (h) tizim
+    ):
+        assert anchor in html, anchor
+    # Tizim bloki **yig'ilgan** bo'lishi kerak — yo'ldan chetda.
+    assert 'class="card-v2 dash-system"' in html
+    assert "<details" in html
+    # Sahifa o'z CSS faylini oladi va ES modul kirish nuqtasi bilan ishlaydi.
+    assert "css/pages/dashboard.css" in html
+    assert "pages/dashboard.js" in html
+
+
+def test_the_legacy_dashboard_module_is_gone() -> None:
+    """Eski `static/dashboard.js` (IIFE + `innerHTML`) o'chirildi —
+    yangisi `static/pages/dashboard.js`, `el()` bilan."""
+    assert not (_WEB / "static/dashboard.js").is_file()
+    src = (_WEB / "static/pages/dashboard.js").read_text(encoding="utf-8")
+    assert ".innerHTML" not in src, "sahifa moduli `el()` dan boshqa yo'l ishlatmasin"
+    assert (_WEB / "static/css/pages/dashboard.css").is_file()
+
+
+def test_dashboard_speaks_plain_language_not_metric_names() -> None:
+    """Har son oddiy tilda yorliq va ⓘ izoh bilan keladi; `p50`/`p95`,
+    `tgai_*` va "auto-baho (moslik)" kabi jargon UI matnida yo'q."""
+    locales = {
+        name: _json.loads((_LOCALES / f"{name}.json").read_text(encoding="utf-8"))
+        for name in ("uz", "ru", "en")
+    }
+    required = [
+        "web.dash.period_1", "web.dash.period_7", "web.dash.period_30",
+        "web.dash.kpi_questions", "web.dash.kpi_questions_hint",
+        "web.dash.kpi_cost", "web.dash.kpi_cost_hint",
+        "web.dash.kpi_speed", "web.dash.kpi_speed_hint",
+        "web.dash.kpi_quality", "web.dash.kpi_quality_hint",
+        "web.dash.user_rating", "web.dash.auto_rating",
+        "web.dash.budget_of", "web.dash.budget_none",
+        "web.dash.vs_prev", "web.dash.vs_prev_day", "web.dash.no_prev",
+        "web.dash.chart_volume", "web.dash.chart_volume_hint",
+        "web.dash.chart_latency", "web.dash.chart_latency_hint",
+        "web.dash.legend_p50", "web.dash.legend_p95",
+        "web.dash.models_title", "web.dash.chats_title", "web.dash.review_title",
+        "web.dash.empty_title", "web.dash.empty_text", "web.dash.empty_cta",
+        "web.dash.what_is_this",
+    ]
+    for name, data in locales.items():
+        for key in required:
+            assert data.get(key), f"{name}: {key}"
+        # Xom metrika nomi yorliqqa chiqmasin (izohda "p50" ham yozilmagan).
+        for key, value in data.items():
+            if not key.startswith("web.dash."):
+                continue
+            low = str(value).lower()
+            assert "tgai_" not in low, f"{name}: {key} — xom metrika nomi"
+            assert "p50" not in low and "p95" not in low, f"{name}: {key} — jargon"

@@ -103,9 +103,11 @@ function syncNode(chat) {
     el(`span.sync-pill${cls ? `.${cls}` : ""}`, null, bits.join(" · ")),
   ]);
   if (stateName === "running") {
-    const pct = chat.progress ?? 0;
-    row.appendChild(el("span.progress.sync-bar.is-live", { role: "progressbar", "aria-valuenow": String(pct), "aria-valuemin": "0", "aria-valuemax": "100", "aria-label": t("web.sync.title") },
-      el("i", { style: { inlineSize: `${pct}%` } })));
+    // `chat.progress` `liveChat().percent` dan keladi (sync-center.js) —
+    // yaxlitlanmagan; chiziq shundan silliq to'ladi, `aria-valuenow` yaxlitlangan.
+    const pct = Math.max(0, Math.min(100, Number(chat.progress ?? 0)));
+    row.appendChild(el("span.progress.sync-bar.is-live", { role: "progressbar", "aria-valuenow": String(Math.round(pct)), "aria-valuemin": "0", "aria-valuemax": "100", "aria-label": t("web.sync.title") },
+      el("i", { style: { inlineSize: `${pct.toFixed(2)}%` } })));
     // Jonli tezlik/ETA — sync markazidagi `current` dan (qo'shimcha so'rovsiz).
     const live = chat.sync_live;
     if (live) {

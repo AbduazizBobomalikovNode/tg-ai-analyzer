@@ -68,21 +68,35 @@ export function etaText(seconds) {
 /**
  * Umumiy foiz. Server `percent_overall` beradi; u yo'q bo'lsa
  * (eski javob) chat hisobidan tiklanadi — strip hech qachon bo'sh qolmasin.
+ *
+ * **Yaxlitlanmagan** qiymat qaytadi (chiziq/halqa to'ldirilishi shundan
+ * chiziladi — 600k xabarli chatda foiz sekundiga bir necha marta o'zgaradi,
+ * lekin butun foiz faqat necha o'n soniyada bir marta; yaxlitlash chiziqni
+ * "muzlatib" qo'yardi). Yaxlitlash faqat ko'rsatishda — `roundPct()`.
  */
 export function overallPercent(status) {
   if (!status) return 0;
   if (status.percent_overall != null) return Math.max(0, Math.min(100, Number(status.percent_overall)));
   const c = status.counts || {};
   const total = Number(c.total || 0);
-  return total ? Math.round((100 * Number(c.done || 0)) / total) : 0;
+  return total ? (100 * Number(c.done || 0)) / total : 0;
 }
 
-/** Joriy chat foizi (`current` bo'lmasa `null`). */
+/**
+ * Joriy chat foizi (`current` bo'lmasa yoki `total_estimate` noma'lum
+ * bo'lsa `null` — chaqiruvchi shu holatda indeterminate chiziq chizadi,
+ * 0% deb ko'rsatmaydi). **Yaxlitlanmagan** qiymat — sabab yuqorida.
+ */
 export function chatPercent(current) {
   if (!current) return null;
   const est = Number(current.total_estimate || 0);
   if (!est) return null;
-  return Math.max(0, Math.min(100, Math.round((100 * Number(current.synced_total || 0)) / est)));
+  return Math.max(0, Math.min(100, (100 * Number(current.synced_total || 0)) / est));
+}
+
+/** Ko'rsatiladigan (yaxlitlangan) foiz — `aria-valuenow` va yorliq uchun. */
+export function roundPct(percent) {
+  return Math.max(0, Math.min(100, Math.round(Number(percent) || 0)));
 }
 
 /**
@@ -280,22 +294,39 @@ const avatarFor = (item, cls = "sm") => {
 /**
  * Progress chizig'i. `role="progressbar"` — rang yolg'iz ma'no tashimaydi,
  * foiz `aria-valuenow` da ham bor.
+ *
+ * To'ldirilish (`inline-size`) **yaxlitlanmagan** foizdan, 2 xona aniqlikda
+ * chiziladi — aks holda 600k xabarli chatda chiziq bir necha soniya
+ * "muzlab" qoladi (butun foiz sekundlab o'zgarmaydi, sonlar esa o'zgaradi).
+ * `aria-valuenow` va ko'rinadigan yorliq — `roundPct()` bilan yaxlitlangan.
+ *
+ * `percent == null` (taxmin yo'q, `total_estimate` 0/noma'lum) —
+ * indeterminate: 0% deb ko'rsatmaymiz (yolg'on signal), chiziq chiziqcha
+ * animatsiya bilan "band" holatini bildiradi (`aria-valuetext`).
  */
 function bar(percent, { shimmer = false, label = "" } = {}) {
-  const p = Math.max(0, Math.min(100, Math.round(Number(percent) || 0)));
-  const fill = el("i", { style: { inlineSize: `${p}%` } });
+  const fill = el("i");
   const node = el(`div.sync-bar${shimmer && !reduced() ? ".is-live" : ""}`, {
     role: "progressbar",
-    "aria-valuenow": String(p),
     "aria-valuemin": "0",
     "aria-valuemax": "100",
     "aria-label": label || t("web.sync.title"),
   }, fill);
   node.setPercent = (next) => {
-    const v = Math.max(0, Math.min(100, Math.round(Number(next) || 0)));
-    fill.style.inlineSize = `${v}%`;
-    node.setAttribute("aria-valuenow", String(v));
+    if (next == null) {
+      node.classList.add("is-indeterminate");
+      node.removeAttribute("aria-valuenow");
+      node.setAttribute("aria-valuetext", t("web.sync.progress_unknown"));
+      fill.style.inlineSize = "";
+      return;
+    }
+    node.classList.remove("is-indeterminate");
+    node.removeAttribute("aria-valuetext");
+    const raw = Math.max(0, Math.min(100, Number(next) || 0));
+    fill.style.inlineSize = `${raw.toFixed(2)}%`;
+    node.setAttribute("aria-valuenow", String(roundPct(raw)));
   };
+  node.setPercent(percent);
   return node;
 }
 
@@ -369,9 +400,9 @@ export function mountStrip(host, accountId, opts = {}) {
 
     if (status.running && cur && vm && vm.chatId === Number(cur.chat_id) && !paused && !vm.paused) {
       const pct = chatPercent(cur);
-      const v = pct == null ? overallPercent(status) : pct;
-      vm.bar.setPercent(v);
-      countUp(vm.pct, v, (x) => `${Math.round(x)}%`);
+      vm.bar.setPercent(pct);
+      if (pct == null) { vm.pct.textContent = ""; vm.pct.dataset.v = "0"; }
+      else countUp(vm.pct, pct, (x) => `${roundPct(x)}%`);
       vm.meta.textContent = metaText(cur);
       vm.counters.textContent = t("web.sync.counters", {
         pending: num(counts.pending || 0), done: num(counts.done || 0), failed: num(counts.failed || 0),
@@ -387,11 +418,10 @@ export function mountStrip(host, accountId, opts = {}) {
       // Ekran o'quvchi uchun **faqat chat almashganda** xabar (har soniya emas).
       if (announced !== cur.title) { announced = cur.title; live.textContent = t("web.sync.announce", { title: cur.title || "" }); }
       const pct = chatPercent(cur);
-      const overall = overallPercent(status);
-      const value = pct == null ? overall : pct;
       const pctNode = el("span.sync-strip-pct");
-      countUp(pctNode, value, (v) => `${Math.round(v)}%`);
-      const barNode = bar(value, { shimmer: true, label: cur.title || "" });
+      if (pct == null) pctNode.dataset.v = "0";
+      else countUp(pctNode, pct, (v) => `${roundPct(v)}%`);
+      const barNode = bar(pct, { shimmer: true, label: cur.title || "" });
       const metaNode = el("div.sync-strip-meta", null, metaText(cur));
       vm = {
         chatId: Number(cur.chat_id), bar: barNode, pct: pctNode,
@@ -520,10 +550,9 @@ export function openSheet(accountId) {
     if (vm && vm.key === key) {
       const pct = overallPercent(status);
       vm.ring.setPercent(pct);
-      countUp(vm.ringPct, pct, (v) => `${Math.round(v)}%`);
+      countUp(vm.ringPct, pct, (v) => `${roundPct(v)}%`);
       if (vm.bar && status.current) {
-        const p = chatPercent(status.current);
-        vm.bar.setPercent(p == null ? pct : p);
+        vm.bar.setPercent(chatPercent(status.current));
         vm.meta.textContent = metaText(status.current);
       }
       return;
@@ -542,7 +571,7 @@ export function openSheet(accountId) {
     // ── Joriy chat ──
     if (status.running && cur) {
       const pct = chatPercent(cur);
-      const curBar = bar(pct == null ? overallPercent(status) : pct, { shimmer: true, label: cur.title || "" });
+      const curBar = bar(pct, { shimmer: true, label: cur.title || "" });
       const curMeta = el("div.sync-strip-meta", null, metaText(cur));
       vm.bar = curBar;
       vm.meta = curMeta;
@@ -673,15 +702,17 @@ function ringHeader(status, accountId, vm) {
     svg.appendChild(circle);
   }
   const pctNode = el("span.sync-ring-pct");
-  countUp(pctNode, pct, (v) => `${Math.round(v)}%`);
-  const wrap = el("div.sync-ring-wrap", { role: "progressbar", "aria-valuenow": String(pct), "aria-valuemin": "0", "aria-valuemax": "100", "aria-label": t("web.sync.overall") }, [svg, pctNode]);
+  countUp(pctNode, pct, (v) => `${roundPct(v)}%`);
+  const wrap = el("div.sync-ring-wrap", { role: "progressbar", "aria-valuenow": String(roundPct(pct)), "aria-valuemin": "0", "aria-valuemax": "100", "aria-label": t("web.sync.overall") }, [svg, pctNode]);
   if (vm) {
     vm.ringPct = pctNode;
     vm.ring = {
+      // Halqa geometriyasi (`stroke-dashoffset`) **yaxlitlanmagan** foizdan —
+      // aks holda katta chatda halqa bir necha soniya muzlab qoladi.
       setPercent(next) {
-        const v = Math.max(0, Math.min(100, Math.round(Number(next) || 0)));
-        fill.setAttribute("stroke-dashoffset", String(ringGeometry(v).offset));
-        wrap.setAttribute("aria-valuenow", String(v));
+        const raw = Math.max(0, Math.min(100, Number(next) || 0));
+        fill.setAttribute("stroke-dashoffset", String(ringGeometry(raw).offset));
+        wrap.setAttribute("aria-valuenow", String(roundPct(raw)));
       },
     };
   }
