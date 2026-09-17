@@ -50,7 +50,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, cast
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -112,6 +112,28 @@ EVIDENCE_TEXT_CHARS = 400
 LEVELS = (0, 1, 2)
 INTENTS = ("lookup", "summary", "trend", "compare", "person")
 
+# ─── suhbatga bog'liqlik (follow-up) ─────────────────────────────────────────
+# Planner ilgari **faqat** oxirgi user turn'ini ko'rardi, ya'ni "chuqurroq
+# qidir" so'rovida aynan shu so'zlarni qidirardi. Endi unga suhbatning oxirgi
+# turn'lari ham beriladi — user matni ochiq, **oldingi javob** esa konvertda
+# (u begona xabarlardan sintez qilingan, ya'ni ishonchsiz).
+DEEP_HISTORY_TURNS = 6
+PRIOR_ANSWER_CHARS = 400  # oldingi javobdan konvertga tushadigan bo'lak
+MAX_EVIDENCE_REFS = 60  # `context.evidence_refs` — keyingi turn qayta ishlatadi
+FOLLOW_UPS = (
+    "none",
+    "deeper",
+    "repeat",
+    "correction",
+    "context_switch",
+    "reformat",
+    "explain",
+)
+#: Faqat shu ikkitasi qidiruvsiz javob bera oladi (oldingi dalillar bilan).
+NO_RETRIEVAL_FOLLOW_UPS = ("reformat", "explain")
+#: `deeper` / `repeat` da oldingi subquery'lar ham qo'shiladi — qopqoq kengroq.
+MAX_SUBQUERIES_WIDENED = 12
+
 # ─── server pog'onalari (3-bosqich) ──────────────────────────────────────────
 # Lokal indeks har doim birinchi. Serverga chiqish — qamrov yetmaganda, kodda
 # hisoblangan shart bo'yicha (modeldan so'ralmaydi, u faqat `server_scope`
@@ -139,6 +161,13 @@ _JSON_RE = re.compile(r"\{.*\}", re.S)
 # `#c1m42x` konvertdan o'tib, bu yerda `c1m42` bo'lib ajralib qolardi.
 _CITE_RE = U.CITE_TOKEN_RE
 _TAINT_MIN_CHARS = 24  # qo'riqchi shundan qisqa matnni tekshirmaydi (tasodifiy mos kelish)
+
+#: Oldingi javob uchun **ruxsat etilgan yagona** konvert. Taint qo'riqchisi shu
+#: naqshni promptdan olib tashlagandan keyin qoldiqni tekshiradi.
+PRIOR_ANSWER_KIND = "prior_answer"
+_PRIOR_ENVELOPE_RE = re.compile(
+    rf'<untrusted_data kind="{PRIOR_ANSWER_KIND}"[^>]*>.*?</untrusted_data>', re.S
+)
 
 #: M6: uchayotgan usage-flush vazifalari. `asyncio` faqat **zaif** havola
 #: saqlaydi, shuning uchun havolasiz vazifa tugamasdan yig'ilib ketishi mumkin.
@@ -170,6 +199,28 @@ class DeepEvent:
 
 
 @dataclass(slots=True)
+class Turn:
+    """Suhbatning bitta oldingi turn'i — planner va sintezator uchun.
+
+    `text` — user turn'ida foydalanuvchining **o'z** matni (ishonchli),
+    assistant turn'ida esa oldingi javob bo'lagi: u begona xabarlardan
+    sintez qilingan, shuning uchun prompt'ga faqat
+    `<untrusted_data kind="prior_answer">` konvertida tushadi.
+
+    `plan` / `mode` / `citations` — o'sha javobning `context` metama'lumoti.
+    Reja bizning planner'imiz foydalanuvchi savolidan yasagan **tuzilma**,
+    ya'ni ishonchli: u oddiy JSON bo'lib beriladi.
+    """
+
+    role: str  # "user" | "assistant"
+    text: str = ""
+    mode: str = ""
+    plan: dict[str, Any] = field(default_factory=dict)
+    citations: int = 0
+    evidence_refs: list[dict[str, int]] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class DeepPlan:
     intent: str = "lookup"
     since: datetime | None = None
@@ -183,10 +234,25 @@ class DeepPlan:
     # `none | gaps | global | discover` — modelning **maslahati**, majburiyat
     # emas: chiqish yoki chiqmaslikni `needs_server()` kodda hal qiladi.
     server_scope: str = DEFAULT_SERVER_SCOPE
+    #: Oxirgi turn'ning o'zicha tushunarli qilib qayta yozilgani. Birinchi
+    #: turn'da savolning o'zi. Qidiruv shu matn bo'yicha quriladi.
+    standalone_question: str = ""
+    #: `none|deeper|repeat|correction|context_switch|reformat|explain`
+    intent_follow_up: str = "none"
+    #: `False` — fan-out o'tkazib yuboriladi, oldingi turn dalillari qayta
+    #: ishlatiladi (faqat `reformat`/`explain` da va faqat dalil havolalari bor bo'lsa).
+    needs_retrieval: bool = True
+    #: `deeper` — reflect "kerak emas" desa ham ikkinchi raund yugurtiriladi.
+    force_second_round: bool = False
+    #: `repeat` — so'rovni kengaytirish (HyDE + query expansion) yoqiladi.
+    expansion: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "intent": self.intent,
+            "standalone_question": self.standalone_question,
+            "intent_follow_up": self.intent_follow_up,
+            "needs_retrieval": self.needs_retrieval,
             "since": self.since.isoformat() if self.since else None,
             "until": self.until.isoformat() if self.until else None,
             "chats": self.chats,
@@ -329,10 +395,15 @@ class _Taint:
     reja promptiga qo'shib yuborsa test darhol qizaradi.
     """
 
-    __slots__ = ("_texts",)
+    __slots__ = ("_prior", "_texts")
 
     def __init__(self) -> None:
         self._texts: set[str] = set()
+        # Oldingi javob bo'laklari — ular konvert **ichida** bo'lishiga ruxsat
+        # bor, tashqarisida yo'q (`assert_clean` konvertlarni olib tashlab
+        # tekshiradi). Ya'ni "konvertdan chiqib ketgan" javob matni ham
+        # regressiya sifatida ushlanadi.
+        self._prior: set[str] = set()
 
     def add(self, evidence: Sequence[DeepEvidence]) -> None:
         for e in evidence:
@@ -356,10 +427,29 @@ class _Taint:
             if len(body) >= _TAINT_MIN_CHARS:
                 self._texts.add(body[:_TAINT_MIN_CHARS])
 
+    def add_turns(self, turns: Sequence[Turn]) -> None:
+        """Oldingi javob bo'laklari — "konvert ichida bo'lsa mayli" ro'yxati."""
+        for t in turns:
+            if t.role != "assistant":
+                continue
+            body = (t.text or "").strip()
+            if len(body) >= _TAINT_MIN_CHARS:
+                self._prior.add(body[:_TAINT_MIN_CHARS])
+
     def assert_clean(self, stage: str, prompt: str) -> None:
         for body in self._texts:
             if body in prompt:
                 raise DeepSearchError("taint", f"{stage}: untrusted message text in prompt")
+        if not self._prior:
+            return
+        # Konvert **konstruksiya bo'yicha** xavfsiz: teglarni kod yozadi, ichi
+        # `neutralize` dan o'tgan. Shuning uchun tekshiruv konvertdan
+        # tashqaridagi matn ustidan boradi — javob bo'lagi konvertsiz
+        # qo'shilib qolsa test darhol qizaradi.
+        outside = _PRIOR_ENVELOPE_RE.sub(" ", prompt)
+        for body in self._prior:
+            if body in outside:
+                raise DeepSearchError("taint", f"{stage}: prior answer outside its envelope")
 
 
 # ─── token/xarajat hisoblagich ───────────────────────────────────────────────
@@ -494,17 +584,181 @@ def _sender_label(m: Message, chat: Chat) -> str:
     return f"user:{m.sender_id}" if m.sender_id else "—"
 
 
+# ─── 0. Suhbat tarixi (follow-up) ────────────────────────────────────────────
+
+
+def _clean_refs(value: Any) -> list[dict[str, int]]:
+    """`context.evidence_refs` — `[{"chat_id":…, "tg_msg_id":…}]`, qattiq filtrlangan."""
+    out: list[dict[str, int]] = []
+    if not isinstance(value, list):
+        return out
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        cid, mid = item.get("chat_id"), item.get("tg_msg_id")
+        ok = (
+            isinstance(cid, int)
+            and isinstance(mid, int)
+            and not isinstance(cid, bool)
+            and not isinstance(mid, bool)
+            and cid > 0
+            and mid > 0
+        )
+        if ok:
+            out.append({"chat_id": int(cast(int, cid)), "tg_msg_id": int(cast(int, mid))})
+        if len(out) >= MAX_EVIDENCE_REFS:
+            break
+    return out
+
+
+def _plan_meta(context: dict[str, Any]) -> dict[str, Any]:
+    """Oldingi rejaning **tuzilmali** bo'lagi: subquery, entity, chat, qayta yozilgan savol.
+
+    Bu bizning planner'imiz foydalanuvchi savolidan yasagan ma'lumot, ya'ni
+    begona matn emas — shuning uchun oddiy JSON bo'lib beriladi, konvertsiz.
+    Baribir `_clean_terms` dan o'tkaziladi: DB'dagi qator eski/buzilgan
+    bo'lishi mumkin.
+    """
+    plan = context.get("plan")
+    if not isinstance(plan, dict):
+        return {}
+    out: dict[str, Any] = {}
+    sq = plan.get("standalone_question")
+    if isinstance(sq, str) and sq.strip():
+        out["standalone_question"] = U.neutralize(sq).strip()[:200]
+    subs = _clean_terms(plan.get("subqueries"), limit=MAX_SUBQUERIES)
+    if subs:
+        out["subqueries"] = subs
+    ents = _clean_terms(plan.get("entities"), limit=MAX_ENTITIES, max_chars=64)
+    if ents:
+        out["entities"] = ents
+    chats = plan.get("chats")
+    if isinstance(chats, list):
+        ids = [
+            int(c) for c in chats if isinstance(c, int) and not isinstance(c, bool) and int(c) > 0
+        ][:MAX_SUBQUERIES]
+        if ids:
+            out["chats"] = ids
+    return out
+
+
+async def load_history(
+    session: AsyncSession, conversation_id: int, *, turns: int = DEEP_HISTORY_TURNS
+) -> list[Turn]:
+    """Suhbatning oxirgi `turns` qatori (eskidan yangiga), uzilgan hisob qatorisiz.
+
+    `chat_service.list_messages` bilan bir xil filtr (`context.aborted`), lekin
+    import halqasi bo'lmasin deb shu yerda: `chat_service` deep quvurini
+    **ichkarida** import qiladi.
+    """
+    if turns <= 0:
+        return []
+    rows = (
+        (
+            await session.execute(
+                select(ConversationMessage)
+                .where(
+                    ConversationMessage.conversation_id == conversation_id,
+                    func.coalesce(ConversationMessage.context["aborted"].astext, "") != "true",
+                )
+                .order_by(ConversationMessage.id.desc())
+                .limit(turns)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    out: list[Turn] = []
+    for row in reversed(rows):
+        text = (row.content or "").strip()
+        if not text and row.role != "assistant":
+            continue
+        if row.role == "user":
+            out.append(Turn(role="user", text=text[:PRIOR_ANSWER_CHARS]))
+        elif row.role == "assistant":
+            ctx = row.context if isinstance(row.context, dict) else {}
+            cites = ctx.get("citations")
+            out.append(
+                Turn(
+                    role="assistant",
+                    text=text[:PRIOR_ANSWER_CHARS],
+                    mode=str(ctx.get("mode") or ""),
+                    plan=_plan_meta(ctx),
+                    citations=len(cites) if isinstance(cites, list) else 0,
+                    evidence_refs=_clean_refs(ctx.get("evidence_refs")),
+                )
+            )
+    return out
+
+
+def prior_plan(history: Sequence[Turn]) -> dict[str, Any]:
+    """Oxirgi assistant turn'ining rejasi (bo'lmasa bo'sh lug'at)."""
+    for t in reversed(history):
+        if t.role == "assistant" and t.plan:
+            return t.plan
+    return {}
+
+
+def prior_refs(history: Sequence[Turn]) -> list[dict[str, int]]:
+    """Oxirgi assistant turn'ining dalil havolalari (`needs_retrieval=False` uchun)."""
+    for t in reversed(history):
+        if t.role == "assistant" and t.evidence_refs:
+            return list(t.evidence_refs)
+    return []
+
+
+def render_history(history: Sequence[Turn]) -> str:
+    """Tarix bloki. User matni ochiq, **oldingi javob** faqat konvertda.
+
+    Invariant 3 shu yerda: javob begona xabarlardan sintez qilingan, ya'ni
+    unga ishonib bo'lmaydi. Konvert teglarini kod yozadi, ichi `neutralize`
+    dan o'tadi — ya'ni javob yangi teg ham, sitata tokeni ham yarata olmaydi.
+    """
+    if not history:
+        return ""
+    lines: list[str] = []
+    for i, t in enumerate(history, 1):
+        if t.role == "user":
+            lines.append(f"{i}. user: {U.neutralize(t.text)}")
+            continue
+        body = U.neutralize(t.text)[:PRIOR_ANSWER_CHARS]
+        lines.append(
+            f'{i}. assistant: <untrusted_data kind="{PRIOR_ANSWER_KIND}">\n'
+            f"{body}\n</untrusted_data>"
+        )
+        meta: dict[str, Any] = dict(t.plan)
+        if t.mode:
+            meta["mode"] = t.mode
+        if t.citations:
+            meta["citations"] = t.citations
+        if meta:
+            lines.append(f"   plan: {json.dumps(meta, ensure_ascii=False, default=str)}")
+    body_all = "\n".join(lines)
+    return f'<conversation_history turns="{len(history)}">\n{body_all}\n</conversation_history>'
+
+
 # ─── 1. Reja ─────────────────────────────────────────────────────────────────
 
 
-def build_plan_prompt(question: str, chat_lines: Sequence[str], *, now: datetime) -> str:
-    """Planner kirishi — savol + chat indeksi (sarlavhalar konvertda) + vaqt.
+def build_plan_prompt(
+    question: str,
+    chat_lines: Sequence[str],
+    *,
+    now: datetime,
+    history: Sequence[Turn] = (),
+) -> str:
+    """Planner kirishi — savol + suhbat tarixi + chat indeksi + vaqt.
 
     Xabar **matni** yo'q. Chat sarlavhalari Telegram'dan keladi, ya'ni ular ham
     begona ma'lumot — shuning uchun konvert ichida va `neutralize` dan o'tgan.
+    Oldingi javoblar ham konvertda (`kind="prior_answer"`): ular begona
+    matndan yasalgan.
     """
     body = "\n".join(U.neutralize(line) for line in chat_lines) or "(no synced chats)"
+    hist = render_history(history)
+    head = f"{hist}\n" if hist else ""
     return (
+        f"{head}"
         f"<question>{U.neutralize(question)}</question>\n"
         f'<untrusted_data kind="chat_index" count="{len(chat_lines)}">\n'
         f"{body}\n</untrusted_data>\n"
@@ -512,10 +766,32 @@ def build_plan_prompt(question: str, chat_lines: Sequence[str], *, now: datetime
     )
 
 
-def parse_plan(raw: str, *, question: str, known_chats: Sequence[int]) -> DeepPlan:
+def parse_plan(
+    raw: str,
+    *,
+    question: str,
+    known_chats: Sequence[int],
+    history: Sequence[Turn] = (),
+) -> DeepPlan:
     """Model chiqishini **qattiq** validatsiya qiladi; har maydonda sukut bor."""
     data = _json_obj(raw)
     plan = DeepPlan()
+
+    # ── follow-up: avval savolni o'zicha tushunarli qilib qayta yozamiz ──────
+    plan.standalone_question = _standalone(data.get("standalone_question"), question)
+    follow = data.get("intent_follow_up")
+    plan.intent_follow_up = (
+        follow if isinstance(follow, str) and follow in FOLLOW_UPS and history else "none"
+    )
+    # `needs_retrieval=False` — faqat `reformat`/`explain` da va faqat oldingi
+    # turn dalillari bo'lsa. Model "qidirmasa ham bo'ladi" deb yolg'on aytsa,
+    # quvur baribir qidiradi (xavfsiz tomonga xato).
+    wants_reuse = data.get("needs_retrieval") is False
+    plan.needs_retrieval = not (
+        wants_reuse
+        and plan.intent_follow_up in NO_RETRIEVAL_FOLLOW_UPS
+        and bool(prior_refs(history))
+    )
 
     intent = data.get("intent")
     plan.intent = intent if isinstance(intent, str) and intent in INTENTS else "lookup"
@@ -538,7 +814,7 @@ def parse_plan(raw: str, *, question: str, known_chats: Sequence[int]) -> DeepPl
         plan.chats = sorted(set(picked)) or None
 
     subs = _clean_terms(data.get("subqueries"), limit=MAX_SUBQUERIES)
-    plan.subqueries = subs or [question.strip()[:200]]
+    plan.subqueries = subs or [plan.standalone_question[:200]]
 
     plan.entities = _clean_terms(data.get("entities"), limit=MAX_ENTITIES, max_chars=64)
 
@@ -552,8 +828,49 @@ def parse_plan(raw: str, *, question: str, known_chats: Sequence[int]) -> DeepPl
         plan.levels = sorted(set(picked_levels)) or list(LEVELS)
 
     plan.use_hyde = bool(data.get("use_hyde")) and plan.intent == "lookup"
-    plan.use_hyde = plan.use_hyde and len(question.split()) < HYDE_MAX_WORDS
+    plan.use_hyde = plan.use_hyde and len(plan.standalone_question.split()) < HYDE_MAX_WORDS
     plan.server_scope = parse_server_scope(data.get("server_scope"))
+    return _apply_follow_up(plan, history)
+
+
+def _standalone(value: Any, question: str) -> str:
+    """Model bermasa (yoki bo'sh bersa) — savolning o'zi."""
+    if isinstance(value, str):
+        rewritten = U.neutralize(value).strip()
+        if len(rewritten) >= 3:
+            return rewritten[:400]
+    return question.strip()[:400]
+
+
+def _apply_follow_up(plan: DeepPlan, history: Sequence[Turn]) -> DeepPlan:
+    """Follow-up turi bo'yicha rejani **kodda** kengaytiradi.
+
+    Nega kodda: modeldan "chuqurroq qidir" da kengaytirishni *so'raymiz*, lekin
+    unga tayanmaymiz — `deeper`/`repeat` da oldingi reja subquery'lari baribir
+    qo'shiladi. `correction` / `context_switch` da esa aksincha: eski reja
+    **meros qilib olinmaydi**, aks holda tuzatilgan entity qaytib kelardi.
+    """
+    if plan.intent_follow_up in ("none", "correction", "context_switch"):
+        return plan
+    previous = prior_plan(history)
+    if plan.intent_follow_up in ("deeper", "repeat"):
+        merged = list(plan.subqueries)
+        for sq in _clean_terms(previous.get("subqueries"), limit=MAX_SUBQUERIES):
+            if sq.lower() not in {x.lower() for x in merged}:
+                merged.append(sq)
+        plan.subqueries = merged[:MAX_SUBQUERIES_WIDENED]
+        if not plan.chats and isinstance(previous.get("chats"), list):
+            plan.chats = list(previous["chats"]) or None
+    if plan.intent_follow_up == "deeper":
+        # Kengaytirish: epizod/digest darajalari, serverga chiqishga ruxsat,
+        # ikkinchi raund majburiy.
+        plan.levels = list(LEVELS)
+        if plan.server_scope == "none":
+            plan.server_scope = DEFAULT_SERVER_SCOPE
+        plan.force_second_round = True
+    if plan.intent_follow_up == "repeat":
+        plan.expansion = True
+        plan.use_hyde = True
     return plan
 
 
@@ -577,8 +894,10 @@ async def plan_query(
     chat_lines: Sequence[str],
     known_chats: Sequence[int],
     now: datetime | None = None,
+    history: Sequence[Turn] = (),
 ) -> DeepPlan:
-    prompt = build_plan_prompt(question, chat_lines, now=now or datetime.now(UTC))
+    taint.add_turns(history)
+    prompt = build_plan_prompt(question, chat_lines, now=now or datetime.now(UTC), history=history)
     taint.assert_clean("plan", prompt)
     try:
         res = await meter.chat(
@@ -589,8 +908,10 @@ async def plan_query(
         )
     except LLMError as exc:
         log.warning("deep.plan_failed", error=str(exc)[:200])
-        return DeepPlan(subqueries=[question.strip()[:200]])
-    return parse_plan(res.text, question=question, known_chats=known_chats)
+        return DeepPlan(
+            subqueries=[question.strip()[:200]], standalone_question=question.strip()[:400]
+        )
+    return parse_plan(res.text, question=question, known_chats=known_chats, history=history)
 
 
 async def hyde_text(meter: _Meter, taint: _Taint, question: str) -> str:
@@ -646,6 +967,46 @@ async def _hydrate(
         h.date = m.published_at
         h.text = S.compact_text(m.text or "", max_chars=S.MAX_MSG_CHARS)
     return hits
+
+
+async def _refs_to_hits(
+    session: AsyncSession, refs: Sequence[dict[str, int]], *, account_id: int
+) -> list[S.Hit]:
+    """`evidence_refs` → `S.Hit` (matn/sana bilan), tartibi saqlanadi.
+
+    `needs_retrieval=False` yo'li: "qisqartir" / "tushuntir" so'rovida qidiruv
+    qayta yugurtirilmaydi, oldingi turn dalillari **DB'dan** qayta o'qiladi.
+    Havolada `(chat_id, tg_msg_id)` bor, `_hydrate` esa ichki `Message.id`
+    bilan ishlaydi — shuning uchun avval id topiladi. Egalik `account_id` bilan
+    tekshiriladi: begona chat qayta gidratatsiya qilinmaydi.
+    """
+    pairs = [(r["chat_id"], r["tg_msg_id"]) for r in refs][:MAX_EVIDENCE_REFS]
+    if not pairs:
+        return []
+    conds = [and_(Message.chat_id == cid, Message.tg_msg_id == mid) for cid, mid in pairs]
+    rows = (
+        await session.execute(
+            select(Message.id, Message.chat_id, Message.tg_msg_id)
+            .join(Chat, Chat.id == Message.chat_id)
+            .where(Chat.account_id == account_id, or_(*conds), *S._alive())
+        )
+    ).all()
+    by_pair = {(int(c), int(t)): int(i) for i, c, t in rows}
+    hits: list[S.Hit] = []
+    for rank_i, (cid, mid) in enumerate(pairs):
+        found = by_pair.get((cid, mid))
+        if found is None:
+            continue
+        hits.append(
+            S.Hit(
+                message_id=found,
+                tg_msg_id=mid,
+                score=1.0 / (rank_i + 1),
+                source="prior",
+                chat_id=cid,
+            )
+        )
+    return await _hydrate(session, hits, account_id=account_id)
 
 
 async def _search_one(
@@ -1284,10 +1645,21 @@ async def synthesize(
     locale: str,
     deep: bool,
     now: datetime | None = None,
+    history: Sequence[Turn] = (),
+    follow_up: str = "none",
 ) -> tuple[str, list[DeepEvidence], ChatResult | None]:
+    """Yagona begona matn ko'ruvchi bosqich.
+
+    Dalillar **bitta** `kind="evidence"` konvertida (invariant o'zgarmadi).
+    Suhbat tarixi alohida blokda: user matni ochiq, oldingi javob esa
+    `kind="prior_answer"` konvertida — u ham begona matndan yasalgan.
+    """
     envelope, kept = build_evidence_envelope(evidence, clusters)
     note = f"(locale: {locale}; now: {(now or datetime.now(UTC)).strftime('%Y-%m-%d %H:%M UTC')})"
-    user_turn = f"{envelope}\n\nQuestion: {U.neutralize(question)}\n{note}"
+    hist = render_history(history)
+    head = f"{hist}\n\n" if hist else ""
+    tail = f"\nfollow-up: {follow_up}" if follow_up and follow_up != "none" else ""
+    user_turn = f"{head}{envelope}\n\nQuestion: {U.neutralize(question)}\n{note}{tail}"
     try:
         res = await meter.chat(
             Task.DEEP if deep else Task.SEARCH,
@@ -1298,6 +1670,27 @@ async def synthesize(
         log.warning("deep.synth_failed", error=str(exc)[:200])
         raise DeepSearchError("llm", str(exc)[:200]) from exc
     return res.text.strip(), kept, res
+
+
+def evidence_refs(evidence: Sequence[DeepEvidence]) -> list[dict[str, int]]:
+    """Dalillarning **qayta o'qiladigan** havolalari — `context.evidence_refs`.
+
+    Tashqi (`external`) topilma tushmaydi: uning DB'da qatori yo'q, ya'ni
+    keyingi turnda `_refs_to_hits` uni baribir topa olmaydi.
+    """
+    out: list[dict[str, int]] = []
+    seen: set[tuple[int, int]] = set()
+    for e in evidence:
+        if e.external or not e.chat_id or not e.tg_msg_id:
+            continue
+        key = (int(e.chat_id), int(e.tg_msg_id))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"chat_id": key[0], "tg_msg_id": key[1]})
+        if len(out) >= MAX_EVIDENCE_REFS:
+            break
+    return out
 
 
 # ─── 6. Qamrov ───────────────────────────────────────────────────────────────
@@ -1576,6 +1969,9 @@ class RunContext:
     user_id: int
     chats: list[Chat]
     chat_lines: list[str]
+    #: Oxirgi `DEEP_HISTORY_TURNS` turn — planner va sintezator uchun.
+    #: Joriy savol bu yerda **yo'q**: `_persist` uni yugurish oxirida yozadi.
+    history: list[Turn] = field(default_factory=list)
 
 
 async def load_run_context(
@@ -1594,7 +1990,8 @@ async def load_run_context(
         .all()
     )
     lines = await T.chat_index(session, account_id, limit=T.CHAT_INDEX_LIMIT, compact=True)
-    return RunContext(user_id=conv.user_id, chats=chats, chat_lines=lines)
+    history = await load_history(session, conversation_id)
+    return RunContext(user_id=conv.user_id, chats=chats, chat_lines=lines, history=history)
 
 
 async def run_deep_search(
@@ -1715,6 +2112,7 @@ async def _run_pipeline(
             DEEP_RUNS.labels("budget").inc()
             raise DeepSearchError("budget", exceeded)
     chat_rows, chat_lines = ctx.chats, ctx.chat_lines
+    history = list(ctx.history)
     chats_by_id = {c.id: c for c in chat_rows}
     chats_total = len(chat_rows)
 
@@ -1726,8 +2124,10 @@ async def _run_pipeline(
     deduped: list[S.Hit] = []
     clusters: list[C.Cluster] = []
     ranked: list[S.Hit] = []
-    plan = DeepPlan(subqueries=[question[:200]])
+    plan = DeepPlan(subqueries=[question[:200]], standalone_question=question[:400])
     asked: list[str] = []
+    reused_evidence = False
+    search_question = question
     server_out = ServerOutcome()
     server_calls_max = int(s.deep_server_max_calls or 0) if s.deep_server_rungs_enabled else 0
     server_min_local = int(s.deep_server_min_local_hits)
@@ -1805,40 +2205,56 @@ async def _run_pipeline(
                 chat_lines=chat_lines,
                 known_chats=list(chats_by_id),
                 now=datetime.now(UTC),
+                history=history,
             )
+            search_question = plan.standalone_question or question
             if plan.use_hyde:
-                plan.hyde_text = await hyde_text(meter, taint, question)
+                plan.hyde_text = await hyde_text(meter, taint, search_question)
             await _emit(events, "plan", **plan.to_dict())
 
-            subqueries = list(plan.subqueries)
-            if plan.hyde_text:
-                subqueries.append(plan.hyde_text)
-            asked = list(plan.subqueries)
+            if not plan.needs_retrieval:
+                # "Qisqartir" / "tushuntir": qidiruv **yugurtirilmaydi** —
+                # oldingi turn dalillari DB'dan qayta o'qiladi. Yangi fakt
+                # kerak emas, shakl kerak.
+                refs = prior_refs(history)
+                async with session_factory() as session:
+                    candidates = await _refs_to_hits(session, refs, account_id=account_id)
+                taint.add_hits(candidates)
+                deduped = list(candidates)
+                ranked = list(candidates[:RERANK_KEEP])
+                reused_evidence = True
+                log.info("deep.reuse_evidence", refs=len(refs), hits=len(candidates))
+                await _emit(events, "search", subquery="", hits=len(candidates), reused=True)
+            else:
+                subqueries = list(plan.subqueries)
+                if plan.hyde_text:
+                    subqueries.append(plan.hyde_text)
+                asked = list(plan.subqueries)
 
-            candidates = await fan_out(
-                session_factory,
-                account_id=account_id,
-                plan=plan,
-                subqueries=subqueries,
-                meter=meter,
-                events=events,
-            )
-            taint.add_hits(candidates)  # M1 — reflect'dan **oldin**
-            candidates = await maybe_escalate(candidates)
-            taint.add_hits(candidates)
-            deduped, clusters = await dedup_and_cluster(
-                session_factory, candidates, meter=meter, locale=locale, events=events
-            )
-            ranked = await rank(
-                question,
-                deduped,
-                meter=meter,
-                events=events,
-                dropped=len(candidates) - len(deduped),
-            )
+                candidates = await fan_out(
+                    session_factory,
+                    account_id=account_id,
+                    plan=plan,
+                    subqueries=subqueries,
+                    meter=meter,
+                    events=events,
+                )
+                taint.add_hits(candidates)  # M1 — reflect'dan **oldin**
+                candidates = await maybe_escalate(candidates)
+                taint.add_hits(candidates)
+                deduped, clusters = await dedup_and_cluster(
+                    session_factory, candidates, meter=meter, locale=locale, events=events
+                )
+                ranked = await rank(
+                    search_question,
+                    deduped,
+                    meter=meter,
+                    events=events,
+                    dropped=len(candidates) - len(deduped),
+                )
 
             # ── ≤1 qo'shimcha raund ────────────────────────────────────────
-            if MAX_ROUNDS > 1 and elapsed() < soft_wall:
+            if not reused_evidence and MAX_ROUNDS > 1 and elapsed() < soft_wall:
                 stats = {
                     "candidates": len(candidates),
                     "clusters": len(clusters),
@@ -1848,7 +2264,7 @@ async def _run_pipeline(
                 needs_more, extra, new_scope = await reflect(
                     meter,
                     taint,
-                    question,
+                    search_question,
                     clusters,
                     stats=stats,
                     asked=asked,
@@ -1856,6 +2272,11 @@ async def _run_pipeline(
                 )
                 rescope = new_scope != plan.server_scope
                 plan.server_scope = new_scope
+                # "Chuqurroq qidir": reflect "yetarli" desa ham, u yangi
+                # so'rov bergan bo'lsa ikkinchi raund yugurtiriladi —
+                # foydalanuvchi aynan shuni so'radi.
+                if plan.force_second_round and extra:
+                    needs_more = True
                 if needs_more and extra and elapsed() < soft_wall:
                     seen_ids = {h.message_id for h in deduped}
                     more = await fan_out(
@@ -1881,7 +2302,7 @@ async def _run_pipeline(
                         asked += extra
                         candidates, deduped, clusters = merged, d2, c2
                         ranked = await rank(
-                            question,
+                            search_question,
                             deduped,
                             meter=meter,
                             events=events,
@@ -1902,7 +2323,14 @@ async def _run_pipeline(
     )
     taint.add(evidence)
     answer, kept, res = await synthesize(
-        meter, question, evidence, clusters, locale=locale, deep=deep
+        meter,
+        question,
+        evidence,
+        clusters,
+        locale=locale,
+        deep=deep,
+        history=history,
+        follow_up=plan.intent_follow_up,
     )
     state["answer"] = answer  # H2: uzilish javobdan keyin bo'lsa ham matn yo'qolmaydi
     if len(kept) < len(evidence):
@@ -1966,6 +2394,11 @@ async def _run_pipeline(
         "citations": citations,
         "invalid_citations": invalid,
         "plan": result.plan,
+        # Keyingi turn "qisqartir"/"tushuntir" bo'lsa — qidiruvsiz javob
+        # berish uchun aynan shu dalillar qayta o'qiladi (`_refs_to_hits`).
+        # Faqat lokal chatlar: tashqi topilmaning DB'da qatori yo'q.
+        "evidence_refs": evidence_refs(kept),
+        "reused_evidence": reused_evidence,
     }
     await _persist(
         session_factory,
@@ -2068,7 +2501,9 @@ async def stream_deep_search(
 
 
 __all__ = [
+    "DEEP_HISTORY_TURNS",
     "DEEP_RESULT_TOKENS",
+    "FOLLOW_UPS",
     "HARD_WALL_S",
     "MARGINAL_YIELD",
     "MAX_CANDIDATES",
@@ -2087,6 +2522,7 @@ __all__ = [
     "DeepSearchError",
     "RunContext",
     "ServerOutcome",
+    "Turn",
     "build_coverage",
     "build_evidence_envelope",
     "build_plan_prompt",
@@ -2094,8 +2530,10 @@ __all__ = [
     "confidence_of",
     "earliest_synced_at",
     "escalate",
+    "evidence_refs",
     "fan_out",
     "global_scope_for",
+    "load_history",
     "load_run_context",
     "marginal_yield",
     "needs_server",
@@ -2103,7 +2541,10 @@ __all__ = [
     "parse_reflect",
     "parse_server_scope",
     "person_username",
+    "prior_plan",
+    "prior_refs",
     "render_coverage",
+    "render_history",
     "run_deep_search",
     "stream_deep_search",
     "to_evidence",

@@ -110,6 +110,31 @@ synth → qamrov. Web: `POST /api/conversations/{id}/messages` `mode="deep"`
   `AsyncSession` parallelga xavfsiz emas). Reja oynasi (`since`/`until`)
   `hybrid_search_multi` ga ham, `node_search` ga ham uzatiladi.
 
+### Suhbatga bog'liqlik (follow-up)
+
+Planner endi oxirgi `DEEP_HISTORY_TURNS` (6) turn'ni ham ko'radi
+(`load_history` → `RunContext.history`), aks holda "chuqurroq qidir" da aynan
+shu so'zlarni qidirardi.
+
+- **Taint qoidasi ikki xil.** User matni — o'zining matni, ochiq ketadi.
+  Oldingi **javob** begona xabarlardan sintez qilingan → faqat
+  `<untrusted_data kind="prior_answer">` konvertida (`render_history`), ichi
+  `neutralize` dan o'tgan. `_Taint.assert_clean` shu konvertni olib tashlab
+  qoldig'ini tekshiradi: javob konvertdan chiqib ketsa — `DeepSearchError`.
+  Xabar matni esa baribir **hech qayerda** bo'lmaydi (konvert ichida ham).
+  Oldingi rejaning `subqueries`/`entities`/`chats` i — bizning planner
+  yasagan tuzilma, oddiy JSON bo'lib beriladi.
+- Reja `standalone_question` + `intent_follow_up`
+  (`none|deeper|repeat|correction|context_switch|reformat|explain`) +
+  `needs_retrieval` qaytaradi; kengaytirish **kodda** (`_apply_follow_up`):
+  `deeper` → oldingi subquery'lar + yangilari, `levels=[0,1,2]`,
+  `server_scope ≥ gaps`, 2-raund majburiy; `repeat` → expansion+HyDE;
+  `correction`/`context_switch` → eski reja **meros qilinmaydi**.
+- `needs_retrieval=False` (faqat `reformat`/`explain`) → fan-out o'tkazib
+  yuboriladi, oldingi turn dalillari `context.evidence_refs`
+  (`[{chat_id, tg_msg_id}]`, ≤60) dan `_refs_to_hits` bilan qayta o'qiladi.
+  Model yolg'on aytsa ham havola bo'lmasa — quvur baribir qidiradi.
+
 ### Server pog'onalari (3-bosqich)
 
 Xom MTProto qidiruv mantiqi `services/tg_search.py` da — konvertsiz, tipli

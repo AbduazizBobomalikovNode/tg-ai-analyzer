@@ -145,11 +145,14 @@ def _hit(mid: int, *, text: str = "", chat_id: int = 1, tg: int | None = None) -
 def wired(monkeypatch: pytest.MonkeyPatch) -> Any:
     """DB qatlamini almashtiradi va yozilgan qatorlarni ushlab qoladi."""
     chats = [_chat(1, title="Ish chat"), _chat(2, title="Arxiv", min_id=500)]
-    state: dict[str, Any] = {"persisted": None, "chats": chats}
+    state: dict[str, Any] = {"persisted": None, "chats": chats, "history": []}
 
     async def fake_ctx(session: Any, *, account_id: int, conversation_id: int) -> DS.RunContext:
         return DS.RunContext(
-            user_id=7, chats=chats, chat_lines=[f'id={c.id} channel "{c.title}"' for c in chats]
+            user_id=7,
+            chats=chats,
+            chat_lines=[f'id={c.id} channel "{c.title}"' for c in chats],
+            history=list(state["history"]),
         )
 
     async def no_budget(session: Any, user_id: int) -> str | None:
@@ -1514,3 +1517,316 @@ async def test_usage_flush_failure_is_logged_and_does_not_raise(
     # Vazifa to'plamdan done-callback bilan chiqarilgan (sizib qolmaydi).
     await asyncio.sleep(0)
     assert DS._USAGE_FLUSHES == set()
+
+
+# ─── phase5: suhbatga bog'liq deep search (follow-up) ────────────────────────
+
+PRIOR_ANSWER = (
+    "Nurbek bilan juma kuni to'lovni o'tkazishga kelishilgan, summa 3 000 000 so'm #c1m101."
+)
+
+
+def _history(*, refs: list[dict[str, int]] | None = None) -> list[DS.Turn]:
+    """Ikki turn: user savoli + oldingi javob (reja metama'lumoti bilan)."""
+    return [
+        DS.Turn(role="user", text="Nurbek bilan to'lov haqida nima kelishgandik?"),
+        DS.Turn(
+            role="assistant",
+            text=PRIOR_ANSWER,
+            mode="deep",
+            plan={
+                "standalone_question": "Nurbek bilan to'lov haqida nima kelishgandik?",
+                "subqueries": ["to'lov", "oplata"],
+                "entities": ["Nurbek"],
+                "chats": [1],
+            },
+            citations=1,
+            evidence_refs=list(refs if refs is not None else [{"chat_id": 1, "tg_msg_id": 101}]),
+        ),
+    ]
+
+
+def test_history_block_wraps_prior_answer_and_keeps_user_text_plain() -> None:
+    block = DS.render_history(_history())
+    assert "<conversation_history" in block
+    # user matni — o'zining matni, konvert kerak emas
+    assert "1. user: Nurbek bilan to'lov haqida" in block
+    # oldingi javob — **faqat** konvert ichida
+    opener = '<untrusted_data kind="' + DS.PRIOR_ANSWER_KIND + '">'
+    assert opener in block
+    head, _, tail = block.partition(opener)
+    assert "juma kuni to'lovni" not in head
+    assert "juma kuni to'lovni" in tail.split("</untrusted_data>")[0]
+    # reja — tuzilma, oddiy JSON
+    assert '"subqueries"' in block and "Nurbek" in block
+
+
+def test_plan_prompt_carries_history_and_still_hides_message_text() -> None:
+    prompt = DS.build_plan_prompt(
+        "chuqurroq qidir", ['id=1 channel "Ish chat"'], now=NOW, history=_history()
+    )
+    assert "<conversation_history" in prompt
+    assert "<question>chuqurroq qidir</question>" in prompt
+    assert prompt.count('kind="' + DS.PRIOR_ANSWER_KIND + '"') == 1
+    assert INJECTION not in prompt
+
+
+def test_plan_prompt_without_history_is_unchanged() -> None:
+    assert "<conversation_history" not in DS.build_plan_prompt("savol", [], now=NOW)
+
+
+def test_taint_guard_allows_prior_answer_only_inside_its_envelope() -> None:
+    guard = DS._Taint()
+    guard.add_turns(_history())
+    # konvertda — mayli (konvertni kod yozadi, ichi neutralize'dan o'tgan)
+    guard.assert_clean("plan", DS.render_history(_history()))
+    # konvertsiz — regressiya, xato
+    with pytest.raises(DS.DeepSearchError) as exc:
+        guard.assert_clean("plan", "savol\nprior: " + PRIOR_ANSWER)
+    assert exc.value.code == "taint"
+
+
+def test_taint_guard_blocks_raw_evidence_even_inside_a_prior_envelope() -> None:
+    """Konvertga ruxsat **faqat** oldingi javobga. Xabar matni baribir taqiq."""
+    guard = DS._Taint()
+    guard.add(DS.to_evidence([_hit(1, text=INJECTION)], []))
+    leaked = (
+        '<untrusted_data kind="' + DS.PRIOR_ANSWER_KIND + '">\n' + INJECTION + "\n</untrusted_data>"
+    )
+    with pytest.raises(DS.DeepSearchError) as exc:
+        guard.assert_clean("plan", leaked)
+    assert exc.value.code == "taint"
+
+
+def test_parse_plan_defaults_when_history_is_absent() -> None:
+    plan = DS.parse_plan('{"intent":"lookup"}', question="Deploy qachon?", known_chats=[1])
+    assert plan.standalone_question == "Deploy qachon?"
+    assert plan.intent_follow_up == "none"
+    assert plan.needs_retrieval is True
+    assert plan.subqueries == ["Deploy qachon?"]
+
+
+def test_parse_plan_ignores_a_follow_up_label_without_history() -> None:
+    raw = '{"intent_follow_up":"deeper","needs_retrieval":false,"standalone_question":"X"}'
+    plan = DS.parse_plan(raw, question="chuqurroq", known_chats=[1])
+    assert plan.intent_follow_up == "none" and plan.needs_retrieval is True
+
+
+def test_parse_plan_deeper_widens_the_previous_plan() -> None:
+    raw = (
+        '{"intent_follow_up":"deeper","standalone_question":'
+        '"Nurbek bilan to\'lov haqida nima kelishgandik?",'
+        '"subqueries":["bank o\'tkazma","schyot raqami","invoice"],'
+        '"levels":[0],"server_scope":"none"}'
+    )
+    plan = DS.parse_plan(raw, question="chuqurroq qidir", known_chats=[1], history=_history())
+    assert plan.intent_follow_up == "deeper"
+    # yangi so'rovlar + oldingi rejanikilar
+    assert "bank o'tkazma" in plan.subqueries and "oplata" in plan.subqueries
+    assert len(plan.subqueries) <= DS.MAX_SUBQUERIES_WIDENED
+    # kengaytirish: epizod/digest darajalari, serverga chiqishga ruxsat, 2-raund
+    assert plan.levels == list(DS.LEVELS)
+    assert plan.server_scope == DS.DEFAULT_SERVER_SCOPE
+    assert plan.force_second_round is True
+    assert plan.needs_retrieval is True
+
+
+def test_parse_plan_repeat_turns_expansion_on() -> None:
+    raw = '{"intent_follow_up":"repeat","subqueries":["to\'lov muddati"]}'
+    plan = DS.parse_plan(raw, question="takror qidir", known_chats=[1], history=_history())
+    assert plan.intent_follow_up == "repeat"
+    assert plan.expansion is True and plan.use_hyde is True
+    assert "oplata" in plan.subqueries
+
+
+def test_parse_plan_correction_does_not_inherit_the_dropped_entity() -> None:
+    """Yo'q, Nurbek emas Bek — eski reja **meros qilinmaydi**."""
+    raw = (
+        '{"intent_follow_up":"correction","standalone_question":'
+        '"Bek bilan to\'lov haqida nima kelishgandik?",'
+        '"subqueries":["Bek to\'lov"],"entities":["Bek"]}'
+    )
+    plan = DS.parse_plan(
+        raw,
+        question="yo'q, men Nurbek emas Bek ni nazarda tutdim",
+        known_chats=[1],
+        history=_history(),
+    )
+    assert plan.intent_follow_up == "correction"
+    assert plan.standalone_question.startswith("Bek bilan")
+    assert plan.entities == ["Bek"]
+    assert "Nurbek" not in " ".join(plan.subqueries + plan.entities)
+    assert "oplata" not in plan.subqueries  # oldingi reja qo'shilmadi
+
+
+def test_parse_plan_context_switch_keeps_the_question_and_takes_the_new_chat() -> None:
+    raw = (
+        '{"intent_follow_up":"context_switch","standalone_question":'
+        '"Arxivda to\'lov haqida nima kelishgandik?","chats":[2],"subqueries":["to\'lov"]}'
+    )
+    plan = DS.parse_plan(
+        raw, question="endi shu savolni Arxiv da ko'r", known_chats=[1, 2], history=_history()
+    )
+    assert plan.intent_follow_up == "context_switch" and plan.chats == [2]
+
+
+def test_parse_plan_no_retrieval_only_for_reformat_with_refs() -> None:
+    raw = '{"intent_follow_up":"reformat","needs_retrieval":false,"standalone_question":"qisqa"}'
+    plan = DS.parse_plan(raw, question="qisqartir", known_chats=[1], history=_history())
+    assert plan.needs_retrieval is False
+
+    # dalil havolalari bo'lmasa — quvur baribir qidiradi
+    plan2 = DS.parse_plan(raw, question="qisqartir", known_chats=[1], history=_history(refs=[]))
+    assert plan2.needs_retrieval is True
+
+    # `deeper` hech qachon qidiruvni o'tkazib yubormaydi
+    raw3 = '{"intent_follow_up":"deeper","needs_retrieval":false}'
+    plan3 = DS.parse_plan(raw3, question="chuqurroq", known_chats=[1], history=_history())
+    assert plan3.needs_retrieval is True
+
+
+def test_plan_dict_exposes_the_new_fields_for_the_ui() -> None:
+    plan = DS.parse_plan(
+        '{"intent_follow_up":"deeper","standalone_question":"Aniq savol"}',
+        question="chuqurroq",
+        known_chats=[1],
+        history=_history(),
+    )
+    data = plan.to_dict()
+    assert data["standalone_question"] == "Aniq savol"
+    assert data["intent_follow_up"] == "deeper" and data["needs_retrieval"] is True
+
+
+def test_evidence_refs_shape_and_cap() -> None:
+    ev = DS.to_evidence([_hit(1), _hit(2), _hit(1)], [])
+    refs = DS.evidence_refs(ev)
+    assert refs[0] == {"chat_id": 1, "tg_msg_id": 101}
+    assert all(set(r) == {"chat_id", "tg_msg_id"} for r in refs)
+    assert len(refs) == 2  # dublikat tushmaydi
+    # tashqi topilma tushmaydi — DB'da qatori yo'q
+    ext = DS.to_evidence([_hit(3)], [], external_links={3: "https://t.me/x/1"})
+    assert DS.evidence_refs(ext) == []
+    many = DS.to_evidence([_hit(i) for i in range(1, 90)], [])
+    assert len(DS.evidence_refs(many)) == DS.MAX_EVIDENCE_REFS
+
+
+def test_clean_refs_rejects_garbage() -> None:
+    assert DS._clean_refs("nope") == []
+    assert DS._clean_refs([{"chat_id": True, "tg_msg_id": 1}, {"chat_id": 0, "tg_msg_id": 2}]) == []
+    assert DS._clean_refs([{"chat_id": 1, "tg_msg_id": 2}]) == [{"chat_id": 1, "tg_msg_id": 2}]
+
+
+def test_plan_meta_only_keeps_the_structured_part() -> None:
+    meta = DS._plan_meta(
+        {"plan": {"subqueries": ["a to'lov"], "entities": ["Bek"], "chats": [1, -2], "x": 1}}
+    )
+    assert meta == {"subqueries": ["a to'lov"], "entities": ["Bek"], "chats": [1]}
+    assert DS._plan_meta({"plan": "nope"}) == {}
+
+
+@pytest.mark.asyncio
+async def test_no_retrieval_path_skips_fan_out_and_reuses_evidence(
+    monkeypatch: pytest.MonkeyPatch, wired: dict[str, Any]
+) -> None:
+    """Qisqartir — yangi qidiruv yo'q, oldingi dalillar qayta o'qiladi."""
+    searched = use_multi(monkeypatch, lambda q: [_hit(1)])
+    asked_refs: list[Any] = []
+
+    async def fake_refs(session: Any, refs: Any, *, account_id: int) -> list[S.Hit]:
+        asked_refs.append(list(refs))
+        return [_hit(1)]
+
+    monkeypatch.setattr(DS, "_refs_to_hits", fake_refs)
+    wired["history"] = _history()
+    llm = FakeLLM(
+        plan='{"intent_follow_up":"reformat","needs_retrieval":false,'
+        '"standalone_question":"Javobni qisqartir"}'
+    )
+    result = await DS.run_deep_search(factory, 1, 10, "qisqartir", locale="uz", llm=llm)  # type: ignore[arg-type]
+
+    assert searched == []  # fan-out umuman yugurmadi
+    assert asked_refs == [[{"chat_id": 1, "tg_msg_id": 101}]]
+    assert llm.count(DEEP_REFLECT_PROMPT) == 0  # refleksiya ham yo'q
+    assert result.plan["needs_retrieval"] is False
+    assert result.plan["intent_follow_up"] == "reformat"
+    assert wired["persisted"]["context_meta"]["reused_evidence"] is True
+    assert [c["id"] for c in result.citations] == [101]
+
+
+@pytest.mark.asyncio
+async def test_run_passes_history_to_planner_and_synthesizer(
+    monkeypatch: pytest.MonkeyPatch, wired: dict[str, Any]
+) -> None:
+    use_multi(monkeypatch, lambda q: [_hit(1, text=INJECTION), _hit(2)])
+    wired["history"] = _history()
+    llm = FakeLLM(reflect='{"needs_more": true, "new_subqueries": ["boshqa so\'z"]}')
+    await DS.run_deep_search(factory, 1, 10, "chuqurroq qidir", locale="uz", llm=llm)  # type: ignore[arg-type]
+
+    plan_turn = llm.user_turn(DEEP_PLAN_PROMPT)
+    assert "<conversation_history" in plan_turn
+    assert 'kind="' + DS.PRIOR_ANSWER_KIND + '"' in plan_turn
+    assert INJECTION not in plan_turn  # dual-LLM chegarasi buzilmadi
+
+    # Invariant: dalillar **bitta** konvertda; tarix alohida `prior_answer` da
+    synth = llm.user_turn(DEEP_SYNTH_PROMPT)
+    assert synth.count('kind="evidence"') == 1
+    assert synth.count("<untrusted_data") == 2  # evidence + bitta prior_answer
+    assert "<conversation_history" in synth
+
+    # Reflect tarixni ko'rmaydi (u faqat yorliq va sanoq bilan ishlaydi)
+    assert "<conversation_history" not in llm.user_turn(DEEP_REFLECT_PROMPT)
+
+
+@pytest.mark.asyncio
+async def test_persisted_context_carries_evidence_refs(
+    monkeypatch: pytest.MonkeyPatch, wired: dict[str, Any]
+) -> None:
+    use_multi(monkeypatch, lambda q: [_hit(1), _hit(2)])
+    await DS.run_deep_search(factory, 1, 10, "to'lov?", locale="uz", llm=FakeLLM())  # type: ignore[arg-type]
+    refs = wired["persisted"]["context_meta"]["evidence_refs"]
+    assert refs and all(set(r) == {"chat_id", "tg_msg_id"} for r in refs)
+    assert {"chat_id": 1, "tg_msg_id": 101} in refs
+
+
+@pytest.mark.asyncio
+async def test_deeper_forces_the_second_round_even_if_reflect_says_no(
+    monkeypatch: pytest.MonkeyPatch, wired: dict[str, Any]
+) -> None:
+    calls: list[str] = []
+
+    def hits_for(q: str) -> list[S.Hit]:
+        calls.append(q)
+        if q == "yangi":
+            return [_hit(9, text="butunlay boshqa mavzu haqida uzun xabar matni")]
+        return [_hit(1)]
+
+    use_multi(monkeypatch, hits_for)
+    wired["history"] = _history()
+    llm = FakeLLM(
+        plan='{"intent_follow_up":"deeper","standalone_question":"To\'lov haqida",'
+        '"subqueries":["to\'lov"],"levels":[0]}',
+        reflect='{"needs_more": false, "new_subqueries": ["yangi"]}',
+    )
+    await DS.run_deep_search(factory, 1, 10, "chuqurroq qidir", locale="uz", llm=llm)  # type: ignore[arg-type]
+    assert "yangi" in calls  # reflect "kerak emas" dedi, lekin raund yugurdi
+
+
+def test_deep_prompts_describe_the_follow_up_contract() -> None:
+    from app.services.prompts_deep import DEEP_PROMPT_VERSION
+
+    assert DEEP_PROMPT_VERSION == "2026-09-17.1"
+    for field_name in ("standalone_question", "intent_follow_up", "needs_retrieval"):
+        assert field_name in DEEP_PLAN_PROMPT
+    for label in DS.FOLLOW_UPS:
+        assert label in DEEP_PLAN_PROMPT
+    assert 'kind="prior_answer"' in DEEP_PLAN_PROMPT
+    assert 'kind="prior_answer"' in DEEP_SYNTH_PROMPT
+    # sintezator oldingi javobga qo'shimcha qila oladi, lekin sitatani undan olmaydi
+    assert "never copy an id you cannot see" in DEEP_SYNTH_PROMPT
+
+
+def test_agent_prompt_explains_follow_ups() -> None:
+    from app.services import prompts as P
+
+    assert "## Follow-ups" in P.AGENT_SYSTEM_PROMPT
+    assert "2026" not in P.AGENT_SYSTEM_PROMPT
