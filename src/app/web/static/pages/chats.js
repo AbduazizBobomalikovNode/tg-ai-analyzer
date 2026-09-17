@@ -23,6 +23,7 @@ import { rank } from "../lib/palette.js";
 import { compact, listDate, relTime } from "../lib/fmt.js";
 import { inEditable } from "../lib/keys.js";
 import { haptic } from "../lib/tg.js";
+import { bindSyncButton, liveChat, subscribe } from "../lib/sync-center.js";
 import {
   me, pickAccount, rememberAccount, prefs, savePrefs,
   avatarEl, syncDot, syncLabel, typeLabel, flagNodes, highlight,
@@ -348,12 +349,9 @@ async function syncChat(id) {
   } catch (err) { toastError(err); }
 }
 
-async function syncAll() {
-  try {
-    await post(`/api/accounts/${state.accountId}/sync`);
-    toast(t("web.chats.sync_started"), { kind: "ok" });
-  } catch (err) { toastError(err); }
-}
+// `syncAll` olib tashlandi: "hammasini sinxronlash" endi sync markazi
+// varag'ining sarlavhasida (`lib/sync-center.js`) — bitta joyda, holat bilan
+// birga (yugurayotganda o'chiq).
 
 /** Optimistik: darhol chiziladi, server rad etsa qaytariladi + toast. */
 async function togglePin(id, on) {
@@ -484,6 +482,46 @@ async function boot() {
   }
   refs.skeletons.hidden = true;
   render();
+  startSyncCenter();
+}
+
+/* ── jonli sync (bitta obuna: topbar ikonkasi + joriy qator) ───────── */
+
+let liveRow = null;
+
+/**
+ * Serverdagi **bir xil** holat obyekti: topbar ikonkasi puls uradi va
+ * hozir sinxronlanayotgan chat qatori jonli foiz bilan belgilanadi
+ * (ikkinchi so'rov yo'q — `lib/sync-center.js::liveChat`).
+ */
+function startSyncCenter() {
+  bindSyncButton(refs.syncAll, state.accountId);
+  subscribe(state.accountId, (status) => {
+    const cur = status.current;
+    const id = cur && status.running ? Number(cur.chat_id) : null;
+    if (liveRow && Number(liveRow.dataset.id) !== id) {
+      liveRow.classList.remove("is-syncing");
+      liveRow.querySelector(".chat-live")?.remove();
+      liveRow = null;
+    }
+    if (id == null) return;
+    const li = refs.rows?.querySelector(`.chat-row[data-id="${id}"]`);
+    if (!li) return;
+    const info = liveChat(status, id);
+    const pct = info.percent == null ? 0 : info.percent;
+    li.classList.add("is-syncing");
+    liveRow = li;
+    let node = li.querySelector(".chat-live");
+    if (!node) {
+      node = el("span.chat-live.sync-bar.is-live", {
+        role: "progressbar", "aria-valuemin": "0", "aria-valuemax": "100",
+        "aria-label": t("web.sync.title"),
+      }, el("i"));
+      li.appendChild(node);
+    }
+    node.setAttribute("aria-valuenow", String(pct));
+    node.firstChild.style.inlineSize = `${pct}%`;
+  });
 }
 
 /* ── kirish nuqtasi ────────────────────────────────────────────────── */
@@ -523,7 +561,7 @@ export function initChats(opts = {}) {
     writeUrl(true);
     render();
   });
-  refs.syncAll?.addEventListener("click", syncAll);
+  // Topbar ikonkasi `boot()` da bog'lanadi — akkaunt id shu yerda hali yo'q.
 
   // `/` — ro'yxat qidiruvi. Capture fazasida: `lib/keys.js` hujjatga
   // ko'pikda (bubble) osilgan, shuning uchun ⌘K palitrasi ochilmaydi.

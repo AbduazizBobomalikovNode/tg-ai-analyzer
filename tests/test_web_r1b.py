@@ -616,7 +616,7 @@ def test_unlink_never_calls_logout() -> None:
 def test_sync_status(settings_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.web.routers import settings as settings_router
 
-    async def fake_status(db: Any, account_id: int) -> dict[str, Any]:
+    async def fake_status(db: Any, account_id: int, *a: Any, **kw: Any) -> dict[str, Any]:
         return {
             "running": True,
             "chats": [
@@ -654,7 +654,7 @@ def test_sync_stream_ends_with_done(
 ) -> None:
     from app.web.routers import settings as settings_router
 
-    async def fake_status(db: Any, account_id: int) -> dict[str, Any]:
+    async def fake_status(db: Any, account_id: int, *a: Any, **kw: Any) -> dict[str, Any]:
         return {"running": False, "chats": [], "counts": {}, "poll_seconds": 2.0}
 
     monkeypatch.setattr(settings_router, "_sync_status", fake_status)

@@ -339,7 +339,12 @@ def pull_env(monkeypatch: pytest.MonkeyPatch) -> _PullEnv:
         return len(rows)
 
     async def fake_progress(
-        chat_id: int, report: Any, total: int | None, *, synced_total: int | None = None
+        chat_id: int,
+        report: Any,
+        total: int | None,
+        *,
+        synced_total: int | None = None,
+        **kw: Any,  # `phase` / `fetched` — sync markazi ko'rsatkichi uchun
     ) -> None:
         env.progress.append(synced_total)
 

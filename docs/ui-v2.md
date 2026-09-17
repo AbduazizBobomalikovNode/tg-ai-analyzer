@@ -326,6 +326,7 @@ kalitni bermasa UI o'z palitrasida qoladi. `.shell` balandligi
 | ⚑ Toast | `.toast-root`, `.toast` | `.ok` · `.err` · info · undo tugmasi |
 | ⚑ Segment | `.segment` | `aria-selected` |
 | ⚑ SyncPill | `.sync-pill` | idle · `.running` · `.done` · `.failed` |
+| ⚑ SyncCenter | `.sync-strip`, `.sync-sheet`, `.sync-bar` | idle · running · paused (amber) · failed; `lib/sync-center.js` — `/today` bandi, to'liq varaq, `/chats` ikonkasi **bir manbadan** |
 | ⚑ CommandPalette | `.cmdk` | yopiq · bo'sh so'rov · natijalar · `.cmdk-empty` |
 | ⚑ Sheet | `.sheet` | yopiq · ochiq (260ms) |
 | ⚑ Rail / TabBar | `.rail`, `.tabbar` | default · `aria-current` · `.is-disabled` · badge |

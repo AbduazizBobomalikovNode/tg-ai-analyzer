@@ -18,6 +18,7 @@ import { peerClass, initials } from "/static/lib/palette.js";
 import { toast, toastError } from "/static/lib/toast.js";
 import * as themeMod from "/static/lib/theme.js";
 import { ui } from "/static/lib/store.js";
+import { openSheet } from "/static/lib/sync-center.js";
 
 const WRITE_MODES = ["read_only", "write_with_confirm", "autonomous"];
 const state = { me: null, account: null, chats: [], prefs: {}, briefChats: null, unlinkId: null };
@@ -87,7 +88,14 @@ function accountCard(a) {
     ]),
   ];
   const btns = [];
-  if (a.status !== "active") {
+  if (a.status === "active") {
+    // Sync markazi — `/today` bandi va `/chats` ikonkasi bilan **bitta**
+    // komponent (`lib/sync-center.js`).
+    btns.push(el("button.btn.small", {
+      type: "button",
+      onclick: () => openSheet(a.id),
+    }, [icon("refresh-cw"), t("web.sync.details")]));
+  } else {
     btns.push(el("a.btn.small", { href: "/onboarding" }, [icon("qr-code"), t("web.settings.relogin")]));
   }
   btns.push(el("button.btn.ghost.small", {

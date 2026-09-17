@@ -48,6 +48,7 @@ from app.db.models import (
 from app.logging import get_logger
 from app.mtproto.pool import DIALOGS_LIMIT, PoolError, pool
 from app.observability import FLOODWAIT, SNAPSHOT_POSTS, SYNC_MESSAGES
+from app.services import sync_progress as SP
 from app.services.stopwords import STOP_EN, STOP_RU, STOP_UZ
 from app.services.textnorm import strip_invisible, uz_fold
 
@@ -79,6 +80,9 @@ class SyncReport:
     oldest_id: int | None = None
     done: bool = False  # tarix boshigacha yetildi
     error: str | None = None
+    #: Redis'ga batch progressini yozuvchi (`services/sync_progress.ChatTracker`).
+    #: `None` — ko'rsatkich o'chiq (test, yoki chat topilmagan); sync baribir ishlaydi.
+    tracker: Any = field(default=None, repr=False, compare=False)
 
 
 # ─── chat registry ───────────────────────────────────────────────────────────
@@ -594,8 +598,16 @@ async def sync_chat(chat_id: int, *, max_messages: int | None = None) -> SyncRep
         budget = max_messages or limits.max_messages
         account_id, peer_id = chat.account_id, chat.tg_peer_id
         synced_min, synced_max = chat.synced_min_id, chat.synced_max_id
+        title, synced_now, estimate_now = chat.title, chat.synced_total, chat.total_estimate
         chat.sync_state = SyncState.RUNNING
         chat.sync_error = None
+
+    # UI ko'rsatkichi (Redis, TTL 10 daq) — `chats` jadvali haqiqat manbai
+    # bo'lib qoladi, bu yerda faqat "hozir nima bo'lyapti" (services/sync_progress).
+    report.tracker = SP.ChatTracker(account_id, chat_id, title, budget=budget)
+    await report.tracker.publish(
+        fetched=0, synced_total=synced_now, total_estimate=estimate_now, phase="new"
+    )
 
     try:
         client = await pool.get(account_id)
@@ -618,6 +630,7 @@ async def sync_chat(chat_id: int, *, max_messages: int | None = None) -> SyncRep
         FLOODWAIT.inc()
         report.error = f"flood_wait:{exc.seconds}"
         await _finish(chat_id, report, state=SyncState.IDLE, error=report.error)
+        await report.tracker.publish_paused(int(exc.seconds))
         raise SyncPaused(int(exc.seconds)) from exc
     except (PoolError, tg_errors.RPCError, OSError, ConnectionError, TimeoutError) as exc:
         report.error = f"{type(exc).__name__}: {str(exc)[:200]}"
@@ -653,6 +666,7 @@ async def _pull(
     # biroz oshib ketishi mumkin — u faqat progress ko'rsatkichi va keyingi
     # sync boshidagi COUNT uni to'g'irlaydi.
     counter = await _message_count(chat_id)
+    phase = "backfill" if backfill else "new"
     batch: list[dict[str, Any]] = []
     # phase4/A: `mention_name` faqat Telegram entity'laridan olinadi — matn
     # bilan birga batch'gacha olib boriladi (`messages` da saqlanmaydi).
@@ -677,7 +691,14 @@ async def _pull(
             written = await upsert_messages(batch, tg_entities=batch_entities)
             report.inserted_or_updated += written
             counter += written
-            await _progress(chat_id, report, total_estimate, synced_total=counter)
+            await _progress(
+                chat_id,
+                report,
+                total_estimate,
+                synced_total=counter,
+                phase=phase,
+                fetched=report.fetched + fetched,
+            )
             batch = []
             batch_entities = {}
     if batch:
@@ -697,7 +718,9 @@ async def _pull(
     chunk = min(BATCH, budget) or BATCH
     if backfill and (fetched == 0 or (fetched < budget and fetched % chunk != 0)):
         report.done = True
-    await _progress(chat_id, report, total_estimate, synced_total=counter)
+    await _progress(
+        chat_id, report, total_estimate, synced_total=counter, phase=phase, fetched=report.fetched
+    )
     return fetched
 
 
@@ -717,9 +740,15 @@ async def _progress(
     total_estimate: int | None,
     *,
     synced_total: int | None = None,
+    phase: str | None = None,
+    fetched: int | None = None,
 ) -> None:
     """Oraliq progress. `synced_total` — yuguruvchi hisoblagich (`_pull`); `None`
-    bo'lsa aniq `COUNT(*)` olinadi (endi faqat aniqlik kerak bo'lgan joyda)."""
+    bo'lsa aniq `COUNT(*)` olinadi (endi faqat aniqlik kerak bo'lgan joyda).
+
+    Shu yerda **DB yozuvi bilan bir vaqtda** Redis'ga UI ko'rsatkichi ham
+    chiqadi (`report.tracker`) — ikkinchisi yiqilsa birinchisi zarar ko'rmaydi.
+    """
     async with session_scope() as db:
         chat = await db.get(Chat, chat_id)
         if chat is None:
@@ -740,6 +769,14 @@ async def _progress(
             else (
                 await db.execute(select(func.count(Message.id)).where(Message.chat_id == chat_id))
             ).scalar_one()
+        )
+        live = (int(chat.synced_total), chat.total_estimate)
+    if report.tracker is not None:
+        await report.tracker.publish(
+            fetched=fetched if fetched is not None else report.fetched,
+            synced_total=live[0],
+            total_estimate=live[1],
+            phase=phase,
         )
 
 

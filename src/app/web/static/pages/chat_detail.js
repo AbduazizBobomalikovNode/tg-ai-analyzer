@@ -24,6 +24,7 @@ import { md, hydrate } from "../lib/md.js";
 import { num, compact, relTime, date, plural } from "../lib/fmt.js";
 import { isMobile } from "../lib/store.js";
 import { backButton } from "../lib/tg.js";
+import { subscribe, liveChat, etaText } from "../lib/sync-center.js";
 import {
   me, pickAccount, rememberAccount, pushRecentChat,
   avatarEl, typeLabel, flagNodes, syncLabel,
@@ -102,8 +103,18 @@ function syncNode(chat) {
     el(`span.sync-pill${cls ? `.${cls}` : ""}`, null, bits.join(" · ")),
   ]);
   if (stateName === "running") {
-    row.appendChild(el("span.progress", { role: "progressbar", "aria-valuenow": String(chat.progress ?? 0), "aria-valuemin": "0", "aria-valuemax": "100" },
-      el("i", { style: { inlineSize: `${chat.progress ?? 0}%` } })));
+    const pct = chat.progress ?? 0;
+    row.appendChild(el("span.progress.sync-bar.is-live", { role: "progressbar", "aria-valuenow": String(pct), "aria-valuemin": "0", "aria-valuemax": "100", "aria-label": t("web.sync.title") },
+      el("i", { style: { inlineSize: `${pct}%` } })));
+    // Jonli tezlik/ETA — sync markazidagi `current` dan (qo'shimcha so'rovsiz).
+    const live = chat.sync_live;
+    if (live) {
+      const eta = etaText(live.eta_s);
+      const bitsLive = [];
+      if (live.rate_per_s) bitsLive.push(t("web.sync.rate", { n: num(Math.round(live.rate_per_s)) }));
+      if (eta) bitsLive.push(eta);
+      if (bitsLive.length) row.appendChild(el("span.sync-faint", null, bitsLive.join(" · ")));
+    }
   }
   if (!(chat.synced_total || 0) && stateName !== "running") {
     row.appendChild(el("button.btn.primary.small", { type: "button", onclick: startSync }, [icon("refresh-cw"), " ", t("web.chats.sync")]));
@@ -170,34 +181,48 @@ async function startSync() {
 }
 
 /**
- * Sync progressi — akkaunt darajasidagi SSE (`sync/stream`). `GET`,
- * shuning uchun oddiy `EventSource` yetarli. Oqim tugaganda chat qayta
- * o'qiladi va sahifa yangilanadi.
+ * Sync progressi — `lib/sync-center.js::subscribe` (SSE, uzilsa polling).
+ * Bir xil holat obyekti `/today` bandi va sync markazi bilan ulashiladi;
+ * bu yerda faqat **shu chat** ajratib olinadi (`liveChat`).
  */
 function watchSync() {
-  if (state.es || !("EventSource" in window)) return;
-  const es = new EventSource(`/api/accounts/${state.accountId}/sync/stream`);
-  state.es = es;
-  const stop = () => { try { es.close(); } catch { /* yopiq */ } state.es = null; };
-  es.addEventListener("status", (ev) => {
-    let payload = null;
-    try { payload = JSON.parse(ev.data); } catch { return; }
-    const mine = (payload.chats || []).find((c) => Number(c.chat_id) === state.chatId);
-    if (!mine) return;
-    state.chat.sync_state = mine.state;
-    state.chat.progress = mine.progress;
-    state.chat.synced_total = mine.synced_total;
+  if (state.es) return;
+  state.es = subscribe(state.accountId, (status) => {
+    const live = liveChat(status, state.chatId);
+    const mine = (status.chats || []).find((c) => Number(c.chat_id) === state.chatId);
+    if (live.active) {
+      state.chat.sync_state = "running";
+      if (live.percent != null) state.chat.progress = live.percent;
+      if (status.current.synced_total != null) state.chat.synced_total = status.current.synced_total;
+      state.chat.sync_live = status.current;
+    } else if (mine) {
+      state.chat.sync_state = mine.state;
+      state.chat.progress = mine.progress;
+      state.chat.synced_total = mine.synced_total;
+      state.chat.sync_live = null;
+    } else if (state.chat.sync_state === "running") {
+      // Bizniki tugadi (`chats` ro'yxatidan tushdi) — aniq qatorni qayta o'qiymiz.
+      state.chat.sync_live = null;
+      stopSync();
+      refreshChat();
+      return;
+    } else {
+      return;
+    }
     const node = $("#cd-sync");
     if (node) node.replaceWith(syncNode(state.chat));
   });
-  es.addEventListener("done", async () => {
-    stop();
-    try {
-      state.chat = await get(`/api/accounts/${state.accountId}/chats/${state.chatId}`);
-      render();
-    } catch { /* keyingi ochilishda ko'rinadi */ }
-  });
-  es.onerror = stop;
+}
+
+function stopSync() {
+  if (state.es) { state.es.stop(); state.es = null; }
+}
+
+async function refreshChat() {
+  try {
+    state.chat = await get(`/api/accounts/${state.accountId}/chats/${state.chatId}`);
+    render();
+  } catch { /* keyingi ochilishda ko'rinadi */ }
 }
 
 /* ── Overview ──────────────────────────────────────────────────────── */

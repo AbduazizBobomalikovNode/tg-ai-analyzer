@@ -46,21 +46,37 @@ async def sync_account(ctx: dict[str, Any], account_id: int, full: bool = False)
     """Akkauntning chatlarini birma-bir sinxronlaydi. `full` — birinchi to'liq sync."""
     from app.db.base import session_scope
     from app.db.models import Account
+    from app.services import sync_progress as SP
 
     async with session_scope() as db:
         account = await db.get(Account, account_id)
         created_at = account.created_at if account else None
     limits = ing.limits_for(created_at)
 
+    # UI ko'rsatkichi: job boshlandi. Redis yo'q bo'lsa jim o'tadi (SP xatoni yutadi).
+    await SP.publish_job(
+        account_id,
+        state=SP.RUNNING,
+        started_at=SP.now_iso(),
+        finished_at=None,
+        chats_done=0,
+        chats_total=0,
+        error=None,
+    )
+
     try:
         n_chats = await ing.refresh_chats(account_id)
         chat_ids = await ing.chats_to_sync(account_id, limits=limits)
     except ing.SyncPaused as exc:
+        await SP.publish_job(account_id, state=SP.PAUSED, error=f"flood_wait:{exc.retry_after}")
         await _requeue_account(account_id, full, exc.retry_after)
         return {"paused": exc.retry_after}
 
+    await SP.publish_job(account_id, chats_total=len(chat_ids))
+
     fetched = 0
     changed: list[int] = []
+    done_chats = 0
     for chat_id in chat_ids:
         try:
             report = await ing.sync_chat(chat_id, max_messages=limits.max_messages)
@@ -68,10 +84,32 @@ async def sync_account(ctx: dict[str, Any], account_id: int, full: bool = False)
             if report.fetched:
                 changed.append(chat_id)
         except ing.SyncPaused as exc:
+            await SP.publish_job(
+                account_id,
+                state=SP.PAUSED,
+                chats_done=done_chats,
+                error=f"flood_wait:{exc.retry_after}",
+            )
             await _build_episodes_for(changed)
             await _requeue_account(account_id, full, exc.retry_after)
             return {"chats": n_chats, "fetched": fetched, "paused": exc.retry_after}
+        except Exception as exc:
+            await SP.publish_job(
+                account_id,
+                state=SP.FAILED,
+                chats_done=done_chats,
+                finished_at=SP.now_iso(),
+                error=f"{type(exc).__name__}: {str(exc)[:160]}",
+            )
+            raise
+        done_chats += 1
+        # Har chatdan keyin — "N / M tayyor" hisoblagichi (bitta Redis SET).
+        await SP.publish_job(account_id, chats_done=done_chats)
 
+    await SP.publish_job(
+        account_id, state=SP.DONE, finished_at=SP.now_iso(), chats_done=done_chats, error=None
+    )
+    await SP.clear_progress(account_id)
     await _build_episodes_for(changed)
     log.info(
         "worker.sync_account.done",

@@ -182,6 +182,16 @@ def test_pages(client: TestClient) -> None:
     assert r.status_code == 302
 
 
+def test_sync_center_strings_and_markup_are_shipped(client: TestClient) -> None:
+    """Sync markazi: `/today` bandining uyasi, `/chats` topbar ikonkasi va
+    `web.sync.*` lug'ati JS'ga yetib boradi (`pages.py::_strings` prefiksi)."""
+    html = client.get("/login?lang=uz").text  # login — kirishsiz ochiladigan sahifa
+    # Lug'at har sahifada bir xil `strings_json` orqali keladi.
+    assert "web.sync.running_chat" in html
+    assert "web.sync.parallel_note" in html
+    assert "web.sync.eta_min" in html
+
+
 def test_login_page_has_a_qr_retry_container(client: TestClient) -> None:
     """H7: QR muvaffaqiyatsiz bo'lganda `login.js` shu blokka almashadi —
     rasm/kutish matni bilan bir vaqtda emas (`#qr-live` va `#qr-retry`

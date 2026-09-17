@@ -18,6 +18,7 @@ import { icon } from "/static/lib/icons.js";
 import { compact, usd, relTime, plural, weekdayDate } from "/static/lib/fmt.js";
 import { peerClass, initials } from "/static/lib/palette.js";
 import { toastError } from "/static/lib/toast.js";
+import { mountStrip } from "/static/lib/sync-center.js";
 
 const R = () => (window.TGAI && window.TGAI.routes) || {};
 const askUrl = (q) => `${R().ask || "/ask"}${q ? `?q=${encodeURIComponent(q)}` : ""}`;
@@ -192,6 +193,10 @@ async function loadFeed() {
 
 /* ── Sync holati va uzilgan akkaunt ──────────────────────────────────── */
 
+/**
+ * Sync bandi — butun mantiq `lib/sync-center.js` da (uchala joyda bitta
+ * manba). Bu yerda faqat uzilgan akkaunt holati va montaj qoladi.
+ */
 async function loadSync(account) {
   const box = $("#today-sync");
   if (!box || !account) return;
@@ -207,36 +212,9 @@ async function loadSync(account) {
     return;
   }
 
-  let st;
-  try { st = await get(`/api/accounts/${account.id}/sync/status`); } catch { return; }
-  const counts = st.counts || {};
-  const running = Number(counts.running || 0);
-  const done = Number(counts.done || 0);
-  const failed = Number(counts.failed || 0);
-
-  const line = el("div.sync-line");
-  if (st.running) {
-    line.appendChild(icon("refresh-cw", { cls: "spin" }));
-    line.appendChild(el("span", null, t("web.today.sync_running", { n: running })));
-  } else if (failed) {
-    line.appendChild(icon("alert-triangle"));
-    line.appendChild(el("span", null, t("web.today.sync_failed", { n: failed })));
-  } else if (done) {
-    line.appendChild(icon("check-check"));
-    line.appendChild(el("span", null, t("web.today.sync_all")));
-  } else {
-    return;  // aytadigan yangilik yo'q — band ko'rsatilmaydi
-  }
-
-  const card = el("div.card-v2.sync-strip", null, [line]);
-  if (st.running) {
-    const chats = (st.chats || []).filter((c) => c.state === "running").slice(0, 3);
-    for (const c of chats) {
-      card.appendChild(el("div.progress", null, el("i", { style: { inlineSize: `${c.progress || 0}%` } })));
-    }
-  }
-  box.hidden = false;
-  replace(box, card);
+  // Jonli: SSE (`/sync/stream`), uzilsa polling. Sahifa yopilganda to'xtaydi.
+  const center = mountStrip(box, account.id);
+  window.addEventListener("pagehide", () => center.destroy(), { once: true });
 }
 
 /* ── Plitalar ────────────────────────────────────────────────────────── */

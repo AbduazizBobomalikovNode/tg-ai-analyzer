@@ -183,10 +183,17 @@ async def _enqueue(name: str, *args: Any, job_id: str) -> bool:
 async def start_sync(
     account_id: int, ident: Annotated[WebIdentity, Depends(require_identity)]
 ) -> dict[str, Any]:
+    from app.services import sync_progress as SP
     from app.worker.tasks import job_id_account
 
     await _own_account(ident.user_id, account_id)
     queued = await _enqueue("sync_account", account_id, True, job_id=job_id_account(account_id))
+    if queued:
+        # UI darhol "navbatda" ko'rsatsin — worker ishni olguncha bir necha
+        # soniya o'tishi mumkin va bo'sh strip "hech narsa bo'lmadi" deb ko'rinadi.
+        await SP.publish_job(
+            account_id, state=SP.QUEUED, started_at=SP.now_iso(), finished_at=None, error=None
+        )
     return {"status": "queued" if queued else "already_running"}
 
 

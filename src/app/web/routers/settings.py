@@ -17,17 +17,21 @@ import asyncio
 import json
 import time
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 
 from app.db.base import session_scope
 from app.db.models import Account, AccountStatus, Chat, SyncState, User
 from app.logging import get_logger
+from app.services import ingestion as ing
 from app.services import prefs as P
+from app.services import sync_progress as SP
+from app.web.routers.chatdata import avatar_url
 from app.web.security import WebIdentity, require_csrf, require_identity
 
 log = get_logger(__name__)
@@ -37,11 +41,21 @@ router = APIRouter(tags=["settings"])
 #: Poll oralig'i (sekund) — REST yo'li uchun frontend maslahati, SSE yo'lida
 #: hodisalar orasidagi kutish.
 SYNC_POLL_SECONDS = 2.0
+#: Sync markazi: yugurayotganda jonli (1 s), bo'sh turganda arzon (5 s).
+SYNC_POLL_RUNNING = 1.0
+SYNC_POLL_IDLE = 5.0
 #: SSE oqimining umumiy chegarasi: sync soatlab ketishi mumkin, lekin ochiq
 #: ulanish abadiy turmasin (proxy timeout'lari, worker restart'lari).
 SYNC_STREAM_MAX_SECONDS = 600.0
 #: Bitta javobda ko'rsatiladigan chat soni — polling yengil qolsin.
 SYNC_CHATS_LIMIT = 50
+#: Navbat va "yaqinda tayyor" ro'yxatlarining uzunligi (UI ko'rsatadigan qadar).
+SYNC_QUEUE_LIMIT = 8
+SYNC_RECENT_LIMIT = 5
+#: `worker/settings.py::WorkerSettings.max_jobs` nusxasi — api `arq` sozlamalarini
+#: import qilmasligi uchun (u import paytida Redis DSN'ni tahlil qiladi).
+#: Ikkisining tengligini `tests/test_sync_center.py` qo'riqlaydi.
+SYNC_MAX_JOBS = 4
 
 
 # ─── prefs ───────────────────────────────────────────────────────────────────
@@ -150,12 +164,90 @@ def _progress(c: Chat) -> int:
     return 100 if c.sync_state == SyncState.DONE else 0
 
 
-async def _sync_status(db: Any, account_id: int) -> dict[str, Any]:
-    """Yengil holat: **dialoglar RPC'si yo'q**, faqat DB.
+def _iso(v: Any) -> str | None:
+    return v.isoformat() if hasattr(v, "isoformat") else (str(v) if v else None)
 
-    `chats` — hozir yugurayotgan va xato bergan chatlar (5 sekundda bir
-    so'raladi, shuning uchun butun registr qaytarilmaydi; to'liq ro'yxat
-    `GET /api/accounts/{id}/chats` da).
+
+def _paused_until(current: dict[str, Any] | None, job: dict[str, Any] | None) -> str | None:
+    """Pauza faqat **kelajakdagi** `paused_until` bo'lsa rost (eski kalit yolg'on
+    "pauzada" ko'rsatmasin — TTL 10 daqiqa, FloodWait esa 30 soniya bo'lishi mumkin)."""
+    raw = (current or {}).get("paused_until")
+    if not raw:
+        return None
+    try:
+        until = datetime.fromisoformat(str(raw))
+    except ValueError:
+        return None
+    if until.tzinfo is None:
+        until = until.replace(tzinfo=UTC)
+    if until <= datetime.now(UTC):
+        return None
+    if job is not None and job.get("state") not in (None, SP.PAUSED, SP.RUNNING):
+        return None
+    return until.isoformat()
+
+
+async def _counts(db: Any, account_id: int) -> tuple[dict[str, int], int, int]:
+    """Bitta guruhlangan so'rov: holat bo'yicha son + `synced_total`/`total_estimate` yig'indisi.
+
+    Yig'indi faqat **taxmini bor** chatlar bo'yicha — aks holda maxraj
+    yolg'on kichik chiqadi va foiz 100 dan oshib ketadi.
+    """
+    rows = (
+        await db.execute(
+            select(
+                Chat.sync_state,
+                func.count(Chat.id),
+                func.sum(case((Chat.total_estimate.is_(None), 0), else_=Chat.synced_total)),
+                func.sum(func.coalesce(Chat.total_estimate, 0)),
+            )
+            .where(Chat.account_id == account_id)
+            .group_by(Chat.sync_state)
+        )
+    ).all()
+    counts: dict[str, int] = {}
+    synced_sum = est_sum = 0
+    for state, n, synced, est in rows:
+        counts[str(state)] = int(n or 0)
+        synced_sum += int(synced or 0)
+        est_sum += int(est or 0)
+    return counts, synced_sum, est_sum
+
+
+def _pending_where(account_id: int) -> Any:
+    """"Navbatda" mezoni: hali ishlanadigan chat.
+
+    `synced_min_id == 1` — tarix boshiga yetilgan sentinel (CLAUDE.md), ya'ni
+    orqaga to'ldiradigan narsa qolmagan. `done` holati ham navbatda emas.
+    """
+    return (
+        Chat.account_id == account_id,
+        Chat.sync_state.in_((SyncState.IDLE, SyncState.RUNNING)),
+        func.coalesce(Chat.synced_min_id, 0) != 1,
+    )
+
+
+def _queue_row(c: Chat) -> dict[str, Any]:
+    return {
+        "chat_id": c.id,
+        "title": c.title,
+        "avatar_url": avatar_url(c),
+        "total_estimate": c.total_estimate,
+        "synced_total": c.synced_total,
+        "state": c.sync_state,
+    }
+
+
+async def _sync_status(db: Any, account_id: int, user_id: int | None = None) -> dict[str, Any]:
+    """Sync markazi uchun to'liq holat: **dialoglar RPC'si yo'q**, faqat DB + Redis.
+
+    Eski kalitlar (`running`, `chats`, `counts`, `poll_seconds`) o'z joyida —
+    rebuild paytida eski frontend ham ishlayveradi.
+
+    Rostgo'ylik: bir akkauntda chatlar **birma-bir** sinxronlanadi
+    (`worker/tasks.sync_account` sikli), akkauntlar esa parallel
+    (`max_jobs`). Shuning uchun `current` bitta chat, `parallel` esa
+    akkauntlar soni haqida.
     """
     rows = (
         (
@@ -172,14 +264,64 @@ async def _sync_status(db: Any, account_id: int) -> dict[str, Any]:
         .scalars()
         .all()
     )
-    counts_rows = await db.execute(
-        select(Chat.sync_state, func.count(Chat.id))
-        .where(Chat.account_id == account_id)
-        .group_by(Chat.sync_state)
+    counts, synced_sum, est_sum = await _counts(db, account_id)
+    pending = int(
+        (await db.execute(select(func.count(Chat.id)).where(*_pending_where(account_id))))
+        .scalars()
+        .first()
+        or 0
     )
-    counts = {str(state): int(n) for state, n in counts_rows.all()}
+    queue_rows = (
+        (
+            await db.execute(
+                select(Chat)
+                .where(*_pending_where(account_id))
+                .order_by(Chat.last_message_at.desc().nulls_last(), Chat.id)
+                .limit(SYNC_QUEUE_LIMIT)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    recent_rows = (
+        (
+            await db.execute(
+                select(Chat)
+                .where(Chat.account_id == account_id, Chat.sync_state == SyncState.DONE)
+                .order_by(Chat.last_sync_at.desc().nulls_last(), Chat.id.desc())
+                .limit(SYNC_RECENT_LIMIT)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    job = await SP.read_job(account_id)
+    current = await SP.read_progress(account_id)
+    paused = _paused_until(current, job)
+    if current is not None:
+        current = {**current, "paused_until": paused}
+
+    running_chats = counts.get(str(SyncState.RUNNING), 0)
+    job_state = (job or {}).get("state")
+    running = bool(running_chats) or job_state in (SP.RUNNING, SP.QUEUED)
+    if paused:
+        running = True
+
+    done = counts.get(str(SyncState.DONE), 0)
+    failed = counts.get(str(SyncState.FAILED), 0)
+    total = sum(counts.values())
+    if est_sum:
+        percent = min(100, round(100 * synced_sum / est_sum))
+    else:
+        percent = round(100 * done / total) if total else 0
+
+    account = await db.get(Account, account_id)
+    limits = ing.limits_for(getattr(account, "created_at", None))
+
     return {
-        "running": counts.get(str(SyncState.RUNNING), 0) > 0,
+        # ── eski shakl (buzilmaydi) ──
+        "running": running,
         "chats": [
             {
                 "chat_id": c.id,
@@ -191,9 +333,80 @@ async def _sync_status(db: Any, account_id: int) -> dict[str, Any]:
             }
             for c in rows
         ],
-        "counts": counts,
-        "poll_seconds": SYNC_POLL_SECONDS,
+        "counts": {
+            **counts,
+            "done": done,
+            "running": running_chats,
+            "pending": pending,
+            "failed": failed,
+            "paused": 1 if paused else 0,
+            "total": total,
+        },
+        "poll_seconds": SYNC_POLL_RUNNING if running else SYNC_POLL_IDLE,
+        # ── sync markazi ──
+        "account_id": account_id,
+        "job": job
+        or {
+            "state": SP.RUNNING if running else SP.DONE if done else SP.QUEUED,
+            "started_at": None,
+            "finished_at": None,
+            "chats_done": done,
+            "chats_total": total,
+            "error": None,
+        },
+        "current": current,
+        "percent_overall": percent,
+        "queue": [_queue_row(c) for c in queue_rows],
+        "recent_done": [
+            {
+                "chat_id": c.id,
+                "title": c.title,
+                "synced_total": c.synced_total,
+                "finished_at": _iso(c.last_sync_at),
+            }
+            for c in recent_rows
+        ],
+        "failed": [
+            {"chat_id": c.id, "title": c.title, "error": c.sync_error}
+            for c in rows
+            if c.sync_state == SyncState.FAILED
+        ],
+        "parallel": {
+            "accounts_running": await _accounts_running(db, user_id),
+            "max_jobs": SYNC_MAX_JOBS,
+        },
+        "ramp": {
+            "limited": bool(limits.ramp_up),
+            "note": "web.sync.ramp_note" if limits.ramp_up else "",
+            "max_messages": limits.max_messages,
+            "max_chats": limits.max_chats,
+        },
+        "last_sync_at": _iso(
+            max((c.last_sync_at for c in recent_rows if c.last_sync_at), default=None)
+        ),
     }
+
+
+async def _account_ids(db: Any, user_id: int | None) -> list[int]:
+    if user_id is None:
+        return []
+    rows = await db.execute(select(Account.id).where(Account.user_id == user_id))
+    return [int(r[0]) for r in rows.all()]
+
+
+async def _accounts_running(db: Any, user_id: int | None) -> int:
+    """Parallel indikator: nechta akkaunt **ayni damda** sync qilyapti.
+
+    Manba — Redis job kalitlari (`sync:job:<id>`), chunki DB'dagi
+    `sync_state` job to'xtab qolsa ham `running` bo'lib osilib qolishi mumkin.
+    """
+    try:
+        ids = await _account_ids(db, user_id)
+    except Exception as exc:  # holat sahifasi bitta so'rov tufayli yiqilmasin
+        log.debug("sync.accounts_running_failed", error=str(exc)[:160])
+        return 0
+    jobs = await SP.read_jobs(ids)
+    return sum(1 for j in jobs.values() if j.get("state") in (SP.RUNNING, SP.PAUSED))
 
 
 @router.get("/api/accounts/{account_id}/sync/status")
@@ -202,14 +415,55 @@ async def sync_status(
 ) -> dict[str, Any]:
     async with session_scope() as db:
         await _own_account(db, ident.user_id, account_id)
-        return await _sync_status(db, account_id)
+        return await _sync_status(db, account_id, ident.user_id)
+
+
+@router.get("/api/sync/overview")
+async def sync_overview(
+    ident: Annotated[WebIdentity, Depends(require_identity)],
+) -> dict[str, Any]:
+    """Barcha akkauntlar — parallel indikatori uchun (DB'ga bitta so'rov + Redis).
+
+    Bu yerda chat ro'yxati **yo'q**: har akkauntning to'liq holati
+    `/api/accounts/{id}/sync/status` da.
+    """
+    async with session_scope() as db:
+        rows = (
+            (await db.execute(select(Account).where(Account.user_id == ident.user_id)))
+            .scalars()
+            .all()
+        )
+    jobs = await SP.read_jobs([int(a.id) for a in rows])
+    items = []
+    for a in rows:
+        job = jobs.get(int(a.id))
+        cur = await SP.read_progress(int(a.id)) if job and job.get("state") == SP.RUNNING else None
+        items.append(
+            {
+                "account_id": int(a.id),
+                "label": a.label,
+                "status": a.status,
+                "state": (job or {}).get("state"),
+                "chats_done": (job or {}).get("chats_done", 0),
+                "chats_total": (job or {}).get("chats_total", 0),
+                "current_title": (cur or {}).get("title"),
+                "paused_until": _paused_until(cur, job),
+            }
+        )
+    running = sum(1 for it in items if it["state"] in (SP.RUNNING, SP.PAUSED))
+    return {
+        "accounts": items,
+        "parallel": {"accounts_running": running, "max_jobs": SYNC_MAX_JOBS},
+        "poll_seconds": SYNC_POLL_IDLE,
+    }
 
 
 @router.get("/api/accounts/{account_id}/sync/stream")
 async def sync_stream(
     account_id: int, ident: Annotated[WebIdentity, Depends(require_identity)], request: Request
 ) -> StreamingResponse:
-    """O'sha holat SSE bo'lib (`status` har 2 s), sync tugagach `done`.
+    """O'sha holat SSE bo'lib: yugurayotganda har 1 s, bo'sh turganda 5 s,
+    sync tugagach `done`.
 
     Ramka `routers/deep.py` bilan bir xil. `GET` — o'zgartirmaydi, shuning
     uchun CSRF header talab qilinmaydi va oddiy `EventSource` ham ishlaydi.
@@ -222,14 +476,14 @@ async def sync_stream(
         try:
             while True:
                 async with session_scope() as db:
-                    payload = await _sync_status(db, account_id)
+                    payload = await _sync_status(db, account_id, ident.user_id)
                 yield f"event: status\ndata: {json.dumps(payload, default=str)}\n\n"
                 if not payload["running"] or time.monotonic() > deadline:
                     yield f"event: done\ndata: {json.dumps({'running': payload['running']})}\n\n"
                     return
                 if await request.is_disconnected():
                     return
-                await asyncio.sleep(SYNC_POLL_SECONDS)
+                await asyncio.sleep(float(payload.get("poll_seconds") or SYNC_POLL_RUNNING))
         except asyncio.CancelledError:  # klient uzildi
             raise
         except Exception as exc:
