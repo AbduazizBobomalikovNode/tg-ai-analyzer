@@ -1,0 +1,247 @@
+version: 1
+# (i) Ko'p turn'li moslashuv — suitening eng muhim qismi.
+#
+# Nozik joy: agent yo'lida tarix `chat_service.build_history` orqali modelga
+# beriladi (`_send_via_agent`), deep yo'lida esa `run_deep_search(question)`
+# faqat SO'NGGI matnni oladi — reja bosqichi suhbat tarixini KO'RMAYDI.
+# Shuning uchun "chuqurroq qidir" kabi kontekstga bog'liq turn'lar deep rejimda
+# ataylab sinaladi.
+scenarios:
+  - id: multi-01
+    title: "Chuqurroq qidir (auto → deep)"
+    category: multiturn
+    locale: uz
+    priority: 1
+    chat_hint: "Honadoshlar"
+    turns:
+      - user: "Shu guruhda kommunal to'lovlar haqida nima deyishgan?"
+        mode: auto
+        expect:
+          tools_any: [search_messages]
+          scope: chat
+          max_cost_usd: 0.07
+          judge: "Javob mavzu bo'yicha xabarlarga tayanadi."
+      - user: "Chuqurroq qidir."
+        mode: deep
+        expect:
+          must_reference_prior: true
+          must_change_context: true
+          max_cost_usd: 0.3
+          judge: >-
+            Javob AYNAN oldingi mavzu (kommunal to'lovlar) haqida; mavzuni
+            qaytadan so'ramaydi va "nimani chuqurroq?" deb so'ramaydi.
+
+  - id: multi-02
+    title: "Yana bir bor qidir (takror)"
+    category: multiturn
+    locale: uz
+    priority: 1
+    chat_hint: "aiogram[uz]"
+    turns:
+      - user: "Shu guruhda webhook sozlash haqida nima yozishgan?"
+        mode: auto
+        expect:
+          tools_any: [search_messages]
+          scope: chat
+          max_cost_usd: 0.07
+          judge: "Javob mavzuga tegishli."
+      - user: "Yana bir bor qidir, boshqa so'zlar bilan."
+        mode: auto
+        expect:
+          must_reference_prior: true
+          must_change_context: true
+          max_tool_calls: 4
+          max_cost_usd: 0.08
+          judge: >-
+            Agent boshqa so'zlar bilan qayta qidirgan va natijani oldingisidan
+            farqlab ko'rsatgan yoki yangi narsa yo'qligini aytgan.
+
+  - id: multi-03
+    title: "Tuzatish: X emas Y"
+    category: multiturn
+    locale: uz
+    priority: 1
+    turns:
+      - user: "\"Node.js Uzbekistan\" guruhida oxirgi paytda nima muhokama qilinyapti?"
+        mode: auto
+        expect:
+          scope: chat
+          max_cost_usd: 0.08
+          judge: "Javob Node.js Uzbekistan guruhi haqida."
+      - user: "Yo'q, men Node.js Uzbekistan emas, aiogram[uz] ni nazarda tutgandim."
+        mode: auto
+        expect:
+          must_reference_prior: true
+          must_change_context: true
+          scope: chat
+          max_cost_usd: 0.08
+          judge: >-
+            Javob endi aiogram[uz] guruhi haqida (Node.js emas) va savolni
+            qaytadan so'ramaydi.
+
+  - id: multi-04
+    title: "Kontekst almashtirish: shu savolni boshqa chatda"
+    category: multiturn
+    locale: uz
+    priority: 1
+    chat_hint: "Honadoshlar"
+    turns:
+      - user: "Shu guruhda oxirgi haftada eng ko'p nima muhokama qilindi?"
+        mode: auto
+        expect:
+          scope: chat
+          max_cost_usd: 0.07
+          judge: "Javob Honadoshlar guruhi haqida."
+      - user: "Endi shu savolni \"aiogram[uz]\" guruhida ko'r."
+        mode: auto
+        expect:
+          must_reference_prior: true
+          must_change_context: true
+          scope: chat
+          max_cost_usd: 0.08
+          judge: "Javob endi aiogram[uz] guruhi haqida, savol esa o'sha savol."
+
+  - id: multi-05
+    title: "Oxirgi javobni qisqartir (tool kerak emas)"
+    category: multiturn
+    locale: uz
+    priority: 1
+    chat_hint: "aiogram[uz]"
+    turns:
+      - user: "Shu guruhning oxirgi 7 kunlik xulosasi."
+        mode: auto
+        expect:
+          tools_any: [get_window_digest, get_recent_messages]
+          scope: chat
+          max_cost_usd: 0.08
+          judge: "Javob haftalik xulosa."
+      - user: "Oxirgi javobni 3 ta bandga qisqartir."
+        mode: auto
+        expect:
+          scope: none
+          max_tool_calls: 0
+          must_reference_prior: true
+          max_cost_usd: 0.04
+          judge: >-
+            Javob aynan uchta band va oldingi javob mazmuniga asoslangan; yangi
+            ma'lumot qidirilmagan.
+
+  - id: multi-06
+    title: "Buni ruscha ayt"
+    category: multiturn
+    locale: uz
+    priority: 1
+    chat_hint: "Honadoshlar"
+    turns:
+      - user: "Shu guruhda oxirgi 3 kunda nima bo'ldi?"
+        mode: auto
+        expect:
+          scope: chat
+          max_cost_usd: 0.07
+          judge: "Javob o'zbekcha va mavzuga tegishli."
+      - user: "Buni ruscha ayt."
+        mode: auto
+        expect:
+          scope: none
+          max_tool_calls: 0
+          must_reference_prior: true
+          max_cost_usd: 0.04
+          judge: "Javob to'liq rus tilida va oldingi javobning tarjimasi/qayta bayoni."
+
+  - id: multi-07
+    title: "Nima uchun bunday deding? (izoh + dalil)"
+    category: multiturn
+    locale: uz
+    priority: 1
+    chat_hint: "backup Re-electronik"
+    turns:
+      - user: "Shu kanalda eng muvaffaqiyatli post qaysi?"
+        mode: auto
+        expect:
+          tools_any: [get_chat_stats]
+          scope: chat
+          max_cost_usd: 0.07
+          judge: "Javob bitta postni nomlaydi va raqam keltiradi."
+      - user: "Nima uchun bunday deding? Qaysi raqamga tayanding?"
+        mode: auto
+        expect:
+          must_reference_prior: true
+          max_tool_calls: 2
+          max_cost_usd: 0.05
+          judge: >-
+            Javob mezonni (ko'rish/reaksiya) va aniq raqamni ko'rsatadi, oldingi
+            javobga bog'laydi; yangi uydirma raqam qo'shmaydi.
+
+  - id: multi-08
+    title: "Maqsadni 4 turn davomida ushlab turish"
+    category: multiturn
+    locale: uz
+    priority: 1
+    chat_hint: "backup Re-electronik"
+    turns:
+      - user: >-
+          Maqsadim: shu kanal uchun kelasi haftaga kontent rejasi tuzish.
+          Avval menga kanalning hozirgi holatini ayt.
+        mode: auto
+        expect:
+          tools_any: [get_chat_stats, get_chat_info]
+          scope: chat
+          max_cost_usd: 0.07
+          judge: "Javob kanal holatini raqamlar bilan beradi va maqsadni tan oladi."
+      - user: "Endi qaysi mavzular yaxshi ishlaganini ayt."
+        mode: auto
+        expect:
+          must_reference_prior: true
+          scope: chat
+          max_cost_usd: 0.07
+          judge: "Javob mavzularni samaradorlik bo'yicha ajratadi, oldingi raqamlarga tayanadi."
+      - user: "Shularga qarab rejani yoz."
+        mode: auto
+        expect:
+          must_reference_prior: true
+          max_tool_calls: 2
+          max_cost_usd: 0.06
+          judge: >-
+            Javob 1-turn'da aytilgan maqsadga (kelasi haftaga kontent rejasi)
+            mos reja beradi va oldingi ikki turn xulosasiga suyanadi.
+
+  - id: multi-09
+    title: "Ro'yxat qil (formatlash)"
+    category: multiturn
+    locale: uz
+    priority: 2
+    chat_hint: "aiogram[uz]"
+    turns:
+      - user: "Shu guruhda oxirgi kunda nima muhokama qilindi?"
+        mode: auto
+        expect:
+          scope: chat
+          max_cost_usd: 0.07
+          judge: "Javob mavzuni beradi."
+      - user: "Ro'yxat qilib ber."
+        mode: auto
+        expect:
+          scope: none
+          max_tool_calls: 0
+          must_reference_prior: true
+          max_cost_usd: 0.04
+          judge: "Javob bandlar ro'yxati; tool chaqirilmagan."
+
+  - id: multi-10
+    title: "Deep → follow-up auto (deep natijasiga suyanish)"
+    category: multiturn
+    locale: uz
+    priority: 2
+    turns:
+      - user: "Mening chatlarimda ish/vakansiya haqida eng qiziq nimalar bor?"
+        mode: deep
+        expect:
+          max_cost_usd: 0.3
+          judge: "Javob sitatalar bilan, bir nechta chatdan."
+      - user: "Shulardan eng dolzarb 3 tasini tanla va nega ekanini tushuntir."
+        mode: auto
+        expect:
+          must_reference_prior: true
+          max_tool_calls: 2
+          max_cost_usd: 0.05
+          judge: "Javob oldingi deep natijasidagi topilmalardan tanlaydi, yangi qidiruv qilmasdan."

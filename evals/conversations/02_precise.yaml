@@ -1,0 +1,124 @@
+version: 1
+# (b) Aniq, bitta chatga tegishli qidiruvlar. Bu yerda tool tanlash to'g'ri
+# bo'lishi shart: raqam → get_chat_stats, "nima yangi" → get_recent_messages,
+# "top" → search_messages, "#id atrofida" → get_message_context.
+scenarios:
+  - id: precise-01
+    title: "Bitta chatda kalit so'z bo'yicha qidiruv"
+    category: precise
+    locale: uz
+    priority: 1
+    chat_hint: "Honadoshlar"
+    turns:
+      - user: "Shu guruhda kommunal to'lov haqida nima deyishgan? 5 ta xabar yetarli."
+        mode: auto
+        expect:
+          tools_any: [search_messages]
+          tools_none: [discover_channels, search_global]
+          scope: chat
+          max_tool_calls: 4
+          max_cost_usd: 0.07
+          judge: >-
+            Javob topilgan xabarlarga #id bilan havola qiladi yoki hech narsa
+            topilmaganini aniq aytadi.
+
+  - id: precise-02
+    title: "Oxirgi xabarlar"
+    category: precise
+    locale: uz
+    priority: 1
+    chat_hint: "Honadoshlar"
+    turns:
+      - user: "Shu guruhdagi eng oxirgi 5 ta xabar nima?"
+        mode: auto
+        expect:
+          tools_any: [get_recent_messages, search_messages]
+          scope: chat
+          max_tool_calls: 3
+          max_cost_usd: 0.06
+          judge: "Javob oxirgi xabarlarni sana/muallif bilan ro'yxat qiladi."
+
+  - id: precise-03
+    title: "Xabar atrofidagi kontekst"
+    category: precise
+    locale: uz
+    priority: 1
+    chat_hint: "Honadoshlar"
+    turns:
+      - user: "Honadoshlar guruhida #1775 xabar atrofida nima gap ketgan?"
+        mode: auto
+        expect:
+          tools_any: [get_message_context]
+          scope: chat
+          max_tool_calls: 3
+          max_cost_usd: 0.06
+          judge: "Javob #1775 atrofidagi suhbat mazmunini beradi yoki xabar yo'qligini aytadi."
+
+  - id: precise-04
+    title: "Kanal statistikasi (raqamlar)"
+    category: precise
+    locale: uz
+    priority: 1
+    chat_hint: "backup Re-electronik"
+    turns:
+      - user: "Shu kanalning oxirgi 30 kunlik statistikasi: nechta post, o'rtacha ko'rish?"
+        mode: auto
+        expect:
+          tools_any: [get_chat_stats]
+          tools_none: [search_global, discover_channels]
+          scope: chat
+          max_tool_calls: 3
+          max_cost_usd: 0.06
+          judge: >-
+            Javob aniq raqamlar beradi (post soni, ko'rish) yoki ma'lumot yo'qligini
+            aytadi; raqamlarni o'zi sanab chiqarmaydi.
+
+  - id: precise-05
+    title: "Chat haqida profil ma'lumoti"
+    category: precise
+    locale: uz
+    priority: 1
+    chat_hint: "aiogram[uz]"
+    turns:
+      - user: "Shu guruh haqida ma'lumot ber: tavsifi, a'zolar soni, pin qilingan post."
+        mode: auto
+        expect:
+          tools_any: [get_chat_info]
+          scope: chat
+          max_tool_calls: 3
+          max_cost_usd: 0.06
+          judge: "Javob guruh tavsifi/a'zo soni/pin haqida ma'lumot beradi yoki cheklovni aytadi."
+
+  - id: precise-06
+    title: "Aniq chat nomi matn ichida (chat_hint yo'q)"
+    category: precise
+    locale: uz
+    priority: 1
+    turns:
+      - user: "\"Node.js Uzbekistan\" guruhida oxirgi 7 kunda nima muhokama qilindi?"
+        mode: auto
+        expect:
+          tools_any: [get_window_digest, get_recent_messages, search_messages]
+          tools_none: [list_chats]
+          scope: chat
+          max_tool_calls: 4
+          max_cost_usd: 0.08
+          judge: >-
+            Agent to'g'ri guruhni (Node.js Uzbekistan) tanlagan va xulosani
+            mavzular bo'yicha bergan.
+
+  - id: precise-07
+    title: "English — precise lookup"
+    category: precise
+    locale: en
+    priority: 2
+    chat_hint: "aiogram[uz]"
+    turns:
+      - user: "In this group, find the most recent discussion about webhooks. Three messages is enough."
+        mode: auto
+        expect:
+          tools_any: [search_messages]
+          scope: chat
+          max_tool_calls: 4
+          max_cost_usd: 0.07
+          judge: "Answer is in English and cites message ids or states nothing was found."

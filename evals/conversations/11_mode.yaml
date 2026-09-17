@@ -1,0 +1,72 @@
+version: 1
+# (k) Rejim: bir xil savol auto va deep'da. Taqqoslash `conv_runner` hisobotida
+# `mode` kesimida chiqadi — deep qimmatroq, lekin qamrovi kengroq bo'lishi kerak.
+scenarios:
+  - id: mode-01
+    title: "Bir xil savol — auto"
+    category: mode
+    locale: uz
+    priority: 1
+    turns:
+      - user: "Mening chatlarimda o'qish/kurs haqida qanday muhim gaplar bo'lgan?"
+        mode: auto
+        expect:
+          tools_any: [search_messages, get_window_digest, search_global]
+          max_cost_usd: 0.1
+          judge: "Javob mavzu bo'yicha aniq topilmalar beradi yoki nima yetishmasligini aytadi."
+
+  - id: mode-02
+    title: "Bir xil savol — deep"
+    category: mode
+    locale: uz
+    priority: 1
+    turns:
+      - user: "Mening chatlarimda o'qish/kurs haqida qanday muhim gaplar bo'lgan?"
+        mode: deep
+        expect:
+          max_cost_usd: 0.3
+          judge: >-
+            Javob sitatalar (#c..m..) bilan, bir nechta chatni qamraydi va
+            qamrov haqida uydirma da'vo qilmaydi.
+
+  - id: mode-03
+    title: "Salomlashish — agentga bormasligi kerak"
+    category: mode
+    locale: uz
+    priority: 1
+    turns:
+      - user: "Salom"
+        mode: auto
+        expect:
+          scope: none
+          max_tool_calls: 0
+          max_cost_usd: 0.02
+          judge: "Qisqa salomlashish javobi, tool yo'q."
+
+  - id: mode-04
+    title: "Umumiy bilim savoli — tool kerak emas"
+    category: mode
+    locale: uz
+    priority: 1
+    turns:
+      - user: "Sen nima qila olasan? Qisqacha tushuntir."
+        mode: auto
+        expect:
+          max_tool_calls: 1
+          max_cost_usd: 0.04
+          judge: "Javob asbob imkoniyatlarini tushuntiradi, chat ma'lumotini qidirmaydi."
+
+  - id: mode-05
+    title: "Qisqa savol (< 8 belgi) — choose_mode direct'ga tushiradi"
+    category: mode
+    locale: uz
+    priority: 2
+    chat_hint: "Honadoshlar"
+    turns:
+      - user: "kim bor"
+        mode: auto
+        expect:
+          max_cost_usd: 0.05
+          judge: >-
+            Javob savolni aniqlashtiradi yoki a'zolarni beradi; "bilmadim" deb
+            quruq qolmaydi.

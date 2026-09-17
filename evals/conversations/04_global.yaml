@@ -1,0 +1,75 @@
+version: 1
+# (d) Telegram'ning ochiq qismi — foydalanuvchi a'zo BO'LMAGAN kanallar.
+# Bu yagona joy, `discover_channels` ruxsat etilgan (prompt: "Never use it for
+# the user's own chats"). Teskari tomoni ham sinaladi: o'z chati haqidagi
+# savolda discover chaqirilmasligi kerak (economy-03 ga qarang).
+scenarios:
+  - id: global-01
+    title: "A'zo bo'lmagan kanallarni topish"
+    category: global
+    locale: uz
+    priority: 1
+    turns:
+      - user: >-
+          Telegramda sun'iy intellekt haqida qaysi kanallar yozgan — men a'zo
+          bo'lmaganlari ham bo'lsin. Kanal nomlarini ayt.
+        mode: auto
+        expect:
+          tools_any: [discover_channels]
+          scope: global
+          max_tool_calls: 4
+          max_cost_usd: 0.09
+          judge: >-
+            Javob akkaunt tashqarisidagi ochiq kanallarni nomma-nom ko'rsatadi
+            yoki kvota/cheklov sababini aniq aytadi; o'z chatlari bilan
+            almashtirib yubormaydi.
+
+  - id: global-02
+    title: "O'xshash kanallar"
+    category: global
+    locale: uz
+    priority: 1
+    turns:
+      - user: "\"IT Park Uzbekistan\" kanaliga o'xshash yana qanday ochiq kanallar bor?"
+        mode: auto
+        expect:
+          tools_any: [discover_channels]
+          scope: global
+          max_tool_calls: 3
+          max_cost_usd: 0.07
+          judge: "Javob o'xshash kanallar ro'yxatini beradi yoki cheklovni aytadi."
+
+  - id: global-03
+    title: "Chat nomini bilmay akkaunt bo'ylab server qidiruvi"
+    category: global
+    locale: uz
+    priority: 1
+    turns:
+      - user: "Qaysi chatimda bo'lganini bilmayman — \"stipendiya\" so'zini hamma joydan qidir."
+        mode: auto
+        expect:
+          tools_any: [search_global, search_messages]
+          tools_none: [discover_channels]
+          scope: account
+          max_tool_calls: 5
+          max_cost_usd: 0.09
+          judge: >-
+            Agent avval lokal qidiruvni ishlatgan, keyin kerak bo'lsa server
+            qidiruviga o'tgan; natija chat nomi bilan berilgan.
+
+  - id: global-04
+    title: "Ochiq kanallar — deep rejim"
+    category: global
+    locale: uz
+    priority: 1
+    turns:
+      - user: >-
+          Telegramdagi ochiq kanallarda O'zbekistonda IT ta'lim haqida qanday
+          fikrlar bor? Men obuna bo'lmaganlarini ham ko'r.
+        mode: deep
+        expect:
+          scope: global
+          max_cost_usd: 0.25
+          judge: >-
+            Javob tashqi manbalarni aniq belgilaydi ("tashqi manba") va sitatalar
+            #x<n> yoki #c<chat>m<id> shaklida; uydirma kanal nomlari yo'q.
