@@ -222,6 +222,14 @@ yugurtiring, bitta yugurish hech narsani isbotlamaydi).
   "adjust once" buni to'xtatmadi.
 - **`seen_calls`** — aynan bir xil `(tool, args)` ikkinchi marta bajarilmaydi;
   natija o'zgarmaydi, DB/MTProto ishi va token esa behuda ketadi.
+- **`AGENT_MAX_EXECUTED_CALLS` (6) va `AGENT_MAX_COST_USD` ($0.15)** — yugurish
+  bo'yicha qopqoqlar (`conv-20260917-144833`: turnda 6-11 bajarilgan chaqiruv,
+  $0.11-$0.40). Yetilganda tool'lar o'chadi va "bor narsa bilan javob ber"
+  turn'i qo'shiladi; `stop_reason` (`answered|call_budget|cost_budget|iterations`)
+  `context_used` ga yoziladi. Iteratsiya shifti yolg'iz o'zi yetmagan.
+- **Bir xil so'zlarni serverda takrorlash to'siladi**: lokal `search_messages`
+  ≥1 topilma bergan so'rov `search_telegram`/`search_global` bilan qayta
+  yugurtirilmaydi (lokal 0 bergan bo'lsa — ochiq, bu sinxronlanmagan tarix).
 
 To'silgan chaqiruv ham `calls_log` ga tushadi (nima so'ralganini ko'rish uchun) —
 loglardagi tool soni **bajarilgan** soni bilan bir xil emas.
@@ -501,6 +509,13 @@ serverga boradi, shift bir xil.
 
 ## Ma'lumot modeli — nozik nuqtalar
 
+- **Havola yagona joydan**: `analytics.msg_link` → `chats.link_prefix`
+  (`t.me/c/<id>/` yopiq, `t.me/<username>/` ochiq), yo'q bo'lsa `None`.
+  Modelga faqat tool natijasidagi havola beriladi — u o'zi `t.me` URL yasamasin.
+- **`senders` migratsiya 0019 dan keyingi tarixni ko'radi**; eskisi uchun
+  `backfill_senders` (cron soatiga :25, `python -m app.main backfill-senders
+  --account N`) har chatdan oxirgi 200 xabarni o'qib `m.sender` dan nom yig'adi.
+  Telefon raqami hech qachon olinmaydi.
 - **Media saqlanmaydi.** Faqat `messages.media_type` belgisi. Talab bo'yicha
   to'liq ignore — fayl yuklab olinmaydi.
 - **`message_metric_snapshots` — views/reactions vaqt qatori.** Telegram

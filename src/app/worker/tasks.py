@@ -125,6 +125,9 @@ async def sync_account(ctx: dict[str, Any], account_id: int, full: bool = False)
     # ui/R1a: yangi chatlar ro'yxatga tushdi — avatar/about ularga soatlik
     # cron'ni kutmasdan keladi (ish o'zi byudjetlangan, `job_id` deterministik).
     await _enqueue_chat_profiles(account_id)
+    # Jo'natuvchi nomlari: 0019 dan oldingi tarix nomsiz qolgan. Ish o'zi
+    # byudjetlangan va nomlar to'liq bo'lsa darhol chiqadi (`job_id` bitta).
+    await _enqueue_senders_backfill(account_id)
     return {"chats": len(chat_ids), "fetched": fetched, "ramp_up": limits.ramp_up}
 
 
@@ -1242,3 +1245,82 @@ def _ui_r1a_crons() -> list[Any]:
 
 
 UI_R1A_CRONS: list[Any] = _ui_r1a_crons()
+
+
+# ─── jo'natuvchi nomlari: migratsiya 0019 dan oldingi tarix uchun ────────────
+# `senders` jadvali kech qo'shilgani uchun eski xabarlarning muallifi nomsiz
+# qolgan ("Foydalanuvchi 1164475416"). Bu ish tarixni **qayta sinxronlamaydi**:
+# har chatdan oxirgi `per_chat` xabarni o'qiydi va `m.sender` keshidan nom
+# yig'adi. Byudjet: bir yugurishda ≤ `SENDERS_CHATS_PER_RUN` chat,
+# oralarida `WAIT_BETWEEN_BATCHES`, FloodWait'da **to'xtaydi** (retry yo'q).
+
+SENDERS_CHATS_PER_RUN = 30
+
+
+def job_id_senders(account_id: int) -> str:
+    return f"senders:acc:{account_id}"
+
+
+async def backfill_senders(
+    ctx: dict[str, Any], account_id: int, per_chat: int = ing.SENDER_BACKFILL_PER_CHAT
+) -> dict[str, Any]:
+    """Nomlar yetishmayotgan chatlardan `senders` qatorlarini to'ldiradi."""
+    import asyncio
+
+    per_chat = max(10, min(int(per_chat), 500))
+    chat_ids = await ing.chats_missing_senders(
+        account_id, limit=SENDERS_CHATS_PER_RUN, per_chat=per_chat
+    )
+    done = 0
+    senders = 0
+    paused = 0
+    for i, chat_id in enumerate(chat_ids):
+        if i:
+            await asyncio.sleep(ing.WAIT_BETWEEN_BATCHES)
+        try:
+            senders += await ing.harvest_senders(chat_id, per_chat=per_chat)
+            done += 1
+        except ing.SyncPaused as exc:  # FloodWait — shu yugurish to'xtaydi
+            paused = int(getattr(exc, "retry_after", 0) or 0)
+            log.warning("worker.senders.flood_wait", account_id=account_id, seconds=paused)
+            break
+        except Exception as exc:  # bitta chat qolganlarini to'xtatmasin
+            log.warning("worker.senders.failed", chat_id=chat_id, error=str(exc)[:200])
+    if chat_ids:
+        log.info(
+            "worker.senders.done",
+            account_id=account_id,
+            chats=done,
+            candidates=len(chat_ids),
+            senders=senders,
+        )
+    await heartbeat("backfill_senders", extra={"chats": done, "senders": senders})
+    return {"chats": done, "senders": senders, "candidates": len(chat_ids), "flood_wait": paused}
+
+
+async def backfill_senders_all(ctx: dict[str, Any]) -> dict[str, Any]:
+    """Cron (soatiga): har faol akkaunt uchun bitta byudjetlangan yugurish."""
+    accounts = await ing.active_account_ids()
+    for account_id in accounts:
+        await backfill_senders(ctx, account_id)
+    return {"accounts": len(accounts)}
+
+
+async def _enqueue_senders_backfill(account_id: int) -> None:
+    """`sync_account` oxiridagi ilgak — login/sync'dan keyin bir marta."""
+    try:
+        await enqueue("backfill_senders", account_id, job_id=job_id_senders(account_id))
+    except Exception as exc:  # navbat yo'q bo'lsa ham sync muvaffaqiyatli qoladi
+        log.warning("worker.senders_enqueue_failed", account_id=account_id, error=str(exc)[:200])
+
+
+SENDERS_FUNCTIONS: list[Any] = [backfill_senders, backfill_senders_all]
+
+
+def _senders_crons() -> list[Any]:
+    from arq.cron import cron
+
+    return [cron(backfill_senders_all, minute={25}, run_at_startup=False, timeout=1800)]
+
+
+SENDERS_CRONS: list[Any] = _senders_crons()

@@ -96,9 +96,7 @@ async def accounts(pg_engine: AsyncEngine):
         u2, a2 = await _fixture_account(conn, label="senders-b", tg=OTHER_TG_USER)
     yield a1, a2
     async with pg_engine.begin() as conn:
-        await conn.execute(
-            text("DELETE FROM users WHERE id IN (:a, :b)"), {"a": u1, "b": u2}
-        )
+        await conn.execute(text("DELETE FROM users WHERE id IN (:a, :b)"), {"a": u1, "b": u2})
 
 
 async def test_ingestion_fills_senders_from_the_batch_and_is_idempotent(

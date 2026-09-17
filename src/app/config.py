@@ -55,6 +55,15 @@ class Settings(BaseSettings):
     # Agent (tool) sikli chegaralari — xarajat qopqog'i
     agent_max_iterations: int = Field(default=5, ge=1, le=12)
     agent_tool_result_tokens: int = Field(default=12_000, ge=1_000, le=60_000)
+    # Bitta yugurishda **bajarilgan** (to'silmagan) tool chaqiruvlari qopqog'i.
+    # O'lchov (`evals/runs/conv-20260917-144833.md`): iteratsiya shifti yolg'iz
+    # o'zi yetmaydi — model har raundda 4 tadan chaqiradi va bitta savol 6-11
+    # bajarilgan chaqiruvga ($0.11-$0.40) cho'ziladi. Qopqoqqa yetganda
+    # "bor narsa bilan javob ber" turn'i qo'shiladi va tool'lar o'chiriladi.
+    agent_max_executed_calls: int = Field(default=6, ge=1, le=40)
+    # Yugurish narxi qopqog'i (USD, `llm/pricing.estimate_cost` taxmini bo'yicha,
+    # har iteratsiyadan keyin tekshiriladi). 0 = o'chiq.
+    agent_max_cost_usd: float = Field(default=0.15, ge=0.0, le=10.0)
     # 7-bosqich: fayllar (generatsiya rasmlar) va auto-reply
     data_dir: str = "data"
     image_gen_enabled: bool = True

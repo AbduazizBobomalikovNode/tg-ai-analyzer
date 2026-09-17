@@ -1,9 +1,10 @@
-"""Yagona entrypoint: `python -m app.main {bot|check|reembed}`."""
+"""Yagona entrypoint: `python -m app.main {bot|check|reembed|backfill-senders}`."""
 
 from __future__ import annotations
 
 import asyncio
 import sys
+from typing import Any
 
 from app.config import get_settings
 from app.logging import get_logger, setup_logging
@@ -161,6 +162,49 @@ async def _reembed(argv: list[str]) -> int:
     return 0
 
 
+async def _backfill_senders(argv: list[str]) -> int:
+    """`python -m app.main backfill-senders --account N` — nomlarni to'ldirish.
+
+    Ish worker navbatiga tushadi (soatlik cron bilan bir xil yo'l): har chatdan
+    oxirgi 200 xabar o'qiladi va `m.sender` keshidan `senders` to'ldiriladi.
+    """
+    from app.worker.queue import close_queue, enqueue
+    from app.worker.tasks import job_id_senders
+
+    log = get_logger("senders")
+    account_id: int | None = None
+    per_chat: int | None = None
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--account" and i + 1 < len(argv):
+            account_id = int(argv[i + 1])
+            i += 2
+        elif argv[i] == "--per-chat" and i + 1 < len(argv):
+            per_chat = int(argv[i + 1])
+            i += 2
+        else:
+            print(
+                f"Noma'lum argument: {argv[i]}. "
+                "Format: backfill-senders --account N [--per-chat 200]"
+            )
+            return 2
+    if account_id is None:
+        print("`--account N` majburiy: backfill-senders --account N [--per-chat 200]")
+        return 2
+    kwargs: dict[str, Any] = {"job_id": job_id_senders(account_id)}
+    if per_chat is not None:
+        kwargs["per_chat"] = per_chat
+    try:
+        job = await enqueue("backfill_senders", account_id, **kwargs)
+    finally:
+        await close_queue()
+    if job is None:
+        log.warning("senders.duplicate", account_id=account_id)
+        return 1
+    log.info("senders.enqueued", account_id=account_id, job=job)
+    return 0
+
+
 def main() -> int:
     s = get_settings()
     setup_logging(s.log_level, json_output=s.is_prod)
@@ -181,8 +225,13 @@ def main() -> int:
         return asyncio.run(_check())
     if cmd == "reembed":
         return asyncio.run(_reembed(sys.argv[2:]))
+    if cmd == "backfill-senders":
+        return asyncio.run(_backfill_senders(sys.argv[2:]))
 
-    print(f"Noma'lum buyruq: {cmd}. Mavjud: bot, check, reembed", file=sys.stderr)
+    print(
+        f"Noma'lum buyruq: {cmd}. Mavjud: bot, check, reembed, backfill-senders",
+        file=sys.stderr,
+    )
     return 2
 
 

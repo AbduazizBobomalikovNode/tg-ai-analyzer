@@ -323,3 +323,216 @@ def test_prompts_are_stable_and_safe() -> None:
     note = P.runtime_note(now_iso="2026-08-18 12:00 UTC", locale="uz", pinned_chat="X")
     assert "2026-08-18" in note and "X" in note
     assert cs.SYSTEM_PROMPT == P.CHAT_SYSTEM_PROMPT
+
+
+# ─── yugurish byudjetlari (round 2: conv-20260917-144833) ────────────────────
+# Jonli o'lchovda iteratsiya shifti yolg'iz o'zi yetmadi: model har raundda
+# 4 tadan chaqirib, bitta savolga 6-11 bajarilgan chaqiruv ($0.11-$0.40)
+# sarfladi. Shuning uchun **yugurish bo'yicha** ikkita qopqoq.
+
+
+def _priced(text: str = "", calls: list[ToolCall] | None = None) -> ChatResult:
+    """Narxi ma'lum model bilan javob (`pricing.PRICES` da bor) — narx qopqog'i uchun."""
+    return ChatResult(
+        text=text,
+        tool_calls=calls or [],
+        model="claude-opus-5",
+        provider="claude",
+        usage=Usage(100, 20),
+        finish_reason="tool_use" if calls else "end_turn",
+    )
+
+
+@pytest.fixture
+def env_settings(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """`.env` emas, jarayon muhiti: qopqoq qiymatlarini test uchun o'zgartiradi."""
+    from app.config import get_settings
+
+    def apply(**env: str) -> None:
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+        get_settings.cache_clear()
+
+    yield apply
+    get_settings.cache_clear()
+
+
+async def test_agent_stops_at_the_run_call_budget(
+    fake_tool: list[dict[str, Any]], env_settings: Any
+) -> None:
+    """2 ta bajarilgan chaqiruvdan keyin tool'lar o'chadi va javob so'raladi."""
+    env_settings(AGENT_MAX_EXECUTED_CALLS="2")
+    first = [ToolCall(f"a{i}", "get_recent_messages", {"limit": 10 + i}) for i in range(2)]
+    later = [ToolCall("b", "search_messages", {"query": "x"})]
+    llm = _LLM([_res(calls=first), _res(calls=later), _res("javob")])
+    out = await A.run_agent(
+        _Session(),  # type: ignore[arg-type]
+        user_id=1,
+        account_id=5,
+        question="q",
+        history=[],
+        pinned_chat=None,
+        locale="uz",
+        llm=llm,  # type: ignore[arg-type]
+        max_iterations=5,
+    )
+    assert len(fake_tool) == 2 and out.calls_executed == 2
+    assert out.stop_reason == "call_budget" and out.text == "javob"
+    # Byudjet tugagach keyingi chaqiruvda tool'lar berilmaydi + "javob ber" turn'i
+    assert llm.calls[1]["tools"] is None
+    assert any(m.content == A.FINAL_NUDGE for m in llm.calls[1]["messages"])
+
+
+async def test_agent_blocks_calls_over_the_budget_inside_one_turn(
+    fake_tool: list[dict[str, Any]], env_settings: Any
+) -> None:
+    """Bitta turn ichida ham qopqoq ishlaydi — qolganlari bajarilmaydi."""
+    env_settings(AGENT_MAX_EXECUTED_CALLS="1")
+    calls = [ToolCall(f"c{i}", "get_recent_messages", {"limit": 10 + i}) for i in range(3)]
+    llm = _LLM([_res(calls=calls), _res("javob")])
+    out = await A.run_agent(
+        _Session(),  # type: ignore[arg-type]
+        user_id=1,
+        account_id=5,
+        question="q",
+        history=[],
+        pinned_chat=None,
+        locale="uz",
+        llm=llm,  # type: ignore[arg-type]
+    )
+    assert len(fake_tool) == 1 and out.calls_executed == 1
+    assert len(out.tool_calls) == 3  # to'silganlar ham `calls_log` da ko'rinadi
+    tool_msgs = [m for m in llm.calls[1]["messages"] if m.role.value == "tool"]
+    assert sum("budget of 1 tool calls" in m.content for m in tool_msgs) == 2
+
+
+async def test_agent_stops_when_the_estimated_cost_cap_is_passed(
+    fake_tool: list[dict[str, Any]], env_settings: Any
+) -> None:
+    """Narx qopqog'i: 100/20 token Opus'da ≈ $0.001 — 0.0005 dan oshadi."""
+    env_settings(AGENT_MAX_COST_USD="0.0005", AGENT_MAX_EXECUTED_CALLS="20")
+    llm = _LLM(
+        [
+            _priced(calls=[ToolCall("a", "get_recent_messages", {"limit": 1})]),
+            _priced("javob"),
+        ]
+    )
+    out = await A.run_agent(
+        _Session(),  # type: ignore[arg-type]
+        user_id=1,
+        account_id=5,
+        question="q",
+        history=[],
+        pinned_chat=None,
+        locale="uz",
+        llm=llm,  # type: ignore[arg-type]
+    )
+    assert out.stop_reason == "cost_budget" and (out.cost_usd or 0) > 0.0005
+    assert llm.calls[1]["tools"] is None
+    assert len(fake_tool) == 1
+
+
+async def test_agent_records_answered_stop_reason(fake_tool: list[dict[str, Any]]) -> None:
+    llm = _LLM([_res("darhol javob")])
+    out = await A.run_agent(
+        _Session(),  # type: ignore[arg-type]
+        user_id=1,
+        account_id=5,
+        question="salom",
+        history=[],
+        pinned_chat=None,
+        locale="uz",
+        llm=llm,  # type: ignore[arg-type]
+    )
+    assert out.stop_reason == "answered" and out.calls_executed == 0
+
+
+# ─── bir xil so'zlarni serverda takrorlash ───────────────────────────────────
+
+
+@pytest.fixture
+def search_tool(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """`search_messages` topilma soni bilan; server qidiruvlari ham qayd etiladi."""
+    seen: list[dict[str, Any]] = []
+
+    async def fake_run(name: str, ctx: Any, args: dict[str, Any]) -> T.ToolResult:
+        seen.append({"name": name, "args": args})
+        if name == "search_messages":
+            return T.ToolResult("topildi", meta={"chat": "C", "hits": 3})
+        return T.ToolResult("server natijasi", meta={"hits": 1})
+
+    monkeypatch.setattr(A.T, "run_tool", fake_run)
+    return seen
+
+
+async def test_agent_blocks_server_search_repeating_a_successful_local_query(
+    search_tool: list[dict[str, Any]],
+) -> None:
+    llm = _LLM(
+        [
+            _res(calls=[ToolCall("a", "search_messages", {"chat": "C", "query": "kommunal"})]),
+            # aynan o'sha so'zlar, faqat registr boshqa — serverga chiqarilmaydi
+            _res(calls=[ToolCall("b", "search_telegram", {"chat": "C", "query": "KOMMUNAL"})]),
+            _res("javob"),
+        ]
+    )
+    out = await A.run_agent(
+        _Session(),  # type: ignore[arg-type]
+        user_id=1,
+        account_id=5,
+        question="q",
+        history=[],
+        pinned_chat=None,
+        locale="uz",
+        llm=llm,  # type: ignore[arg-type]
+    )
+    assert [c["name"] for c in search_tool] == ["search_messages"]
+    assert out.calls_executed == 1
+    tool_msgs = [m for m in llm.calls[2]["messages"] if m.role.value == "tool"]
+    assert any("local search already found 3 hits" in m.content for m in tool_msgs)
+
+
+async def test_agent_allows_server_search_when_local_found_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lokal 0 bergan bo'lsa server yo'li ochiq: u yerda haqiqatan yangi ma'lumot bor."""
+    seen: list[str] = []
+
+    async def fake_run(name: str, ctx: Any, args: dict[str, Any]) -> T.ToolResult:
+        seen.append(name)
+        return T.ToolResult("topilmadi", meta={"hits": 0})
+
+    monkeypatch.setattr(A.T, "run_tool", fake_run)
+    llm = _LLM(
+        [
+            _res(calls=[ToolCall("a", "search_messages", {"chat": "C", "query": "webhook"})]),
+            _res(calls=[ToolCall("b", "search_telegram", {"chat": "C", "query": "webhook"})]),
+            _res("javob"),
+        ]
+    )
+    await A.run_agent(
+        _Session(),  # type: ignore[arg-type]
+        user_id=1,
+        account_id=5,
+        question="q",
+        history=[],
+        pinned_chat=None,
+        locale="uz",
+        llm=llm,  # type: ignore[arg-type]
+    )
+    assert seen == ["search_messages", "search_telegram"]
+
+
+def test_fold_query_ignores_case_and_punctuation() -> None:
+    assert A.fold_query("Kommunal  to'lov!") == A.fold_query("kommunal to lov")
+    assert A.fold_query(None) == ""
+
+
+def test_prompt_states_the_numeric_budget_rules() -> None:
+    p = P.AGENT_SYSTEM_PROMPT
+    low = p.lower()
+    assert "after at most 4 executed tool calls" in low
+    assert "never repeat a local query verbatim" in low
+    assert "never construct t.me urls yourself" in low
+    assert "the answer IS `list_chats`" in p
+    assert "cannot exist in Telegram data" in p

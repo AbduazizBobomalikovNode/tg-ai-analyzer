@@ -27,7 +27,7 @@ from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from typing import Any
 
-from sqlalchemy import case, func, null, select, update
+from sqlalchemy import case, exists, func, null, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from telethon import errors as tg_errors
 from telethon.tl.types import Channel
@@ -469,9 +469,7 @@ def sender_to_row(account_id: int, sender: Any) -> dict[str, Any] | None:
         return None
     if not hasattr(sender, "first_name"):  # Channel / Chat — odam emas
         return None
-    parts = [
-        str(getattr(sender, attr, "") or "").strip() for attr in ("first_name", "last_name")
-    ]
+    parts = [str(getattr(sender, attr, "") or "").strip() for attr in ("first_name", "last_name")]
     display = strip_invisible(" ".join(x for x in parts if x)).strip()[:SENDER_NAME_CHARS]
     username = strip_invisible(str(getattr(sender, "username", "") or "").strip())[:64]
     if not display and not username:
@@ -822,6 +820,100 @@ async def _flush_senders(rows: dict[int, dict[str, Any]]) -> None:
         await upsert_senders(list(rows.values()))
     except Exception as exc:  # nom qulaylik kanali, asosiy yo'l emas
         log.warning("ingest.senders_failed", error=str(exc)[:200], n=len(rows))
+
+
+# ─── jo'natuvchi nomlarini keyin to'ldirish (backfill) ───────────────────────
+# `senders` jadvali migratsiya 0019 bilan paydo bo'ldi, ya'ni undan **oldin**
+# sinxronlangan xabarlarning muallifi nomsiz qoldi va javoblarda
+# "Foydalanuvchi 1164475416" ko'rinardi (jonli o'lchov, `people-04`).
+# Bu yo'l qayta sync qilmaydi: har chatdan oxirgi `per_chat` xabarni o'qib,
+# `m.sender` keshidan nomlarni yig'adi (qo'shimcha RPC yo'q, `history` bucket).
+
+SENDER_BACKFILL_PER_CHAT = 200
+SENDER_BACKFILL_CANDIDATES = 60  # nechta chat tekshiriladi (DB, arzon)
+
+
+async def _has_missing_senders(db: Any, account_id: int, chat_id: int, per_chat: int) -> bool:
+    """Chatning oxirgi `per_chat` xabari ichida `senders` da yo'q muallif bormi?"""
+    recent = (
+        select(Message.sender_id.label("sender_id"))
+        .where(Message.chat_id == chat_id, Message.sender_id.isnot(None))
+        .order_by(Message.tg_msg_id.desc())
+        .limit(per_chat)
+        .subquery()
+    )
+    stmt = (
+        select(recent.c.sender_id)
+        .where(
+            ~exists(
+                select(Sender.tg_user_id).where(
+                    Sender.account_id == account_id, Sender.tg_user_id == recent.c.sender_id
+                )
+            )
+        )
+        .limit(1)
+    )
+    return (await db.execute(stmt)).first() is not None
+
+
+async def chats_missing_senders(
+    account_id: int, *, limit: int = 30, per_chat: int = SENDER_BACKFILL_PER_CHAT
+) -> list[int]:
+    """Nomlar yetishmayotgan chatlar (eng yangi faollikdan boshlab, ≤ `limit`)."""
+    out: list[int] = []
+    async with session_scope() as db:
+        found = await db.execute(
+            select(Chat.id)
+            .where(Chat.account_id == account_id, Chat.synced_total > 0)
+            .order_by(Chat.last_message_at.desc().nulls_last(), Chat.id)
+            .limit(SENDER_BACKFILL_CANDIDATES)
+        )
+        rows = found.scalars().all()
+        for chat_id in rows:
+            if await _has_missing_senders(db, account_id, int(chat_id), per_chat):
+                out.append(int(chat_id))
+                if len(out) >= limit:
+                    break
+    return out
+
+
+async def harvest_senders(chat_id: int, *, per_chat: int = SENDER_BACKFILL_PER_CHAT) -> int:
+    """Bitta chatdan jo'natuvchi nomlarini yig'adi. Qaytaradi: yozilgan qatorlar.
+
+    Faqat o'qish: `iter_messages` (GetHistory) va `m.sender` keshi —
+    `get_sender()` **chaqirilmaydi** (u allowlist'da yo'q metodlarga borishi
+    mumkin). Shaxsiy chatda umuman RPC yo'q: entity dialog keshidan olinadi.
+    FloodWait — `SyncPaused`, retry yo'q (4.2-band).
+    """
+    async with session_scope() as db:
+        chat = await db.get(Chat, chat_id)
+        if chat is None:
+            return 0
+        account_id, peer_id, ctype = int(chat.account_id), int(chat.tg_peer_id), str(chat.type)
+
+    rows: dict[int, dict[str, Any]] = {}
+    if ctype == ChatType.PRIVATE:
+        srow = sender_to_row(account_id, await pool.entity(account_id, peer_id))
+        if srow is not None:
+            rows[srow["tg_user_id"]] = srow
+    else:
+        try:
+            client = await pool.get(account_id)
+            peer = await _input_peer(account_id, peer_id)
+            async for m in client.iter_messages(
+                peer, limit=max(1, int(per_chat)), wait_time=WAIT_BETWEEN_BATCHES
+            ):
+                srow = sender_to_row(account_id, getattr(m, "sender", None))
+                if srow is not None:
+                    rows[srow["tg_user_id"]] = srow
+        except tg_errors.FloodWaitError as exc:
+            FLOODWAIT.inc()
+            raise SyncPaused(int(exc.seconds)) from exc
+    if not rows:
+        return 0
+    written = await upsert_senders(list(rows.values()))
+    log.info("ingest.senders_backfilled", chat_id=chat_id, senders=written)
+    return written
 
 
 async def _message_count(chat_id: int) -> int:

@@ -342,6 +342,10 @@ class Coverage:
     server_calls: int = 0  # bajarilgan MTProto so'rovlari
     server_hits: int = 0  # serverdan kelgan (dedupdan oldingi) topilmalar
     server_skipped: list[str] = field(default_factory=list)  # to'lgan bucket'lar
+    # Server pog'onasi ishladi, lekin natija bermadi — **sababi** (bepul limit,
+    # topilgan kanal nomlari). Javob "tashqi manba topilmadi" deganda nega
+    # topilmaganini ham aytadi.
+    server_notes: list[str] = field(default_factory=list)
     external_hits: int = 0  # lokal `chats` da yo'q chatdan — tekshirilmagan
     rounds: int = 1
     confidence: str = "low"
@@ -362,6 +366,7 @@ class Coverage:
             "server_calls": self.server_calls,
             "server_hits": self.server_hits,
             "server_skipped": list(self.server_skipped),
+            "server_notes": list(self.server_notes),
             "external_hits": self.external_hits,
             "rounds": self.rounds,
             "confidence": self.confidence,
@@ -1192,8 +1197,8 @@ async def fan_out(
         await _emit(events, "search", subquery="", hits=0, timeout=True, pending=len(pending))
     lists: list[list[S.Hit]] = []
     for i, task in enumerate(tasks):
-        res: Any = asyncio.CancelledError() if task.cancelled() else (
-            task.exception() or task.result()
+        res: Any = (
+            asyncio.CancelledError() if task.cancelled() else (task.exception() or task.result())
         )
         if isinstance(res, BaseException):
             if not isinstance(res, asyncio.CancelledError):
@@ -1235,6 +1240,11 @@ class ServerOutcome:
     reason: str = ""
     server_ids: set[int] = field(default_factory=set)
     external_links: dict[int, str] = field(default_factory=dict)
+    # Rung bajarildi, lekin natija bermadi va buning **sababi** bor (masalan
+    # ommaviy post qidiruvining bepul sloti tugagan). Qamrov hisobotiga
+    # o'zgarishsiz tushadi — javob "tashqi manba qaralmadi" deganda nega
+    # qaralmaganini ham aytsin.
+    notes: list[str] = field(default_factory=list)
 
     @property
     def used(self) -> bool:
@@ -1355,6 +1365,26 @@ async def _absorb(
     return _to_local_hits(result.hits, outcome, rank_base=len(outcome.hits))
 
 
+def _log_rung(rung: str, calls: int, hits: int, note: str | None = None) -> None:
+    """Har pog'ona uchun bitta qator: nechta chaqiruv, nechta topilma, nega."""
+    log.debug("deep.rung", rung=rung, calls=int(calls), hits=int(hits), note=(note or "")[:200])
+
+
+def _discover_skip_note(retry_at: str) -> str:
+    """Ommaviy post qidiruvi bo'lmadi — sabab, foydalanuvchi tilida (uz)."""
+    when = f" ({retry_at} da tiklanadi)" if retry_at else ""
+    return f"ommaviy qidiruv: bepul limit tugagan{when}, Stars sarflanmaydi"
+
+
+def _channels_note(channels: Sequence[dict[str, Any]]) -> str:
+    """`contacts.Search` topgan ochiq kanallar — post matni emas, nomlar."""
+    names = []
+    for ch in channels[:8]:
+        uname = str(ch.get("username") or "").strip()
+        names.append(f"@{uname}" if uname else str(ch.get("title") or "?"))
+    return "ochiq kanal nomlari (post matni o'qilmadi): " + ", ".join(names)
+
+
 async def escalate(
     session_factory: SessionFactory,
     *,
@@ -1405,6 +1435,7 @@ async def escalate(
                     outcome.hits.extend(got)
                 if "chat" not in outcome.rungs and res.calls:
                     outcome.rungs.append("chat")
+                _log_rung("chat", res.calls, len(got), res.error_text or res.rate_limited)
                 await _emit(
                     events,
                     "search",
@@ -1433,6 +1464,7 @@ async def escalate(
         outcome.hits.extend(got)
         if res.calls:
             outcome.rungs.append("global")
+        _log_rung("global", res.calls, len(got), res.error_text or res.rate_limited)
         await _emit(
             events, "search", subquery=subqueries[0], hits=len(got), level="server", rung="global"
         )
@@ -1445,10 +1477,48 @@ async def escalate(
         if res.calls:
             outcome.rungs.append("discover")
         if res.note:
-            log.info("deep.discover_note", note=res.note[:160])
+            log.info("deep.discover_note", note=res.note[:160], code=res.note_code)
+        _log_rung("discover", res.calls, len(got), res.note)
         await _emit(
             events, "search", subquery=subqueries[0], hits=len(got), level="server", rung="discover"
         )
+        # Bepul slot tugagan (`note_code`) → qidiruvning o'zi **umuman
+        # bo'lmagan**. Buni jim o'tkazib yuborish yolg'on bo'lardi: sabab
+        # qamrovga yoziladi va ikkita tekin zaxira yo'l sinab ko'riladi
+        # (Stars hech qachon emas).
+        if res.note_code == "post_search_flood":
+            outcome.notes.append(_discover_skip_note(res.retry_at))
+            if budget_left():
+                chans = await TG.server_channel_search(account_id, subqueries[0])
+                outcome.calls += chans.calls
+                if chans.rate_limited and chans.rate_limited not in outcome.skipped:
+                    outcome.skipped.append(chans.rate_limited)
+                if chans.channels:
+                    outcome.rungs.append("channels")
+                    outcome.notes.append(_channels_note(chans.channels))
+                _log_rung("channels", chans.calls, len(chans.channels), chans.error_text)
+            if budget_left() and "global" not in outcome.rungs:
+                gres = await TG.server_search_global(
+                    account_id,
+                    subqueries[0],
+                    scope=global_scope_for(plan, chats_by_id),
+                    since=plan.since,
+                    until=plan.until,
+                    limit=SERVER_LIMIT,
+                )
+                gfound = await _absorb(session_factory, account_id, gres, outcome)
+                outcome.hits.extend(gfound)
+                if gres.calls:
+                    outcome.rungs.append("global")
+                _log_rung("global", gres.calls, len(gfound), gres.error_text)
+                await _emit(
+                    events,
+                    "search",
+                    subquery=subqueries[0],
+                    hits=len(gfound),
+                    level="server",
+                    rung="global",
+                )
 
     log.info(
         "deep.server_rungs",
@@ -1822,6 +1892,7 @@ def build_coverage(
         server_calls=srv.calls,
         server_hits=len(srv.hits),
         server_skipped=list(srv.skipped),
+        server_notes=list(srv.notes),
         external_hits=srv.external,
         rounds=rounds,
         truncated=truncated,
@@ -1913,6 +1984,8 @@ def render_coverage(cov: Coverage, *, locale: str = "uz") -> str:
         out += srv
     if cov.server_skipped:
         out += f"\n\n⚠️ {lab['server_skipped']}: {', '.join(cov.server_skipped)}"
+    for note in cov.server_notes[:3]:
+        out += f"\n\n⚠️ {note}"
     if cov.truncated:
         out += f"\n\n⚠️ {lab['truncated']}"
     return out

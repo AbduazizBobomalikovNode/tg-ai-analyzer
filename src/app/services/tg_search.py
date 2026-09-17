@@ -57,11 +57,13 @@ __all__ = [
     "BUCKET_SEARCH",
     "GLOBAL_SCOPES",
     "SERVER_LIMIT_MAX",
+    "ChannelHits",
     "ServerHit",
     "ServerHits",
     "persist_server_hits",
     "send_request",
     "server_calendar",
+    "server_channel_search",
     "server_discover",
     "server_search_chat",
     "server_search_global",
@@ -145,6 +147,11 @@ class ServerHits:
     calls: int = 0
     note: str | None = None  # xato emas, holat (masalan Stars kvotasi tugagani)
     mode: str = ""  # discover: "hashtag" | "free text"
+    # `note` sababi mashina o'qiy oladigan shaklda: hozircha faqat
+    # `"post_search_flood"` (bepul slot tugagan) — qamrov hisoboti shu
+    # bo'yicha halol sabab yozadi, matnni qayta tahlil qilmasdan.
+    note_code: str = ""
+    retry_at: str = ""  # `note_code` bilan birga: "YYYY-MM-DD HH:MM UTC" yoki ""
 
 
 # ─── entity yordamchilari (qo'shimcha RPC yo'q) ──────────────────────────────
@@ -600,13 +607,16 @@ async def server_calendar(
 # ─── 4. Ochiq kanallar (channels.SearchPosts) — Stars YO'Q ───────────────────
 
 
-def flood_note(flood: Any) -> str:
+def flood_reset_at(flood: Any) -> str:
+    """`CheckSearchPostsFlood.wait_till` → "YYYY-MM-DD HH:MM UTC" (yo'q bo'lsa "")."""
     wait_till = getattr(flood, "wait_till", None)
-    when = (
-        datetime.fromtimestamp(int(wait_till), tz=UTC).strftime("%Y-%m-%d %H:%M UTC")
-        if wait_till
-        else "unknown time"
-    )
+    if not wait_till:
+        return ""
+    return datetime.fromtimestamp(int(wait_till), tz=UTC).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def flood_note(flood: Any) -> str:
+    when = flood_reset_at(flood) or "unknown time"
     return (
         f"free full-text post-search slots exhausted (remains=0, resets at {when}); "
         "not spending Stars. Use a #hashtag query, or fall back to search_global / "
@@ -656,7 +666,15 @@ async def server_discover(account_id: int, query: str, *, limit: int = 10) -> Se
             limit=max(1, min(int(limit), SERVER_LIMIT_MAX)),
         )
     if request is None:
-        return ServerHits(calls=1, note=flood_note(flood))
+        # Bepul slot yo'q va so'rov hashtag emas → **hech narsa qidirilmaydi**.
+        # Jonli o'lchovda (`global-04`) aynan shu yo'l 0 tashqi topilma bergan
+        # edi, sabab esa faqat logda qolardi — endi u chaqiruvchiga qaytadi.
+        return ServerHits(
+            calls=1,
+            note=flood_note(flood),
+            note_code="post_search_flood",
+            retry_at=flood_reset_at(flood),
+        )
 
     res, err = await send_request(account_id, request)
     if err is not None:
@@ -667,6 +685,54 @@ async def server_discover(account_id: int, query: str, *, limit: int = 10) -> Se
         for m in list(getattr(res, "messages", None) or [])
     ]
     return ServerHits(hits=hits, calls=2, mode="hashtag" if request.hashtag else "free text")
+
+
+@dataclass(slots=True)
+class ChannelHits:
+    """`contacts.Search` natijasi — kanal **nomlari**, xabar emas."""
+
+    channels: list[dict[str, Any]] = field(default_factory=list)
+    calls: int = 0
+    rate_limited: str | None = None
+    error_text: str | None = None
+
+
+async def server_channel_search(account_id: int, query: str, *, limit: int = 10) -> ChannelHits:
+    """Ochiq kanal/guruhlarni **nomi bo'yicha** topish (`contacts.Search` — READ).
+
+    `channels.SearchPosts` bepul sloti tugaganda yagona qolgan tekin yo'l:
+    post matnini bermaydi, lekin "bu mavzuda qanday ochiq kanallar bor" degan
+    savolga rost javob beradi. Stars sarflanmaydi, natija saqlanmaydi.
+    """
+    from telethon.tl import functions as tlf
+
+    query = (query or "").strip()
+    if not query:
+        return ChannelHits(error_text="error: `query` is required")
+    if (err := _guard(account_id, BUCKET_DISCOVER)) is not None:
+        return ChannelHits(rate_limited=BUCKET_DISCOVER, error_text=err)
+
+    res, err = await send_request(
+        account_id,
+        tlf.contacts.SearchRequest(q=query, limit=max(1, min(int(limit), SERVER_LIMIT_MAX))),
+    )
+    if err is not None:
+        return ChannelHits(error_text=err, calls=1)
+    out: list[dict[str, Any]] = []
+    for ch in list(getattr(res, "chats", None) or []):
+        title = str(getattr(ch, "title", "") or "").strip()
+        username = str(getattr(ch, "username", "") or "").strip()
+        if not title and not username:
+            continue
+        out.append(
+            {
+                "title": title,
+                "username": username,
+                "members": getattr(ch, "participants_count", None),
+                "broadcast": bool(getattr(ch, "broadcast", False)),
+            }
+        )
+    return ChannelHits(channels=out[:limit], calls=1)
 
 
 # ─── 5. Saqlash — faqat ma'lum chatlar ───────────────────────────────────────

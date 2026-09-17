@@ -31,6 +31,7 @@ from app.db.base import session_scope
 from app.db.models import Account, Chat, ChatDigest, ChatType, Message
 from app.logging import get_logger
 from app.services import avatars as AV
+from app.services.analytics import msg_link
 from app.services.textnorm import uz_fold
 from app.web.security import RateLimiter, WebIdentity, require_identity
 
@@ -252,9 +253,8 @@ async def _search_python(db: AsyncSession, conds: list[Any], folded: str, limit:
 
 
 def _msg_link(chat: Chat, tg_msg_id: int) -> str | None:
-    if chat.link_prefix:
-        return f"{chat.link_prefix}{tg_msg_id}"
-    return f"https://t.me/{chat.username}/{tg_msg_id}" if chat.username else None
+    """Yagona havola manbai — `analytics.msg_link` (prefix → username → None)."""
+    return msg_link(chat, tg_msg_id)
 
 
 def _sender_of(m: Message, chat: Chat) -> str:

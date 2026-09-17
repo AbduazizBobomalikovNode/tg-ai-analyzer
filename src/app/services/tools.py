@@ -207,11 +207,7 @@ def _line(
     who = (
         chat.title
         if chat.type == "channel" and not m.sender_id
-        else (
-            (names or {}).get(int(m.sender_id)) or f"user:{m.sender_id}"
-            if m.sender_id
-            else "—"
-        )
+        else ((names or {}).get(int(m.sender_id)) or f"user:{m.sender_id}" if m.sender_id else "—")
     )
     body = S.compact_text(m.text or "", max_chars=500) or (
         f"[{m.media_type}]" if m.media_type else ""
@@ -372,9 +368,7 @@ async def get_message_context(ctx: ToolContext, args: dict[str, Any]) -> ToolRes
     names = await sender_names(
         ctx.session, ctx.account_id, (m.sender_id for m in msgs if m.sender_id)
     )
-    lines = [
-        ("→ " if m.tg_msg_id == mid else "  ") + _line(chat, m, names=names) for m in msgs
-    ]
+    lines = [("→ " if m.tg_msg_id == mid else "  ") + _line(chat, m, names=names) for m in msgs]
     return ToolResult(
         _clip(f'chat="{chat.title}" around #{mid}\n' + "\n".join(lines)), meta={"chat": chat.title}
     )

@@ -695,6 +695,10 @@ async def _send_via_agent(
         "tools": [c["tool"] for c in outcome.tool_calls],
         "tool_calls": outcome.tool_calls,
         "iterations": outcome.iterations,
+        # Byudjet ko'rsatkichlari: `calls_log` da to'silgan chaqiruvlar ham bor,
+        # shuning uchun "nechta bajarildi" va "nega to'xtadi" alohida yoziladi.
+        "calls_executed": outcome.calls_executed,
+        "stop_reason": outcome.stop_reason,
         "est_tokens": outcome.result_tokens,
         "run_id": outcome.run_id,
         "action_ids": outcome.action_ids,
