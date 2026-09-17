@@ -43,6 +43,7 @@
       <a class="btn ghost" href="/login">{{ t('web.onboarding.use_phone') }}</a>
       <span class="spacer"></span>
       <button type="button" class="btn" id="onb-qr-retry">{{ m.icon("refresh-cw") }} {{ t('web.onboarding.qr_retry') }}</button>
+      <button type="button" class="btn link" data-onb-skip>{{ t('web.onboarding.skip') }}</button>
     </div>
   </section>
 
@@ -58,6 +59,7 @@
       <li class="no">{{ m.icon("x") }}<span>{{ t('web.onboarding.s2_write') }}</span></li>
     </ul>
     <div class="onb-nav">
+      <button type="button" class="btn link" data-onb-skip>{{ t('web.onboarding.skip') }}</button>
       <span class="spacer"></span>
       <button type="button" class="btn primary" data-onb-next="3">{{ t('web.onboarding.agree') }}</button>
     </div>
@@ -70,6 +72,7 @@
     <div class="onb-counts" id="onb-counts"></div>
     <div class="onb-sync-rows" id="onb-sync-rows"></div>
     <div class="onb-nav">
+      <button type="button" class="btn link" data-onb-skip>{{ t('web.onboarding.skip') }}</button>
       <span class="muted small" id="onb-sync-state"></span>
       <span class="spacer"></span>
       <button type="button" class="btn primary" data-onb-next="4">{{ t('web.onboarding.start_now') }}</button>

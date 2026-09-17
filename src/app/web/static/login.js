@@ -24,6 +24,51 @@
   function showError(msg) { alertBox.textContent = msg; alertBox.hidden = false; }
   function clearError() { alertBox.hidden = true; alertBox.textContent = ""; }
 
+  // ── H7: QR muvaffaqiyatsiz bo'lganda ("429/5xx/tarmoq") ──────────────────
+  // Avval: rasm bo'sh/buzilgan qolardi, lekin "Skanerlash kutilmoqda…" matni
+  // baribir ko'rsatilardi — foydalanuvchi mavjud bo'lmagan QR'ni kutardi.
+  // Endi: QR blokining o'zi yashiriladi, o'rniga xato + "qayta urinish"
+  // kartasi (backoff bilan, `err.retryAfter` bo'lsa hisoblagich).
+  const qrLive = $("qr-live");
+  const qrRetry = $("qr-retry");
+  const qrRetryMsg = $("qr-retry-msg");
+  const btnQrRetry = $("btn-qr-retry");
+  let qrRetryTimer = null;
+
+  function showQrLive() {
+    clearInterval(qrRetryTimer);
+    qrRetry.hidden = true;
+    qrLive.hidden = false;
+  }
+
+  function showQrRetry(err) {
+    stopQrPoll();
+    qrLive.hidden = true;
+    qrRetryMsg.textContent = err.message;
+    qrRetry.hidden = false;
+    clearInterval(qrRetryTimer);
+    btnQrRetry.disabled = false;
+    btnQrRetry.dataset.label ||= btnQrRetry.textContent;
+    if (err.retryAfter) {
+      let left = err.retryAfter;
+      btnQrRetry.disabled = true;
+      const tick = () => {
+        btnQrRetry.textContent = t("web.login.retry_in", { seconds: left });
+        if (left-- <= 0) {
+          clearInterval(qrRetryTimer);
+          btnQrRetry.disabled = false;
+          btnQrRetry.textContent = btnQrRetry.dataset.label;
+        }
+      };
+      tick();
+      qrRetryTimer = setInterval(tick, 1000);
+    } else {
+      btnQrRetry.textContent = btnQrRetry.dataset.label;
+    }
+  }
+
+  btnQrRetry?.addEventListener("click", () => startQr());
+
   // ── kod qadami: izoh + "qayta yuborish" tugmasi ──────────────────────────
   // Telegram faol sessiya ko'rsa kodni SMS emas, ilovaga tashlaydi
   // (code_type=app). `next_type` — qayta yuborilsa qanday kelishi; bo'sh
@@ -156,7 +201,7 @@
 
   function stopQrPoll() { clearInterval(qrPoll); qrPoll = null; }
 
-  /** QR oqimini boshlaydi (yoki yangilaydi). Xato bo'lsa telefon yo'li ochiladi. */
+  /** QR oqimini boshlaydi (yoki yangilaydi). Xato bo'lsa retry karta ko'rsatiladi. */
   async function startQr() {
     clearError();
     const btn = $("btn-qr"); busy(btn, true);
@@ -164,10 +209,11 @@
       const data = await api("/api/auth/qr", {});
       flowId = data.flow_id;
       if (data.qr) $("qr-img").src = data.qr;
+      showQrLive();
       show("qr");
       startQrPoll();
     } catch (err) {
-      handleError(err, btn);
+      showQrRetry(err);
       openPhone();   // QR ishlamasa — telefon zaxira yo'li ko'rinib tursin
     } finally { busy(btn, false); }
   }
@@ -182,7 +228,9 @@
       try {
         data = await api("/api/auth/qr/poll", { flow_id: flowId });
       } catch (err) {
-        stopQrPoll(); handleError(err, null); show("qr"); return;
+        show("qr");
+        showQrRetry(err);
+        return;
       }
       if (data.qr) $("qr-img").src = data.qr;       // token yangilangan bo'lsa
       if (data.error) $("qr-hint").textContent = t("auth.err.telegram");

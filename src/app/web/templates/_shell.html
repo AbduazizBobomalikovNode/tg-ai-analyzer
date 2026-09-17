@@ -129,8 +129,10 @@
     <button type="button" class="sheet-item" data-cmdk-open>{{ m.icon("command") }}{{ t('web.cmd.open') }}</button>
     <div class="sheet-item" style="justify-content: space-between">
       {{ m.lang_switch(t, langs, lang) }}
-      <button type="button" class="btn ghost small" id="btn-logout-sheet">{{ t('web.chat.logout') }}</button>
     </div>
+    {# L5: chiqish — o'z destruktiv qatori, til qatoriga qo'shilgan
+       mute'langan tugma emas. `lib/shell.js::initLogout` bog'laydi. #}
+    <button type="button" class="sheet-item is-danger" id="btn-logout-sheet">{{ m.icon("log-out") }}{{ t('web.chat.logout') }}</button>
     <button type="button" class="sheet-item" data-sheet-close>{{ m.icon("x") }}{{ t('web.close') }}</button>
   </div>
 </div>
@@ -162,12 +164,11 @@
 
 {% block scripts %}
 <script type="module">
-  import { initShell, cmdk } from "{{ asset('lib/shell.js') }}";
+  {# ⌘K "Chats" bo'limi — `initShell()` o'zi `/api/me` orqali yuklaydi va
+     `tgai:chats` hodisasini tinglaydi (`lib/shell.js::loadPaletteChats`,
+     H3). Bu yerda qo'shimcha kod kerak emas. #}
+  import { initShell } from "{{ asset('lib/shell.js') }}";
   initShell();
-  // ⌘K "Chats" bo'limi — sahifa yuklagan ro'yxatdan (qo'shimcha so'rov yo'q).
-  const seed = () => cmdk.setChats((window.TGAI && window.TGAI.chats) || []);
-  window.addEventListener("tgai:chats", seed);
-  seed();
 </script>
 <script type="module">
   // Tasdiq kutayotgan amallar soni — rail badge'i (ui/R2C).

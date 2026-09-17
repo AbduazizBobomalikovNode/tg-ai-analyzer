@@ -83,6 +83,7 @@
   gap: var(--s-3); text-align: center;
   padding: var(--s-7) var(--s-4);
   max-inline-size: var(--measure-narrow); margin-inline: auto;
+  min-block-size: 160px;   /* L2: karta ichida siqilib qolmasin */
 }
 .empty-v2 .empty-ico {
   display: grid; place-items: center;
@@ -259,6 +260,12 @@
 .sheet-item:hover { background: var(--panel-3); }
 .sheet-item.is-disabled { opacity: .45; pointer-events: none; }
 .sheet-item .icon { color: var(--muted); }
+/* L5: chiqish — alohida destruktiv qator, til qatoridagi mute'langan
+ * yorliq emas (`_shell.html` More sheet, `settings.html` Maxfiylik). */
+.sheet-item.is-danger, .row-item.is-danger { color: var(--danger); }
+.sheet-item.is-danger .icon, .row-item.is-danger .icon { color: var(--danger); }
+.sheet-item.is-danger:hover { background: var(--danger-soft); }
+a.row-item.is-danger:hover, button.row-item.is-danger:hover { background: var(--danger-soft); }
 
 /* ══ Til almashtirgich (macro) ════════════════════════════════════════ */
 .lang-switch-v2 { display: inline-flex; gap: 2px; }
@@ -322,7 +329,11 @@
   padding: var(--s-3) var(--s-4);
   background: var(--panel); color: var(--text);
   border: 1px solid var(--border); border-radius: var(--r-md, 12px);
-  text-decoration: none; min-block-size: var(--tap);
+  text-decoration: none;
+  /* L8: bir xil balandlik — kontent qatorlari (sub yo'q plita ham) farq
+   * qilmasin, grid stretch'iga qattiq tayanilmaydi. */
+  min-block-size: max(var(--tap), 84px);
+  min-inline-size: 0;
   transition: box-shadow var(--t-card) var(--ease), transform var(--t-card) var(--ease);
 }
 a.tile-v2:hover { box-shadow: var(--sh-2); transform: translateY(-1px); }
@@ -330,6 +341,10 @@ a.tile-v2:hover { box-shadow: var(--sh-2); transform: translateY(-1px); }
   display: flex; align-items: center; gap: var(--s-1);
   font-size: var(--fs-xs); font-weight: 700; letter-spacing: .06em;
   text-transform: uppercase; color: var(--faint);
+  min-inline-size: 0;   /* L8: bitta qator, ellipsis (label ikki qatorga bo'linmasin) */
+}
+.tile-v2 .tile-k span {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-inline-size: 0;
 }
 .tile-v2 .tile-v { font-size: var(--fs-xl); font-weight: 700; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
 .tile-v2 .tile-s { font-size: var(--fs-xs); color: var(--muted); }
@@ -342,6 +357,9 @@ a.tile-v2:hover { box-shadow: var(--sh-2); transform: translateY(-1px); }
   min-block-size: var(--tap);
   color: inherit; text-decoration: none;
 }
+/* `<button class="row-item">` (masalan L5 "chiqish") — browser standart
+ * tugma bezaklarisiz, `<a>`/`<div>` variantiga o'xshab ko'rinsin. */
+button.row-item { border: 0; background: none; cursor: pointer; text-align: start; }
 a.row-item:hover, button.row-item:hover { background: var(--panel-2); }
 .row-body { flex: 1 1 auto; min-inline-size: 0; display: grid; gap: 2px; }
 .row-title { font-weight: 600; font-size: var(--fs-md); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -383,6 +401,7 @@ a.row-item:hover, button.row-item:hover { background: var(--panel-2); }
 .field.wide { grid-column: 1 / -1; }
 .field .field-note { font-size: var(--fs-xs); color: var(--faint); line-height: var(--lh-body); }
 .field input, .field select, .field textarea { inline-size: 100%; min-inline-size: 0; }
+input[type="checkbox"], input[type="radio"] { inline-size: auto; block-size: auto; flex: none; }
 .field-err { font-size: var(--fs-xs); color: var(--danger); }
 .field-row { display: flex; align-items: center; gap: var(--s-2); }
 .field-row input[type="checkbox"] { flex: none; }
@@ -508,6 +527,20 @@ a.row-item:hover, button.row-item:hover { background: var(--panel-2); }
   min-block-size: 32px; display: flex; align-items: center;
 }
 .login-fallback .step { margin-block-start: var(--s-2); }
+
+/* ── Ishonch/maxfiylik ro'yxati (check/x) ─────────────────────────────── */
+/* `/onboarding` (2-qadam) va `/settings` (Maxfiylik bo'limi) ishlatadi —
+ * ikkalasi ham shu sinfni yozadi, shuning uchun ulashiladigan bloqda
+ * (aks holda faqat bittasi yuklagan sahifada standart `<ul>` nuqtasi
+ * sprite ikonka bilan qo'shilib "ikkilangan belgi" chiqaradi, L10). */
+.consent-list { display: grid; gap: var(--s-2); margin: 0; padding: 0; list-style: none; }
+.consent-list li {
+  display: flex; gap: var(--s-3); align-items: flex-start;
+  font-size: var(--fs-sm); line-height: var(--lh-body);
+}
+.consent-list .icon { flex: none; margin-block-start: 2px; }
+.consent-list .yes .icon { color: var(--ok); }
+.consent-list .no .icon { color: var(--danger); }
 
 /* ── Zichlik (`prefs.density`) ────────────────────────────────────────── */
 /* Ixcham rejim faqat ro'yxat qatorlari va kartalar bo'shlig'ini qisqartiradi;

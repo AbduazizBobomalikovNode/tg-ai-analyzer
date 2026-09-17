@@ -191,20 +191,52 @@ async def _prefs_for(ident: WebIdentity | None) -> dict[str, Any]:
         return {}
 
 
+async def _has_synced_chats(ident: WebIdentity) -> bool:
+    """Foydalanuvchida hech bo'lmasa bir sinxronlangan chatli akkaunt bormi.
+
+    "Sinxronlangan" — `auth.py::_chat_counts` bilan bir xil mezon:
+    `Chat.synced_total > 0` (tarix boshigacha yetmagan bo'lsa ham qidiruv
+    uchun foydali). DB'ga borib bo'lmasa **True** qaytadi — `index()` shu
+    holatda onboarding'ga emas, `/today`ga tushsin (H6: noaniqlikda eski
+    ulangan foydalanuvchini qayta onboarding'ga qamab qo'ymaymiz).
+    """
+    try:
+        from sqlalchemy import func, select
+
+        from app.db.base import session_scope
+        from app.db.models import Account, Chat
+
+        async with session_scope() as db:
+            row = await db.execute(
+                select(func.count(Chat.id))
+                .join(Account, Account.id == Chat.account_id)
+                .where(Account.user_id == ident.user_id, Chat.synced_total > 0)
+            )
+            return int(row.scalar() or 0) > 0
+    except Exception as exc:
+        log.debug("pages.synced_chats_check_failed", error=str(exc)[:200])
+        return True
+
+
 @router.get("/", response_class=HTMLResponse)
 async def index(request: Request) -> Any:
     """Kirish nuqtasi: akkaunt yo'q → `/login`, yangi foydalanuvchi →
     `/onboarding`, aks holda `/today` (ui/R2c, `docs/ui-research.md` § 2).
 
-    "Yangi" mezoni — `prefs.onboarding_done` bayrog'i. U `/onboarding`
-    ning oxirgi qadamida qo'yiladi, ya'ni oqimni tugatmagan foydalanuvchi
-    keyingi safar ham o'sha yerdan davom etadi.
+    "Yangi" mezoni — `prefs.onboarding_done` bayrog'i **va** hech qanday
+    akkauntda sinxronlangan chat yo'qligi (H6): faqat bayroqqa qaralsa
+    allaqachon ulangan, chatlari sinxronlangan foydalanuvchi ham (masalan
+    bayroq eski sessiyada saqlanmagan bo'lsa) har safar `/onboarding`ga
+    qaytarilardi. Bayroq `/onboarding` ning oxirgi qadamida qo'yiladi —
+    oqimni tugatmagan (va hali chati yo'q) foydalanuvchi davom etadi.
     """
     ident = await identity_of(request)
     if ident is None:
         return RedirectResponse("/login", status_code=302)
     prefs = await _prefs_for(ident)
-    target = "/today" if prefs.get("onboarding_done") else "/onboarding"
+    target = "/today"
+    if not prefs.get("onboarding_done") and not await _has_synced_chats(ident):
+        target = "/onboarding"
     return RedirectResponse(target, status_code=302)
 
 

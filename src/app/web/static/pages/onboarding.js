@@ -183,12 +183,21 @@ async function finish(href) {
   window.location.href = href || "/today";
 }
 
+/** H6: har bir qadamdagi "O'tkazib yuborish" — oqimni tugatgandek belgilaydi
+ * (`onboarding_done: true`) va `/today`ga o'tadi, `finish()` bilan bir xil. */
+function skip() {
+  stopQr();
+  stopSync();
+  finish("/today");
+}
+
 /* ── Kirish nuqtasi ──────────────────────────────────────────────────── */
 
 ready(async () => {
   themeMod.init();
   for (const b of $$("[data-theme-toggle]")) b.addEventListener("click", () => themeMod.cycle());
   for (const b of $$("[data-onb-next]")) b.addEventListener("click", () => goto(Number(b.dataset.onbNext)));
+  for (const b of $$("[data-onb-skip]")) b.addEventListener("click", skip);
   $("#onb-qr-retry")?.addEventListener("click", () => startQr());
   $("#onb-finish")?.addEventListener("click", () => finish("/today"));
 

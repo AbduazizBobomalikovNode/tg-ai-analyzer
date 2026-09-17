@@ -274,6 +274,7 @@ export function initConversations() {
   $("#account-select")?.addEventListener("change", (e) => {
     S.accountId = Number(e.target.value) || null;
     S.contextChats = [];
+    e.target.title = e.target.selectedOptions[0]?.textContent || "";
     emit("account");
   });
 
@@ -344,15 +345,26 @@ function openConvMenu() {
   openSheet(conv?.title || t("web.ask.title"), items);
 }
 
-/** Akkaunt tanlagich (ro'yxat `/api/me` dan keladi). */
+const accountLabel = (a) => `${a.label || a.tg_account_id}${a.status !== "active" ? ` (${a.status})` : ""}`;
+
+/**
+ * Akkaunt tanlagich (ro'yxat `/api/me` dan keladi).
+ *
+ * L4: yopiq `<select>` uzun nomni kesib ko'rsatadi (`ask.css` ellipsis) —
+ * to'liq nom `title` orqali hover'da ko'rinadi, `<option title>` yopiq
+ * qutida ko'rinmaydi.
+ */
 export function paintAccounts() {
   const sel = $("#account-select");
   if (!sel) return;
   replace(sel, S.accounts.map((a) => el("option", {
     value: String(a.id),
     selected: a.id === S.accountId,
-  }, `${a.label || a.tg_account_id}${a.status !== "active" ? ` (${a.status})` : ""}`)));
+    title: accountLabel(a),
+  }, accountLabel(a))));
   if (!S.accounts.length) {
     sel.appendChild(el("option", { value: "" }, t("web.chat.no_accounts")));
   }
+  const current = S.accounts.find((a) => a.id === S.accountId);
+  sel.title = current ? accountLabel(current) : "";
 }

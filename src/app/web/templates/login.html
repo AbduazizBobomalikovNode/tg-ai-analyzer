@@ -21,14 +21,24 @@
 
     <!-- 1. QR — asosiy yo'l: telefon ham, kod ham kerak emas -->
     <div id="step-qr" class="step">
-      <div class="qr-box"><img id="qr-img" alt="{{ t('web.login.qr_alt') }}" width="220" height="220"></div>
-      <ol class="qr-steps">
-        <li>{{ t('web.login.qr_step1') }}</li>
-        <li>{{ t('web.login.qr_step2') }}</li>
-        <li>{{ t('web.login.qr_step3') }}</li>
-      </ol>
-      <small class="hint" id="qr-hint">{{ t('web.login.qr_waiting') }}</small>
-      <button type="button" class="btn full" id="btn-qr">{{ m.icon("refresh-cw") }} {{ t('web.login.qr_refresh') }}</button>
+      <!-- H7: QR muvaffaqiyatsiz bo'lganda (429/5xx/tarmoq) shu blok yashiriladi
+           va o'rniga #qr-retry ko'rsatiladi — "Skanerlash kutilmoqda…" matni QR
+           rasmisiz hech qachon qolmaydi (`login.js::startQr`). -->
+      <div id="qr-live">
+        <div class="qr-box"><img id="qr-img" alt="{{ t('web.login.qr_alt') }}" width="220" height="220"></div>
+        <ol class="qr-steps">
+          <li>{{ t('web.login.qr_step1') }}</li>
+          <li>{{ t('web.login.qr_step2') }}</li>
+          <li>{{ t('web.login.qr_step3') }}</li>
+        </ol>
+        <small class="hint" id="qr-hint">{{ t('web.login.qr_waiting') }}</small>
+        <button type="button" class="btn full" id="btn-qr">{{ m.icon("refresh-cw") }} {{ t('web.login.qr_refresh') }}</button>
+      </div>
+
+      <div class="qr-retry" id="qr-retry" hidden>
+        <p class="alert" id="qr-retry-msg"></p>
+        <button type="button" class="btn full" id="btn-qr-retry" style="margin-block-start: var(--s-3)">{{ m.icon("refresh-cw") }} {{ t('web.login.qr_retry') }}</button>
+      </div>
 
       <!-- Telefon zaxira yo'li — yopiq disclosure ichida -->
       <details class="login-fallback" id="phone-fallback">
@@ -38,7 +48,7 @@
           <input id="phone" name="phone" type="tel" inputmode="tel" autocomplete="tel"
                  placeholder="+998 90 123 45 67" required>
           <small class="hint">{{ t('web.login.phone_hint') }}</small>
-          <button type="submit" class="btn primary" id="btn-phone">{{ t('web.login.send_code') }}</button>
+          <button type="submit" class="btn primary full" id="btn-phone">{{ t('web.login.send_code') }}</button>
         </form>
       </details>
     </div>
@@ -49,7 +59,7 @@
       <input id="code" name="code" type="text" inputmode="numeric" pattern="[0-9]*"
              autocomplete="one-time-code" maxlength="8" placeholder="• • • • •" required>
       <small class="hint" id="code-hint"></small>
-      <button type="submit" class="btn primary" id="btn-code">{{ t('web.login.verify') }}</button>
+      <button type="submit" class="btn primary full" id="btn-code">{{ t('web.login.verify') }}</button>
       <button type="button" class="btn link" id="btn-resend" hidden></button>
       <button type="button" class="btn link" data-back>{{ t('web.login.back') }}</button>
     </form>
@@ -59,7 +69,7 @@
       <label for="password">{{ t('web.login.password') }}</label>
       <input id="password" name="password" type="password" autocomplete="current-password" required>
       <small class="hint">{{ t('web.login.password_hint') }}</small>
-      <button type="submit" class="btn primary" id="btn-password">{{ t('web.login.submit') }}</button>
+      <button type="submit" class="btn primary full" id="btn-password">{{ t('web.login.submit') }}</button>
       <button type="button" class="btn link" data-back>{{ t('web.login.back') }}</button>
     </form>
 

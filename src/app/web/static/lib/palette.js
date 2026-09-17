@@ -126,15 +126,33 @@ function graphemes(s) {
   return Array.from(s); // fallback: kod nuqtasi (surrogat juftlar butun)
 }
 
+/** Raqam, tinish belgisi yoki matn/valyuta/o'zgartiruvchi belgisidan (`|`,
+ * `@`, `#`, `$`) iborat grapheme — inisialga nomzod emas. Piktografik
+ * belgilar (emoji, `\p{So}`) bundan mustasno — ular butun holda saqlanadi. */
+const SKIP_RE = /^[\p{Nd}\p{P}\p{Sm}\p{Sc}\p{Sk}]+$/u;
+
+/** So'z ichidagi birinchi "foydali" (raqam/tinish belgisi bo'lmagan) grapheme. */
+function firstUsableGrapheme(word) {
+  for (const g of graphemes(word)) {
+    if (!SKIP_RE.test(g)) return g;
+  }
+  return null;
+}
+
 /**
- * Inisiallar: 1–2 grapheme. Emoji butun qoladi, kirill/lotin katta
- * harfga o'tadi. Bo'sh sarlavha → `?`.
+ * Inisiallar: harflar (yoki emoji) bor birinchi ikki so'zning birinchi
+ * grapheme'si. Faqat raqam/tinish belgisidan iborat so'zlar (`"1-"`, `"|"`)
+ * o'tkazib yuboriladi — lekin so'z ichida ular harfdan oldin kelsa ham
+ * birinchi harf topiladi (`"1-A"` → `"A"`). Bo'sh sarlavha → `?` (so'z
+ * umuman yo'q); faqat raqam/tinish belgili so'zlar bo'lsa → `•`.
  */
 export function initials(title) {
   const words = String(title || "").trim().split(/\s+/).filter(Boolean);
   if (!words.length) return "?";
-  const first = graphemes(words[0])[0] || "";
-  if (words.length === 1) return first.toLocaleUpperCase();
-  const second = graphemes(words[1])[0] || "";
+  const usable = words.filter((w) => firstUsableGrapheme(w) != null);
+  if (!usable.length) return "•";
+  const first = firstUsableGrapheme(usable[0]);
+  if (usable.length === 1) return first.toLocaleUpperCase();
+  const second = firstUsableGrapheme(usable[1]);
   return (first + second).toLocaleUpperCase();
 }

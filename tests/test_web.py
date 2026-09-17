@@ -182,6 +182,22 @@ def test_pages(client: TestClient) -> None:
     assert r.status_code == 302
 
 
+def test_login_page_has_a_qr_retry_container(client: TestClient) -> None:
+    """H7: QR muvaffaqiyatsiz bo'lganda `login.js` shu blokka almashadi —
+    rasm/kutish matni bilan bir vaqtda emas (`#qr-live` va `#qr-retry`
+    o'zaro almashinadigan, bittasi doim `hidden`)."""
+    html = client.get("/login?lang=uz").text
+    assert '<div id="qr-live">' in html
+    assert 'id="qr-retry" hidden' in html or 'hidden id="qr-retry"' in html
+    assert 'id="qr-retry-msg"' in html
+    assert 'id="btn-qr-retry"' in html
+    # #qr-img/qr-hint `#qr-live` ichida qoladi — shuning uchun yashirilganda
+    # ular bilan birga ko'zdan yo'qoladi.
+    live_start = html.index('id="qr-live"')
+    retry_start = html.index('id="qr-retry"')
+    assert live_start < html.index('id="qr-img"') < retry_start
+
+
 def test_api_requires_login_and_csrf(client: TestClient) -> None:
     assert client.get("/api/me").status_code == 401
     assert client.get("/api/conversations").status_code == 401
@@ -1176,6 +1192,52 @@ def test_tg_chats_endpoint_rejects_bad_limit(client: TestClient) -> None:
     assert client.get("/api/accounts/3/chats?limit=5000").status_code == 422
 
 
+def test_tg_chats_endpoint_spark_param(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """M3: `?spark=1` — har chatga 14 ta int, bitta guruhlangan so'rovdan."""
+    from app.web.routers import tg as tg_router
+
+    chat_rows = [_chat_row(11, "Ish chat"), _chat_row(12, "Oila")]
+    spark_rows = [(11, datetime.now(UTC), 4)]
+
+    class _SparkFakeSession:
+        async def get(self, model: Any, pk: int) -> Any:
+            if getattr(model, "__name__", "") == "Account":
+                return SimpleNamespace(id=pk, user_id=7)
+            return None
+
+        async def execute(self, stmt: Any) -> Any:
+            sql = str(stmt).lower()
+            if "group by" in sql:  # spark_series — guruhlangan so'rov
+                assert "deleted_at is null" in sql
+
+                class _Grouped:
+                    def all(self) -> list[Any]:
+                        return spark_rows
+
+                return _Grouped()
+
+            class _Res:
+                def scalars(self) -> Any:
+                    return SimpleNamespace(all=lambda: chat_rows)
+
+            return _Res()
+
+    session = _SparkFakeSession()
+    monkeypatch.setattr(tg_router, "session_scope", _AlertScopeFactory(session))
+    client.cookies.set(sec.SESSION_COOKIE, sec.issue_session(7))
+
+    r = client.get("/api/accounts/3/chats?spark=1")
+    assert r.status_code == 200, r.text
+    items = r.json()["items"]
+    assert len(items[0]["spark"]) == 14 and items[0]["spark"][-1] == 4
+    assert items[1]["spark"] == [0] * 14
+
+    # `spark=1` bo'lmasa maydon umuman qo'shilmaydi — eski javob shakli buzilmaydi
+    r2 = client.get("/api/accounts/3/chats")
+    assert "spark" not in r2.json()["items"][0]
+    client.cookies.clear()
+
+
 # ─── UI redizayn v2: karkas, ikonkalar, tema, i18n ──────────────────────────
 #
 # Qo'riqlaydi (`docs/ui-v2.md`):
@@ -1226,6 +1288,29 @@ def test_pages_render_with_the_navigation_shell(client: TestClient) -> None:
         assert 'id="toast-root"' in html, f"{path}: toast ildizi yo'q"
         assert 'id="more-sheet"' in html, f"{path}: More varag'i yo'q"
         assert 'class="skip-link"' in html, f"{path}: skip-link yo'q"
+    c.cookies.clear()
+
+
+def test_logout_is_a_distinct_danger_row(client: TestClient) -> None:
+    """L5: "Chiqish" — til qatoriga aralashtirilgan mute'langan yorliq
+    emas, `.is-danger` bilan alohida qator (More sheet **va** Settings)."""
+    c = _logged(client)
+    html = c.get("/today?lang=uz").text
+    assert 'id="btn-logout-sheet"' in html
+    logout_idx = html.index('id="btn-logout-sheet"')
+    logout_tag_start = html.rindex("<button", 0, logout_idx)
+    logout_tag_end = html.index(">", logout_idx)
+    logout_tag = html[logout_tag_start:logout_tag_end]
+    assert "is-danger" in logout_tag
+    assert "log-out" in html[logout_tag_end : html.index("</button>", logout_tag_end)]
+
+    settings_html = c.get("/settings?lang=uz").text
+    assert 'id="set-logout"' in settings_html
+    set_idx = settings_html.index('id="set-logout"')
+    set_tag_start = settings_html.rindex("<button", 0, set_idx)
+    set_tag_end = settings_html.index(">", set_idx)
+    assert "row-item" in settings_html[set_tag_start:set_tag_end]
+    assert "is-danger" in settings_html[set_tag_start:set_tag_end]
     c.cookies.clear()
 
 
@@ -1643,7 +1728,13 @@ def test_onboarding_is_reachable_without_a_session(client: TestClient) -> None:
 def test_index_sends_new_users_to_onboarding(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`/` → `/onboarding` (onboarding_done=false), `/today` (true)."""
+    """H6: `/` → `/onboarding` faqat `onboarding_done=false` **va** hech
+    qanday akkauntda sinxronlangan chat yo'q bo'lsa; aks holda `/today`.
+
+    Bayroqqagina qaralganda allaqachon ulangan (chatlari sinxron) lekin
+    bayrog'i eski sessiyada saqlanmagan foydalanuvchi har safar
+    onboarding'ga qaytarilardi — shu regressiya.
+    """
     from app.web.routers import pages as pages_router
 
     c = _logged(client)
@@ -1654,13 +1745,58 @@ def test_index_sends_new_users_to_onboarding(
     async def finished(ident: Any) -> dict[str, Any]:
         return {"onboarding_done": True}
 
+    async def no_chats(ident: Any) -> bool:
+        return False
+
+    async def has_chats(ident: Any) -> bool:
+        return True
+
     monkeypatch.setattr(pages_router, "_prefs_for", unfinished)
+
+    monkeypatch.setattr(pages_router, "_has_synced_chats", no_chats)
     r = c.get("/", follow_redirects=False)
     assert r.status_code == 302 and r.headers["location"] == "/onboarding"
 
-    monkeypatch.setattr(pages_router, "_prefs_for", finished)
+    # Bayroq hali qo'yilmagan, lekin chatlar allaqachon sinxron — /today.
+    monkeypatch.setattr(pages_router, "_has_synced_chats", has_chats)
     r = c.get("/", follow_redirects=False)
     assert r.status_code == 302 and r.headers["location"] == "/today"
+
+    monkeypatch.setattr(pages_router, "_prefs_for", finished)
+    monkeypatch.setattr(pages_router, "_has_synced_chats", no_chats)
+    r = c.get("/", follow_redirects=False)
+    assert r.status_code == 302 and r.headers["location"] == "/today"
+    c.cookies.clear()
+
+
+async def test_has_synced_chats_fails_safe_without_db() -> None:
+    """H6: DB'ga borib bo'lmasa `_has_synced_chats` **True** qaytaradi —
+    `/` shu holatda onboarding'ga emas, `/today`ga tushadi (fail-safe)."""
+    from app.web.routers import pages as pages_router
+
+    ident = sec.WebIdentity(user_id=999999, issued_at=0)
+    assert await pages_router._has_synced_chats(ident) is True
+
+
+def test_onboarding_steps_have_a_skip_link(client: TestClient) -> None:
+    """H6: har bir qadamda ko'rinadigan "o'tkazib yuborish" havolasi bor."""
+    r = client.get("/onboarding?lang=en")
+    assert r.status_code == 200
+    assert r.text.count("data-onb-skip") >= 3
+
+
+def test_settings_context_last_is_interpolated(client: TestClient) -> None:
+    """M5: "Oxirgi {n} ta xabar" — `{n}` server tomonda to'ldirilishi kerak,
+    ko'rinadigan matnda **literal** chiqmasin (JS uchun `window.TGAI.strings`
+    JSON'ida xom shablon qolishi normal — u yerda tekshirilmaydi)."""
+    c = _logged(client)
+    html = c.get("/settings?lang=uz").text
+    # `window.TGAI.strings` JSON'i (JS uchun, xom shablonlar bilan) sahifa
+    # kontentidan **keyin** keladi (`base.html`) — faqat undan oldingi
+    # qismni tekshiramiz, aks holda JSON'dagi xom kalit doim mos keladi.
+    content = html.split("window.TGAI", 1)[0]
+    assert "Oxirgi 50 ta xabar" in content
+    assert "{n}" not in content
     c.cookies.clear()
 
 
@@ -1722,3 +1858,83 @@ def test_the_legacy_alerts_script_is_gone() -> None:
     dash = (_WEB / "templates/dashboard.html").read_text(encoding="utf-8")
     assert "alerts.js" not in dash
     assert "alerts-form" not in dash, "dashboard'da eski alert formasi qoldi"
+
+
+# ─── QA fix pass A ────────────────────────────────────────────────────────────
+
+
+def test_btn_primary_is_no_longer_forced_full_width() -> None:
+    """H1: `.btn.primary` global `width: 100%` — `/today` so'rov qutisi,
+    `/alerts` top bar tugmasi va boshqa flex qatordagi tugmalarni to'liq
+    kenglikka yoyib yuborardi. To'liq kenglik kerak bo'lsa `.btn.full`."""
+    css = (_WEB / "static/app.css").read_text(encoding="utf-8")
+    m = _re.search(r"\.btn\.primary\s*\{([^}]*)\}", css)
+    assert m, ".btn.primary qoidasi topilmadi"
+    assert "width" not in m.group(1), f".btn.primary hali width beryapti: {m.group(1)!r}"
+    assert ".btn.full {" in css or ".btn.full{" in css
+
+
+def test_checkbox_and_radio_are_not_stretched_by_field_rule() -> None:
+    """H5: `.field input {inline-size:100%}` checkbox/radio'ni ham
+    yoyib yuborardi (`/settings` chat tanlagichi) — global reset kerak."""
+    css = (_WEB / "static/css/components.css").read_text(encoding="utf-8")
+    assert 'input[type="checkbox"]' in css and "inline-size: auto" in css
+
+
+def test_consent_list_style_lives_in_shared_components_css() -> None:
+    """L10: `.consent-list` `/onboarding` **va** `/settings` (Maxfiylik)
+    ishlatadi — sinf faqat bittasi yuklaydigan `css/pages/*.css` da bo'lsa
+    ikkinchisida standart `<ul>` nuqtasi + sprite ikonka "ikkilanib" ko'rinadi."""
+    components = (_WEB / "static/css/components.css").read_text(encoding="utf-8")
+    onboarding_css = (_WEB / "static/css/pages/onboarding.css").read_text(encoding="utf-8")
+    assert ".consent-list {" in components
+    assert ".consent-list {" not in onboarding_css
+    settings_html = (_WEB / "templates/settings.html").read_text(encoding="utf-8")
+    onboarding_html = (_WEB / "templates/onboarding.html").read_text(encoding="utf-8")
+    assert 'class="consent-list"' in settings_html
+    assert 'class="consent-list"' in onboarding_html
+
+
+def test_empty_v2_has_a_minimum_height() -> None:
+    """L2: bo'sh holat karta ichida siqilib qolmasin."""
+    css = (_WEB / "static/css/components.css").read_text(encoding="utf-8")
+    m = _re.search(r"\.empty-v2\s*\{([^}]*)\}", css)
+    assert m and "min-block-size" in m.group(1)
+
+
+def test_actions_page_humanizes_tools_and_flags_blocked_calls() -> None:
+    """M6: `/actions` xom `snake_case` tool nomini ko'rsatmaydi va agent'ning
+    ichki "already called N times" izohini foydalanuvchiga tarjima qilib
+    beradi, xato pilli sifatida emas."""
+    src = (_WEB / "static/pages/actions.js").read_text(encoding="utf-8")
+    assert "web.tools.${tool}" in src, "tool nomi web.tools.<name> xaritasidan o'qilishi kerak"
+    assert "replace(/_/g" in src, "kalit topilmasa ham snake_case ko'rinmasin (fallback: bo'sh joy)"
+    assert "BLOCKED_NOTE_RE" in src
+    assert "web.actions.blocked_pill" in src and "web.actions.blocked_note" in src
+
+
+def test_dashboard_chart_ticks_are_thinned_to_avoid_collisions() -> None:
+    """M7: X-o'q yorliqlari `floor(width/64)` bilan cheklanadi. Avval "har
+    N-chidan bittasi" **va** "oxirgisi majburiy" birga ishlatilardi — ular
+    yonma-yon tushib qolganda matnlar bir-birining ustiga chiqardi."""
+    src = (_WEB / "static/dashboard.js").read_text(encoding="utf-8")
+    assert "Math.floor(iw / 64)" in src
+    assert "i === n - 1" not in src, "'oxirgisi majburiy' mantiqi qaytib kelmasin"
+
+
+def test_tool_label_map_covers_every_registered_tool() -> None:
+    """M6: `/actions` `web.tools.<name>` xaritasi — `services/tools.py`
+    READ_TOOLS + `write_tools.WRITE_TOOL_NAMES` dagi har bir nom uchun
+    uchala tilda ham bor (fallback bor, lekin yaxshiroq tarjima ustun)."""
+    from app.services.tools import READ_TOOLS
+    from app.services.write_tools import WRITE_TOOL_NAMES
+
+    names = set(READ_TOOLS) | set(WRITE_TOOL_NAMES)
+    assert len(names) >= 20
+    locales = {
+        name: _json.loads((_LOCALES / f"{name}.json").read_text(encoding="utf-8"))
+        for name in ("uz", "ru", "en")
+    }
+    for lang, data in locales.items():
+        missing = sorted(n for n in names if not data.get(f"web.tools.{n}"))
+        assert not missing, f"{lang}: {missing}"

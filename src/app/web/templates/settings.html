@@ -112,7 +112,7 @@
           <div class="field">
             <span>{{ t('web.settings.context_limit') }}</span>
             <div class="readonly-kv">
-              <div><span>{{ t('web.chat.context_last') }}</span><b>{{ context_default }}</b></div>
+              <div><span>{{ t('web.chat.context_last', n=context_default) }}</span></div>
               <div><span>{{ t('web.settings.context_max') }}</span><b>{{ context_max }}</b></div>
             </div>
           </div>
@@ -220,9 +220,9 @@
           <li class="no">{{ m.icon("x") }}<span>{{ t('web.settings.privacy_phone') }}</span></li>
           <li class="no">{{ m.icon("x") }}<span>{{ t('web.settings.privacy_delete') }}</span></li>
         </ul>
-        <div class="form-actions">
-          <button type="button" class="btn ghost" id="set-logout">{{ m.icon("log-out") }} {{ t('web.chat.logout') }}</button>
-        </div>
+        {# L5: chiqish — alohida destruktiv qator (til/mavzu ro'yxatiga
+           aralashtirilgan mute'langan yorliq emas). #}
+        <button type="button" class="row-item is-danger" id="set-logout">{{ m.icon("log-out") }}{{ t('web.chat.logout') }}</button>
       {% endcall %}
 
     </div>

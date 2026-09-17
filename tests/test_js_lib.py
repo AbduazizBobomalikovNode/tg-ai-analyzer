@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,8 @@ from app.services.textnorm import uz_fold
 
 STATIC = Path(__file__).resolve().parents[1] / "src/app/web/static"
 PALETTE = STATIC / "lib/palette.js"
+SHELL_JS = STATIC / "lib/shell.js"
+FMT_JS = STATIC / "lib/fmt.js"
 NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node yo'q")
@@ -141,6 +144,125 @@ def test_initials_are_grapheme_safe() -> None:
     assert out[5].startswith("🎯")
 
 
+def test_initials_skip_digits_and_punctuation() -> None:
+    """L6: raqam/tinish belgisi so'z boshida bo'lsa ham harf topiladi;
+    faqat raqam/tinish belgili so'zlar (yoki so'zlar) o'tkazib yuboriladi."""
+    script = "process.stdout.write(JSON.stringify(INPUT.map((s) => P.initials(s))));"
+    names = ["1-A guruh", "I | Telegram", ",,,"]
+    out = _node_module(script, names)
+    assert out == ["AG", "IT", "•"]
+
+
+def test_palette_chats_fetched_and_ranked() -> None:
+    """H3: `lib/shell.js::fetchPaletteChats` mocked `/api/me` + chats bilan
+    ishlaydi, natija `rank()` orqali "gor" so'roviga "Gorizont"ni topadi —
+    ya'ni ⌘K "Chatlar" bo'limi endi sahifa alohida yuklamasa ham to'ladi.
+    """
+    assert NODE is not None
+    rows = [
+        {"id": 1, "title": "Ish chati"},
+        {"id": 2, "title": "Gorizont"},
+        {"id": 3, "title": "Oila"},
+    ]
+    src = f"""
+const S = await import({json.dumps(SHELL_JS.as_uri())});
+const P = await import({json.dumps(PALETTE.as_uri())});
+const ROWS = {json.dumps(rows)};
+const calls = [];
+const getFn = async (path) => {{
+  calls.push(path);
+  if (path === "/api/me") return {{ accounts: [{{ id: 9, status: "active" }}] }};
+  if (path === "/api/accounts/9/chats?limit=1000") return {{ items: ROWS }};
+  throw new Error("unexpected path: " + path);
+}};
+const out = await S.fetchPaletteChats(getFn);
+const ranked = P.rank("gor", out, (c) => c.title, 5);
+process.stdout.write(JSON.stringify({{
+  calls, out, top: ranked.length ? ranked[0].item.title : null,
+}}));
+"""
+    proc = subprocess.run(  # noqa: S603
+        [NODE, "--input-type=module", "-e", src],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=30,
+    )
+    if proc.returncode != 0:
+        raise AssertionError(f"node xatosi: {proc.stderr[-2000:]}")
+    result = json.loads(proc.stdout)
+    assert result["calls"] == ["/api/me", "/api/accounts/9/chats?limit=1000"]
+    assert result["out"] == rows
+    assert result["top"] == "Gorizont"
+
+
+def test_uz_dates_are_formatted_manually_never_negative() -> None:
+    """H2: Chromium'ning ba'zi ICU to'plamlarida `uz-UZ` uchun oy/kun nomi
+    yo'q (`Intl` "M09 15, Tue" qaytaradi) — `fmt.js` `web.fmt.*`
+    lug'atidan qo'lda tuzatadi. Nisbiy vaqt hech qachon manfiy chiqmaydi.
+    """
+    assert NODE is not None
+    en_to_uz = {
+        "Monday": "Dushanba",
+        "Tuesday": "Seshanba",
+        "Wednesday": "Chorshanba",
+        "Thursday": "Payshanba",
+        "Friday": "Juma",
+        "Saturday": "Shanba",
+        "Sunday": "Yakshanba",
+    }
+    weekday_uz = en_to_uz[date(2026, 9, 15).strftime("%A")]
+    strings = {
+        "web.fmt.now": "hozir",
+        "web.fmt.yesterday": "kecha",
+        "web.fmt.rel_minutes": "{n} daqiqa oldin",
+        "web.fmt.rel_hours": "{n} soat oldin",
+        "web.fmt.rel_days": "{n} kun oldin",
+        "web.fmt.rel_weeks": "{n} hafta oldin",
+        "web.fmt.rel_months": "{n} oy oldin",
+        "web.fmt.rel_years": "{n} yil oldin",
+        "web.fmt.month_short.9": "sen",
+        "web.fmt.month_full.9": "sentyabr",
+        f"web.fmt.weekday_full.{date(2026, 9, 15).isoweekday() % 7}": weekday_uz,
+    }
+    src = f"""
+globalThis.window = {{ TGAI: {{ lang: "uz", strings: {json.dumps(strings)} }} }};
+const F = await import({json.dumps(FMT_JS.as_uri())});
+const d = new Date(2026, 8, 15, 14, 32);   // 15-sen-2026, mahalliy vaqt
+const fixedNow = d.getTime();
+const fourWeeksAgo = new Date(fixedNow - 28 * 86400 * 1000);
+process.stdout.write(JSON.stringify({{
+  date: F.date(d),
+  dateTime: F.dateTime(d),
+  weekdayDate: F.weekdayDate(d),
+  relWeeks: F.relTime(fourWeeksAgo, fixedNow),
+  relNow: F.relTime(new Date(fixedNow - 5000), fixedNow),
+  usdZero: F.usd(0),
+  usdTiny: F.usd(0.004),
+  usdNormal: F.usd(1.5),
+}}));
+"""
+    proc = subprocess.run(  # noqa: S603
+        [NODE, "--input-type=module", "-e", src],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=30,
+    )
+    if proc.returncode != 0:
+        raise AssertionError(f"node xatosi: {proc.stderr[-2000:]}")
+    out = json.loads(proc.stdout)
+    assert out["date"] == "15 sen 2026"
+    assert out["dateTime"] == "15 sen, 14:32"
+    assert out["weekdayDate"] == f"{weekday_uz}, 15 sentyabr"
+    assert out["relWeeks"] == "4 hafta oldin"
+    assert "-" not in out["relWeeks"]
+    assert out["relNow"] == "hozir"
+    assert out["usdZero"] == "$0.00"
+    assert out["usdTiny"] == "$0.0040"
+    assert out["usdNormal"] == "$1.50"
+
+
 def test_every_js_file_parses() -> None:
     """`node --check` — har bir fayl (klassik ham, modul ham)."""
     assert NODE is not None
@@ -186,6 +308,49 @@ def files_js(base: Path) -> list[Path]:
         + sorted((base / "lib").glob("*.js"))
         + sorted((base / "pages").rglob("*.js"))
     )
+
+
+# ─── ui/R2a: `/chats` sof funksiyalari ───────────────────────────────────────
+
+CHATS_JS = STATIC / "pages/chats.js"
+
+
+def _chats_module(script: str, payload: object) -> object:
+    assert NODE is not None
+    src = (
+        f"const M = await import({json.dumps(CHATS_JS.as_uri())});\n"
+        "const { readFileSync } = await import('node:fs');\n"
+        "const INPUT = JSON.parse(readFileSync(0, 'utf8'));\n"
+        f"{script}\n"
+    )
+    proc = subprocess.run(  # noqa: S603
+        [NODE, "--input-type=module", "-e", src],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=30,
+    )
+    if proc.returncode != 0:
+        raise AssertionError(f"node xatosi: {proc.stderr[-2000:]}")
+    return json.loads(proc.stdout)
+
+
+def test_spark_path_builds_a_polyline_within_the_viewbox() -> None:
+    """M3: qator sparklayni `d` atributi — DOM'siz, sof funksiya."""
+    script = "process.stdout.write(JSON.stringify(INPUT.map((v) => M.sparkPath(v))));"
+    cases = [
+        [],
+        [0, 0, 0],
+        [1, 5, 2, 8, 0],
+        [3],
+    ]
+    out = _chats_module(script, cases)
+    assert out[0] == ""  # bo'sh — chizig'i yo'q
+    assert out[1].startswith("M") and "L" in out[1]
+    assert out[2].startswith("M0.00,")  # birinchi nuqta x=0 dan boshlanadi
+    assert out[2].count("L") == 4  # 5 nuqta = 1 M + 4 L
+    assert out[3].startswith("M24.00,")  # bitta nuqta — markazga (48/2)
 
 
 # ─── ui/R2b: `/ask` sof funksiyalari ─────────────────────────────────────────

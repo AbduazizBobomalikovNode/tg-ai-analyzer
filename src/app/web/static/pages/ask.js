@@ -13,7 +13,7 @@
  */
 
 import { ready, $ } from "../lib/dom.js";
-import { get, post } from "../lib/api.js";
+import { get } from "../lib/api.js";
 import { toastError } from "../lib/toast.js";
 import { t } from "../lib/i18n.js";
 import { S, cfg, on, applyPrefs } from "./ask/state.js";
@@ -38,7 +38,6 @@ async function boot() {
   initConversations();
   initActions();
   initSuggests();
-  wireLogout();
 
   const ok = await loadMe();
   if (!ok) return;
@@ -85,10 +84,6 @@ function conversationFromUrl() {
   return hash ? Number(hash[1]) : 0;
 }
 
-/** "More" varag'idagi chiqish tugmasi (karkas shablonidan keladi). */
-function wireLogout() {
-  $("#btn-logout-sheet")?.addEventListener("click", async () => {
-    try { await post("/api/auth/logout", {}); } catch { /* baribir chiqamiz */ }
-    location.href = "/login";
-  });
-}
+// M6/coordinator: "More" varag'idagi chiqish tugmasi endi `lib/shell.js::initLogout()`
+// tomonidan global boshqariladi — bu yerda alohida ulash **qo'shimcha** logout
+// so'roviga olib kelardi.

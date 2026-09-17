@@ -142,8 +142,14 @@ async def chats(
     account_id: int,
     ident: Annotated[WebIdentity, Depends(require_identity)],
     limit: Annotated[int, Query(ge=0, le=1000)] = 0,
+    spark: bool = False,
 ) -> dict[str, Any]:
-    """Akkauntning chat registri. `limit` — UI select'lari uchun (0 = hammasi)."""
+    """Akkauntning chat registri. `limit` — UI select'lari uchun (0 = hammasi).
+
+    `spark=1` — har chatga 14-kunlik `spark: [int, ...]` qo'shadi (ui/M3),
+    **bitta** guruhlangan so'rov bilan (`chatdata.spark_series`) — chat
+    sonicha alohida so'rov emas.
+    """
     await _own_account(ident.user_id, account_id)
     async with session_scope() as db:
         stmt = (
@@ -154,7 +160,12 @@ async def chats(
         if limit:
             stmt = stmt.limit(limit)
         rows = await db.execute(stmt)
-        items = [_chat_out(c) for c in rows.scalars().all()]
+        chat_rows = rows.scalars().all()
+        items = [_chat_out(c) for c in chat_rows]
+        if spark:
+            spark_map = await chatdata_router.spark_series(db, [c.id for c in chat_rows])
+            for it in items:
+                it["spark"] = spark_map.get(it["id"], [0] * 14)
     running = sum(1 for c in items if c["sync_state"] == "running")
     return {"items": items, "running": running}
 

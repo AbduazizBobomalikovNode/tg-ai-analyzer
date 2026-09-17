@@ -15,7 +15,7 @@ import { md, hydrate } from "/static/lib/md.js";
 import { t, has } from "/static/lib/i18n.js";
 import { get } from "/static/lib/api.js";
 import { icon } from "/static/lib/icons.js";
-import { compact, usd, relTime, plural } from "/static/lib/fmt.js";
+import { compact, usd, relTime, plural, weekdayDate } from "/static/lib/fmt.js";
 import { peerClass, initials } from "/static/lib/palette.js";
 import { toastError } from "/static/lib/toast.js";
 
@@ -31,20 +31,32 @@ function dayKey(offset = 0) {
 
 /* ── Salomlashish va sana ────────────────────────────────────────────── */
 
+/**
+ * Haqiqiy ism — `/api/me` `display_name` ustuni hozircha Telegram
+ * profilida alohida ism bo'lmasa `username` (yoki `id<tg_user_id>`) ga
+ * tushadi. Ular bilan bir xil bo'lsa **ism yo'q** deb hisoblanadi — hech
+ * qachon username/id ism sifatida "to'qib chiqarilmaydi" (L1).
+ */
+function realName(user) {
+  if (!user) return "";
+  const dn = String(user.display_name || "").trim();
+  if (!dn) return "";
+  const uname = String(user.username || "").trim();
+  if (dn === uname) return "";
+  if (user.tg_user_id != null && dn === `id${user.tg_user_id}`) return "";
+  return dn;
+}
+
 function paintGreeting(name) {
   const h = new Date().getHours();
   const part = h < 5 ? "night" : h < 12 ? "morning" : h < 18 ? "day" : "evening";
   const node = $("#today-greeting");
   if (node) node.textContent = name ? t(`web.today.greet_${part}_name`, { name }) : t(`web.today.greet_${part}`);
   const dt = $("#today-date");
-  if (dt) {
-    try {
-      dt.textContent = new Intl.DateTimeFormat(
-        { uz: "uz-UZ", ru: "ru-RU", en: "en-US" }[(window.TGAI || {}).lang] || "uz-UZ",
-        { weekday: "long", day: "numeric", month: "long" },
-      ).format(new Date());
-    } catch { dt.textContent = dayKey(); }
-  }
+  // `weekdayDate()` — Chromium'ning ba'zi ICU to'plamlarida `uz-UZ` uchun
+  // oy/kun nomi yo'q (`Intl` "M09 15, Tue" qaytaradi); `fmt.js` shu holatni
+  // `web.fmt.*` lug'atidan qo'lda tuzatadi (H2).
+  if (dt) dt.textContent = weekdayDate(new Date()) || dayKey();
 }
 
 /* ── Briefing kartasi ────────────────────────────────────────────────── */
@@ -230,8 +242,10 @@ async function loadSync(account) {
 /* ── Plitalar ────────────────────────────────────────────────────────── */
 
 function tile(href, iconName, label, value, sub) {
+  // L8: yorliq **bitta qatorda** (ellipsis) + `title` — to'liq matn hover'da
+  // ko'rinsin ("KUTAYOTGAN" / "AMALLAR" ikki qatorga bo'linib ketmasin).
   const kids = [
-    el("span.tile-k", null, [icon(iconName), label]),
+    el("span.tile-k", { title: label }, [icon(iconName), el("span", null, label)]),
     el("span.tile-v", null, value),
     sub ? el("span.tile-s", null, sub) : null,
   ];
@@ -302,7 +316,7 @@ async function main() {
   } catch (err) {
     toastError(err);
   }
-  paintGreeting((me.user && me.user.display_name) || "");
+  paintGreeting(realName(me.user));
   const account = (me.accounts || []).find((a) => a.status === "active") || (me.accounts || [])[0] || null;
   initAsk(Boolean(account && account.chats_synced));
 

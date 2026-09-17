@@ -23,8 +23,21 @@ let ticker = 0;
 
 /* ── Yordamchilar ────────────────────────────────────────────────────── */
 
-const toolLabel = (tool) => (has(`web.act.tool_${tool}`) ? t(`web.act.tool_${tool}`) : tool);
+/** M6: har bir tool (`services/tools.py` READ_TOOLS + yozish tool'lari)
+ * uchun `web.tools.<name>` — kalit yo'q bo'lsa "_" → bo'sh joy (`search_messages`
+ * → "search messages"), xom snake_case ko'rsatilmaydi. */
+const toolLabel = (tool) => (has(`web.tools.${tool}`) ? t(`web.tools.${tool}`) : String(tool).replace(/_/g, " "));
 const statusLabel = (s) => (has(`web.act.status_${s}`) ? t(`web.act.status_${s}`) : s);
+
+/**
+ * M6: `services/agent.py` bir xil tool ketma-ket `MAX_CALLS_PER_TOOL` marta
+ * chaqirilsa uni **bajarmaydi** — bu chindan xato emas, agent boshqa yo'l
+ * bilan davom etadi ("to'silgan chaqiruv", `CLAUDE.md`). Bunday yozuv
+ * append-only `agent_actions`ga baribir `status=failed` + muhandislik
+ * izohi (`error`) bilan tushadi — UI'da buni alohida, tinch ko'rsatamiz.
+ */
+const BLOCKED_NOTE_RE = /^note: /i;
+const isBlockedNote = (a) => a.status === "failed" && typeof a.error === "string" && BLOCKED_NOTE_RE.test(a.error);
 
 /** `expires_at` → "12:04 qoldi" ko'rinishidagi matn (yoki muddati o'tgan). */
 function ttlText(expiresAt) {
@@ -51,14 +64,15 @@ function badgeCount(n) {
 function actionCard(a, { actionable }) {
   const p = a.preview || {};
   const kids = [];
+  const blocked = isBlockedNote(a);
 
   kids.push(el("div.action-head", null, [
     icon(a.tool === "forward_message" ? "share-2" : a.tool === "pin_message" ? "pin" : a.tool === "edit_message" ? "edit-3" : "send"),
     el("span.action-tool", null, toolLabel(a.tool)),
     el("span.action-chat", null, p.chat || (p.chat_id != null ? `#${p.chat_id}` : "")),
     el("span.spacer", { style: { flex: "1 1 auto" } }),
-    el(`span.pill${a.status === "executed" ? ".ok" : a.status === "proposed" ? ".accent" : a.status === "confirmed" ? ".accent" : ".err"}`,
-      null, statusLabel(a.status)),
+    el(`span.pill${blocked ? ".warn" : a.status === "executed" ? ".ok" : a.status === "proposed" ? ".accent" : a.status === "confirmed" ? ".accent" : ".err"}`,
+      null, blocked ? t("web.actions.blocked_pill") : statusLabel(a.status)),
   ]));
 
   if (p.image_url) {
@@ -74,7 +88,7 @@ function actionCard(a, { actionable }) {
   }
   if (a.result_msg_id) meta.push(el("span", null, `${t("web.act.result")} #${a.result_msg_id}`));
   if (a.confirmed_at && a.status !== "proposed") meta.push(el("span", null, relTime(a.confirmed_at)));
-  if (a.error) meta.push(el("span", null, a.error));
+  if (a.error) meta.push(el("span", null, blocked ? t("web.actions.blocked_note") : a.error));
   if (a.block_reason) meta.push(el("span", null, a.block_reason));
   if (meta.length) kids.push(el("div.action-meta", null, meta));
 

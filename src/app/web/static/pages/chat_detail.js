@@ -28,6 +28,7 @@ import {
   me, pickAccount, rememberAccount, pushRecentChat,
   avatarEl, typeLabel, flagNodes, syncLabel,
   askHref, alertsHref, WRITE_MODES, writeModeLabel,
+  buildChatMenu, openChatMenu,
 } from "./chat_shared.js";
 
 const RANGES = [14, 30, 90];
@@ -76,13 +77,26 @@ function bioNode(about) {
   return el("div.cd-bio", null, [p, btn]);
 }
 
+/**
+ * M8: server/klient soat farqi (yoki eskirgan keshdan kelgan sana) tufayli
+ * `last_sync_at` "kelajakda" ko'rinishi mumkin — shunda `relTime` "N soniyadan
+ * keyin" deb ko'rsatardi, garchi sync allaqachon tugagan bo'lsa ham. O'tgan
+ * vaqt **manfiy bo'lmasin** (`Math.max`) — pill hech qachon "keyin" demaydi.
+ */
+function syncedAgo(v) {
+  const t0 = new Date(v).getTime();
+  if (Number.isNaN(t0)) return relTime(v);
+  const elapsedMs = Math.max(0, Date.now() - t0);
+  return relTime(Date.now() - elapsedMs);
+}
+
 function syncNode(chat) {
   const stateName = chat.sync_state || "idle";
   const cls = stateName === "running" ? "running" : stateName === "failed" ? "failed"
     : (stateName === "done" || (chat.synced_total || 0) > 0) ? "done" : "";
   const bits = [syncLabel(chat)];
   if ((chat.synced_total || 0) > 0) bits.push(plural("web.n.messages", chat.synced_total));
-  if (chat.last_sync_at) bits.push(relTime(chat.last_sync_at));
+  if (chat.last_sync_at) bits.push(syncedAgo(chat.last_sync_at));
 
   const row = el("div.cd-sync", { id: "cd-sync" }, [
     el(`span.sync-pill${cls ? `.${cls}` : ""}`, null, bits.join(" · ")),
@@ -211,11 +225,20 @@ function overviewCard(s) {
     kpi(t("web.chats.kpi_forwards"), compact(s.forwards_sum)),
     kpi(t("web.chats.kpi_replies"), compact(s.replies_sum)),
   ]);
+  // M8: snapshot yo'q bo'lsa sparkline hammasi ~0% balandlikda — tekis,
+  // chiziqli chizilgan bo'lib ko'rinadi va "ma'lumot bor, lekin kichik" deb
+  // o'qiladi. Buning o'rniga aniq bo'sh holat: `.empty-v2`.
+  const noSnapshots = !s.snapshot_coverage;
   const delta = el("div.kpi.wide", null, [
     el("div.kpi-label", null, t("web.chats.kpi_views_delta")),
     el("div.kpi-value", null, s.views_delta_period == null ? "—" : compact(s.views_delta_period)),
-    sparkNode(s.series),
-    el("div.kpi-sub", null, t("web.chats.kpi_delta_note", { n: num(s.snapshot_coverage || 0) })),
+    noSnapshots
+      ? el("div.empty-v2", null, [
+          el("span.empty-ico", { "aria-hidden": "true" }, icon("bar-chart-3")),
+          el("p", null, t("web.chats.no_snapshots")),
+        ])
+      : sparkNode(s.series),
+    noSnapshots ? null : el("div.kpi-sub", null, t("web.chats.kpi_delta_note", { n: num(s.snapshot_coverage || 0) })),
   ]);
   grid.appendChild(delta);
   return card("overview", t("web.chats.tab_overview"), [grid], true);
@@ -359,12 +382,31 @@ function sectionChips(ids) {
 
 /* ── chizish ───────────────────────────────────────────────────────── */
 
+/**
+ * M9: `digestsCard()` asinxron — u tugaguncha `render()` yana chaqirilishi
+ * mumkin (masalan `rangeSwitch` bosilishi yoki sync `done` hodisasi). Eski
+ * chaqiruv o'zining (endi DOM'dan uzilgan) `sections` tuguniga
+ * `insertBefore` qilishga urinsa, u global `$("#cd-members")` ORQALI
+ * **yangi** render'ning tugunini topib, begona daraxtga qo'shishga
+ * urinardi — `NotFoundError`. Yechim: (1) `renderGen` — faqat oxirgi
+ * chaqiruv natijasi qo'llanadi; (2) qidiruv `sections` ichida (global
+ * emas) — o'zining daraxtidan chiqmaydi; (3) `root.replaceChildren` —
+ * bitta atomik almashtirish, oraliq holat yo'q.
+ */
+let renderGen = 0;
+
 function render() {
+  const gen = ++renderGen;
   const chat = state.chat;
   const s = state.stats;
-  clear(root);
-  root.setAttribute("aria-busy", "false");
-  root.appendChild(headerNode(chat));
+
+  const titleEl = $("#cd-topbar-title");
+  if (titleEl) titleEl.textContent = chat.title || t("web.chats.title");
+  const menuBtn = $("#cd-menu");
+  if (menuBtn) menuBtn.hidden = false;
+
+  const frag = document.createDocumentFragment();
+  frag.appendChild(headerNode(chat));
 
   const ids = [
     ["overview", t("web.chats.tab_overview")],
@@ -373,7 +415,7 @@ function render() {
     ["digests", t("web.chats.tab_digests")],
     ["members", t("web.chats.tab_members")],
   ];
-  root.appendChild(sectionChips(ids));
+  frag.appendChild(sectionChips(ids));
 
   const sections = el("div.cd-sections", { id: "cd-sections" });
   if (s) {
@@ -386,10 +428,14 @@ function render() {
       ? `${plural("web.n.members", chat.participants_count)} · ${t("web.chats.members_note")}`
       : t("web.chats.members_note")),
   ], false));
-  root.appendChild(sections);
+  frag.appendChild(sections);
+
+  root.replaceChildren(frag);
+  root.setAttribute("aria-busy", "false");
 
   digestsCard().then((node) => {
-    const members = $("#cd-members");
+    if (gen !== renderGen) return;               // eskirgan render — tashlanadi
+    const members = sections.querySelector("#cd-members");   // shu daraxt ichida, global emas
     if (members) sections.insertBefore(node, members);
     else sections.appendChild(node);
   });
@@ -407,6 +453,27 @@ async function loadStats() {
 
 /* ── kirish nuqtasi ────────────────────────────────────────────────── */
 
+/**
+ * H4: topbar'dagi `‹` — brauzer tarixi (yo'q bo'lsa `/chats`). Telegram
+ * ichida `backButton(true)` (pastda) allaqachon o'z tugmasini ko'rsatadi —
+ * ikkalasi mustaqil, biri boshqasini almashtirmaydi.
+ */
+function wireTopbar() {
+  $("#cd-back")?.addEventListener("click", () => {
+    if (window.history.length > 1) window.history.back();
+    else window.location.href = "/chats";
+  });
+  $("#cd-menu")?.addEventListener("click", (e) => {
+    const chat = state.chat;
+    if (!chat) return;
+    const menu = buildChatMenu(chat, {
+      alertsUrl: alertsHref(chat.id),
+      onSync: () => { startSync(); close(); },
+    });
+    const close = openChatMenu(menu, e.currentTarget);
+  });
+}
+
 /** @param {{chatId: number}} opts */
 export async function initChatDetail(opts) {
   root = $("#chat-detail");
@@ -414,6 +481,7 @@ export async function initChatDetail(opts) {
   state.chatId = Number(opts.chatId || 0);
   if (!state.chatId) return;
 
+  wireTopbar();
   if (isMobile()) backButton(true);
 
   let data;

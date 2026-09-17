@@ -23,15 +23,10 @@
 .onb-nav { display: flex; gap: var(--s-2); align-items: center; flex-wrap: wrap; }
 .onb-nav .spacer { flex: 1 1 auto; }
 
-/* ── 2-qadam: "nimani o'qiymiz" ishonch kartasi ──────────────────────── */
-.consent-list { display: grid; gap: var(--s-2); margin: 0; padding: 0; list-style: none; }
-.consent-list li {
-  display: flex; gap: var(--s-3); align-items: flex-start;
-  font-size: var(--fs-sm); line-height: var(--lh-body);
-}
-.consent-list .icon { flex: none; margin-block-start: 2px; }
-.consent-list .yes .icon { color: var(--ok); }
-.consent-list .no .icon { color: var(--danger); }
+/* `.consent-list` — `css/components.css` ga ko'chdi (R2C ulashiladigan
+ * blok): `/settings` ham xuddi shu sinfni ishlatadi (maxfiylik bo'limi),
+ * faqat shu fayl yuklanganda ikkinchisida standart `<ul>` nuqtasi +
+ * sprite ikonka qo'shilib "ikkilangan belgi" chiqardi. */
 
 /* ── 3-qadam: sync progressi ─────────────────────────────────────────── */
 .onb-counts { display: flex; gap: var(--s-2); flex-wrap: wrap; }

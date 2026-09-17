@@ -358,6 +358,45 @@ async def chat_statistics(
     return data
 
 
+async def spark_series(
+    db: AsyncSession, chat_ids: list[int], *, days: int = 14
+) -> dict[int, list[int]]:
+    """`/chats` qatori sparklayni uchun — **bitta** guruhlangan so'rov, hamma
+    chat uchun birdan (M3). `chats.py` `?spark=1` bilan so'raganda chaqiradi.
+
+    Har chat uchun alohida so'rov yubormaymiz — bu 100+ qatorli ro'yxatda
+    100+ ta SQL so'rovga aylanardi. `deleted_at IS NULL` — o'chirilgan
+    xabarlar hisobga kirmaydi (0015'dagi qoida bilan bir xil).
+    """
+    if not chat_ids:
+        return {}
+    until = datetime.now(UTC)
+    since = until - timedelta(days=days)
+    day = func.date_trunc("day", Message.published_at).label("day")
+    rows = (
+        await db.execute(
+            select(Message.chat_id, day, func.count(Message.id))
+            .where(
+                Message.chat_id.in_(chat_ids),
+                Message.deleted_at.is_(None),
+                Message.published_at >= since,
+                Message.published_at < until,
+            )
+            .group_by(Message.chat_id, day)
+        )
+    ).all()
+    per_chat: dict[int, dict[str, int]] = {}
+    for chat_id, day_val, cnt in rows:
+        per_chat.setdefault(int(chat_id), {})[day_val.date().isoformat()] = int(cnt or 0)
+    out: dict[int, list[int]] = {}
+    for chat_id in chat_ids:
+        found = per_chat.get(int(chat_id), {})
+        out[int(chat_id)] = [
+            found.get((since + timedelta(days=i + 1)).date().isoformat(), 0) for i in range(days)
+        ]
+    return out
+
+
 async def _series(db: AsyncSession, chat_id: int, *, days: int) -> list[dict[str, Any]]:
     """Kun bo'yicha: postlar soni va ko'rishlar yig'indisi (bo'sh kunlar ham bor).
 

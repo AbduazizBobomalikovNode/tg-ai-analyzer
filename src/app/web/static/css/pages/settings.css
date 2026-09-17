@@ -41,6 +41,9 @@
 .chat-modes { display: grid; gap: var(--s-1); max-block-size: 420px; overflow: auto; }
 .chat-modes .row-item select { inline-size: auto; min-inline-size: 160px; }
 
+/* L5: "Chiqish" — Maxfiylik bo'limidagi to'liq kengliqdagi destruktiv qator. */
+#set-logout { inline-size: 100%; }
+
 .tz-list { max-block-size: 0; overflow: hidden; }
 
 @media (min-width: 861px) {

@@ -56,7 +56,13 @@
 }
 .field-icon input:focus { outline: none; }
 .field-inline { display: flex; align-items: center; gap: var(--s-2); min-inline-size: 0; }
-.field-inline select { flex: 1 1 auto; min-inline-size: 0; }
+/* L4: uzun akkaunt nomi ro'yxat panelida kesilib chiqib ketardi — endi
+   qisqaradi (ellipsis), to'liq nom `title` (`pages/ask/conversations.js`
+   `sel.title`ni to'ldiradi) orqali hover'da ko'rinadi. */
+.field-inline select {
+  flex: 1 1 auto; min-inline-size: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 
 .conv-list { flex: 1 1 auto; overflow: auto; margin: 0; padding: var(--s-2); list-style: none; }
 .conv-empty { padding: var(--s-4); color: var(--muted); font-size: var(--fs-sm); text-align: center; }
@@ -335,7 +341,10 @@
 .composer-tools .spacer { flex: 1 1 auto; }
 .chip.tool { display: inline-flex; align-items: center; gap: var(--s-1); }
 .chip.tool.is-on { background: var(--accent-soft); color: var(--accent-text); border-color: var(--accent); }
-.send-btn { display: inline-flex; align-items: center; gap: var(--s-2); }
+/* Global `.btn.primary{width:100%}` olib tashlangach (A) tugma o'z
+   matni kengligida qoladi — `.spacer` uni o'ngga suradi, `flex:none`
+   esa `width:100%` kelib qolsa ham qatorni bosib ketmasin. */
+.send-btn { display: inline-flex; align-items: center; gap: var(--s-2); flex: none; inline-size: auto; }
 
 /* ══ Varaq mazmuni ════════════════════════════════════════════════ */
 .sheet-head { display: flex; align-items: center; gap: var(--s-2); padding-block-end: var(--s-2); }

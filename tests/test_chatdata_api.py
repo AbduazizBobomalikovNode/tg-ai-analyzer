@@ -342,6 +342,51 @@ def test_digests_are_capped(api: TestClient) -> None:
     assert api.get(f"/api/accounts/{ACC_ID}/chats/{CHAT_ID}/digests?days=90").status_code == 422
 
 
+class _SparkSession:
+    """`spark_series` uchun minimal soxta sessiya — bitta so'rov, tuple qatorlar."""
+
+    def __init__(self, rows: list[Any]) -> None:
+        self.rows = rows
+        self.stmt: Any = None
+
+    async def execute(self, stmt: Any) -> Any:
+        self.stmt = stmt
+        rows = self.rows
+
+        class _R:
+            def all(self) -> list[Any]:
+                return rows
+
+        return _R()
+
+
+async def test_spark_series_is_one_grouped_query() -> None:
+    """M3: bitta so'rov, `deleted_at IS NULL` + guruhlangan chat_id/kun."""
+    from datetime import UTC, datetime, timedelta
+
+    today = datetime.now(UTC)
+    rows = [(1, today - timedelta(days=1), 3), (2, today, 5)]
+    session = _SparkSession(rows)
+
+    out = await CD.spark_series(session, [1, 2, 3], days=14)
+
+    assert set(out) == {1, 2, 3}
+    assert all(len(v) == 14 for v in out.values())
+    assert sum(out[1]) == 3 and sum(out[2]) == 5 and sum(out[3]) == 0
+
+    sql = str(session.stmt).lower()
+    assert "group by" in sql
+    assert "deleted_at is null" in sql
+    assert "chat_id" in sql
+
+
+async def test_spark_series_empty_chat_ids_skips_query() -> None:
+    session = _SparkSession([])
+    out = await CD.spark_series(session, [], days=14)
+    assert out == {}
+    assert session.stmt is None
+
+
 def test_chat_detail_has_sync_block(api: TestClient) -> None:
     api.cookies.set(sec.SESSION_COOKIE, sec.issue_session(USER_ID))
     body = api.get(f"/api/accounts/{ACC_ID}/chats/{CHAT_ID}").json()

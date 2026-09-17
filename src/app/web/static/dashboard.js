@@ -46,6 +46,13 @@
       lbl.textContent = fmt((max * i) / 3); svg.appendChild(lbl);
     }
     const slot = iw / n, bw = Math.max(2, Math.min(18, slot * 0.7));
+    // M7: avval "har 8-chidan bittasi" + "oxirgisi majburiy" ikkalasi ham
+    // ko'rsatilardi — ular yonma-yon (bir-ikki ustun farqi) tushib qolsa
+    // matnlari bir-birining ustiga chiqib ketardi. Endi — ustunlar orasidagi
+    // masofa **kamida** yorliq kengligicha (`floor(width/64)` maksimal
+    // yorliq soni), oxirgisini majburiy chiqarish yo'q.
+    const maxLabels = Math.max(2, Math.floor(iw / 64));
+    const labelStep = Math.max(1, Math.ceil(n / maxLabels));
     days.forEach((d, i) => {
       const x = padL + i * slot + (slot - bw) / 2;
       let yBase = padT + ih;
@@ -64,7 +71,7 @@
         if (stacked) yBase = y - 2;
         parts.push(v);
       });
-      if (n <= 31 && (i % Math.ceil(n / 8) === 0 || i === n - 1)) {
+      if (n <= 31 && i % labelStep === 0) {
         const tx = g("text", { x: x + bw / 2, y: H - 6, "text-anchor": "middle", "font-size": 10, fill: cssVar("--muted") });
         tx.textContent = d.day.slice(5); svg.appendChild(tx);
       }

@@ -483,7 +483,11 @@ stream(path, body, onEvent, {signal?}) -> Promise<void>
 // fmt.js
 num(n, opts?);  compact(n);  pct(x, digits?);  usd(x);  ms(v);  bytes(b)
 dateTime(v);  date(v);  time(v);  relTime(v, now?);  listDate(v, now?)
+weekdayDate(v) -> string               // "Dushanba, 15 sentyabr" (bugungi sarlavha)
 plural(key, n, vars?) -> string        // Intl.PluralRules
+// oy/kun/nisbiy-vaqt matnlari `lang()==="uz"` da `web.fmt.*` lug'atidan
+// (Chromium'ning ba'zi ICU to'plamlarida `uz-UZ` uchun bu nomlar yo'q —
+// `Intl.DateTimeFormat` "M09"/"Tue" qaytaradi); ru/en hamon `Intl` orqali.
 
 // icons.js
 icon(name, {label?, cls?, size?}) -> SVGElement

@@ -215,7 +215,6 @@ button { -webkit-tap-highlight-color: transparent; }
 .btn:disabled { opacity: .5; cursor: not-allowed; transform: none; }
 
 .btn.primary {
-  width: 100%;
   background: var(--accent); border-color: transparent; color: var(--accent-ink);
   font-weight: 600; box-shadow: var(--sh-2);
 }

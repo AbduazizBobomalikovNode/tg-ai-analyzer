@@ -52,12 +52,16 @@
   padding: 1px 5px; background: var(--panel-2); pointer-events: none;
 }
 
-.chats-filters {
-  display: flex; align-items: center; gap: var(--s-2);
+/* M1: qopqoqqa tegganda gorizontal scroll o'rniga qatorga tushadi — aks
+   holda "Sinxronlanmagan" chipi ko'rinmasdan yon tomonga chiqib ketardi
+   (yashirin boshqaruv). Segment o'z ichida siljiydi, chip esa torlikda
+   butun qatorni oladi. */
+.chats-filters { display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap; }
+.chats-filters .segment {
+  flex: none; max-inline-size: 100%;
   overflow-x: auto; scrollbar-width: none;
 }
-.chats-filters::-webkit-scrollbar { display: none; }
-.chats-filters .segment { flex: none; }
+.chats-filters .segment::-webkit-scrollbar { display: none; }
 .chip-toggle {
   flex: none;
   min-block-size: 32px; padding-inline: var(--s-3);
@@ -70,6 +74,10 @@
 .chip-toggle .icon { inline-size: 14px; block-size: 14px; }
 .chip-toggle[aria-pressed="true"] {
   background: var(--accent-soft); color: var(--accent-text); border-color: transparent;
+}
+/* Torroq ekranda segment + chip yonma-yon sig'maydi — chip o'z qatoriga tushadi. */
+@media (max-width: 520px) {
+  .chats-filters .chip-toggle { flex: 1 1 100%; justify-content: center; }
 }
 
 /* ══ Qatorlar ═════════════════════════════════════════════════════════ */
@@ -128,6 +136,15 @@
   background: var(--accent); color: var(--accent-ink);
   font-size: 10.5px; font-weight: 700; line-height: 1;
 }
+/* M3: 14-kunlik trend — inline SVG (kutubxonasiz), `--accent` rangida. */
+.row-spark { flex: none; inline-size: 48px; block-size: 16px; color: var(--accent); }
+
+.member-badge {
+  padding: 1px var(--s-2); border-radius: var(--r-full, 999px);
+  background: var(--panel-3); color: var(--faint);
+  font-size: 10.5px; font-weight: 600;
+}
+
 .sync-dot {
   inline-size: 8px; block-size: 8px; border-radius: 50%; flex: none;
   background: var(--stage-idle);
@@ -204,6 +221,12 @@
 
 /* ══ Tafsilot ═════════════════════════════════════════════════════════ */
 
+/* H4: `/chats/{id}` topbar'i — `‹` orqaga (mobilda), sarlavha, `⋯` menyu.
+   `.topbar-v2` (components.css) safe-area padding'ini o'zi qo'shadi. */
+.cd-topbar-title { flex: 1 1 auto; min-inline-size: 0; }
+.cd-back { display: none; }
+@media (max-width: 860px) { .cd-back { display: inline-flex; } }
+
 .chat-detail { padding: var(--s-4); display: grid; gap: var(--s-4); }
 .cd-cover { display: flex; gap: var(--s-4); align-items: flex-start; }
 .cd-cover .avatar { --avatar-size: 64px; }
@@ -271,6 +294,14 @@
 .kpi-value { font-size: var(--fs-xl); font-weight: 700; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
 .kpi-sub { font-size: var(--fs-xs); color: var(--faint); }
 .kpi.wide { grid-column: span 2; }
+/* M8: snapshot yo'q bo'lganda kartaning o'zi `.empty-v2` — lekin katta
+   sahifa bo'sh holatiga qaraganda ixcham (bu shunchaki bitta KPI plitasi). */
+.kpi.wide .empty-v2 {
+  padding: var(--s-2) 0; gap: var(--s-1); max-inline-size: none;
+}
+.kpi.wide .empty-v2 .empty-ico { inline-size: 32px; block-size: 32px; }
+.kpi.wide .empty-v2 .empty-ico .icon { inline-size: 16px; block-size: 16px; }
+.kpi.wide .empty-v2 p { font-size: var(--fs-xs); }
 
 /* Sparkline — SVG emas, sof CSS ustunchalar (kutubxona yo'q) */
 .spark { display: flex; align-items: flex-end; gap: 1px; block-size: 34px; }

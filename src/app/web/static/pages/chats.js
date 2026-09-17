@@ -14,19 +14,20 @@
  *     o'tadi — aks holda foydalanuvchi ko'rmagan chatni izlay olmaydi.
  */
 
-import { $, el, clear, replace, debounce, trapFocus } from "../lib/dom.js";
+import { $, el, clear, replace, debounce } from "../lib/dom.js";
 import { icon, iconButton } from "../lib/icons.js";
 import { t } from "../lib/i18n.js";
 import { get, post, patch as apiPatch } from "../lib/api.js";
 import { toast, toastError } from "../lib/toast.js";
 import { rank } from "../lib/palette.js";
-import { compact, listDate, plural } from "../lib/fmt.js";
+import { compact, listDate, relTime } from "../lib/fmt.js";
 import { inEditable } from "../lib/keys.js";
 import { haptic } from "../lib/tg.js";
 import {
   me, pickAccount, rememberAccount, prefs, savePrefs,
   avatarEl, syncDot, syncLabel, typeLabel, flagNodes, highlight,
-  chatHref, askHref, alertsHref, WRITE_MODES, writeModeLabel,
+  chatHref, askHref, alertsHref, writeModeLabel,
+  buildChatMenu, openChatMenu,
 } from "./chat_shared.js";
 
 /** Bir "sahifa" — shuncha qator chiziladi, keyin sentinel kutadi. */
@@ -135,10 +136,51 @@ function buildEntries() {
 
 /* ── qator ─────────────────────────────────────────────────────────── */
 
+/** Subtitle = oxirgi xabar matni, aks holda oxirgi faollik nisbiy vaqti (M3). */
 function subtitleOf(c) {
   if (c.last_message_text) return String(c.last_message_text).replace(/\s+/g, " ").slice(0, 160);
-  if (c.participants_count) return plural("web.n.members", c.participants_count);
+  if (c.last_message_at) return relTime(c.last_message_at);
   return syncLabel(c);
+}
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+/**
+ * 14-kunlik trend chizig'i (`d` atributi) — pure funksiya, DOM'siz.
+ * `values` bo'sh bo'lsa bo'sh satr. Bitta nuqta bo'lsa markazga qo'yiladi.
+ */
+export function sparkPath(values, w = 48, h = 16) {
+  const vals = (values || []).map((v) => Number(v) || 0);
+  if (!vals.length) return "";
+  const max = Math.max(1, ...vals);
+  const n = vals.length;
+  const stepX = n > 1 ? w / (n - 1) : 0;
+  const pts = vals.map((v, i) => {
+    const x = n > 1 ? i * stepX : w / 2;
+    const y = h - (v / max) * h;
+    return `${x.toFixed(2)},${y.toFixed(2)}`;
+  });
+  return `M${pts.join(" L")}`;
+}
+
+/** 48×16 inline SVG — qator sparkline'i. `values` yo'q/bo'sh bo'lsa `null`. */
+function rowSpark(values) {
+  if (!values || !values.length) return null;
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("class", "row-spark");
+  svg.setAttribute("viewBox", "0 0 48 16");
+  svg.setAttribute("width", "48");
+  svg.setAttribute("height", "16");
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", t("web.chats.spark_alt", { n: values.length }));
+  const path = document.createElementNS(SVG_NS, "path");
+  path.setAttribute("d", sparkPath(values));
+  path.setAttribute("fill", "none");
+  path.setAttribute("stroke", "currentColor");
+  path.setAttribute("stroke-width", "1.5");
+  path.setAttribute("vector-effect", "non-scaling-stroke");
+  svg.appendChild(path);
+  return svg;
 }
 
 function rowNode(chat, positions) {
@@ -164,11 +206,13 @@ function rowNode(chat, positions) {
 
   const side = el("span.chat-side", null, [
     el("span.chat-side-row", null, [
+      rowSpark(chat.spark),
       chat.last_message_at ? el("span", null, listDate(chat.last_message_at)) : null,
       syncDot(chat),
     ]),
     el("span.chat-side-row", null, [
       el("span.type-badge", null, typeLabel(chat.type)),
+      chat.participants_count ? el("span.member-badge", null, compact(chat.participants_count)) : null,
       chat.unread_count ? el("span.unread-pill", null, compact(chat.unread_count)) : null,
     ]),
   ]);
@@ -279,59 +323,20 @@ function renderSelbar() {
 
 /* ── kontekst menyusi ──────────────────────────────────────────────── */
 
-let closeMenu = null;
-
-function menuItem(iconName, label, onclick, extra) {
-  return el("button", { type: "button", onclick, ...(extra || {}) }, [icon(iconName), label]);
-}
-
+/** Menyu qurilishi va joylashtirilishi — `chat_shared.js::buildChatMenu`/`openChatMenu`
+ * (`/chats/{id}` topbar'idagi ⋯ bilan bitta manba). */
 function openMenu(chat, anchor) {
-  closeMenu?.();
   const id = Number(chat.id);
   const pinned = state.pinned.map(Number).includes(id);
-  const alerts = alertsHref(id);
-
-  const menu = el("div.ctx-menu", { role: "menu", "aria-label": t("web.chats.menu") });
-  const body = () => {
-    clear(menu);
-    menu.append(
-      el("a", { href: askHref([id]), role: "menuitem" }, [icon("sparkles"), t("web.chats.ask")]),
-      menuItem("refresh-cw", t("web.chats.sync"), () => { syncChat(id); closeMenu(); }, { role: "menuitem" }),
-      menuItem(pinned ? "pin-off" : "pin", pinned ? t("web.chats.unpin") : t("web.chats.pin"),
-        () => { togglePin(id, !pinned); closeMenu(); }, { role: "menuitem" }),
-      alerts ? el("a", { href: alerts, role: "menuitem" }, [icon("bell"), t("web.chats.alerts")]) : null,
-      el("div.ctx-sec", { role: "presentation" }, t("web.chats.write_mode")),
-      ...WRITE_MODES.map((mode) => menuItem(
-        chat.write_mode === mode ? "check" : "chevron-right",
-        writeModeLabel(mode),
-        () => { setWriteMode(chat, mode); closeMenu(); },
-        { role: "menuitemradio", "aria-checked": String(chat.write_mode === mode) },
-      )),
-    );
-  };
-  body();
-
-  document.body.appendChild(menu);
-  const r = anchor.getBoundingClientRect();
-  const w = menu.offsetWidth || 220, h = menu.offsetHeight || 260;
-  menu.style.insetInlineStart = `${Math.max(8, Math.min(window.innerWidth - w - 8, r.left - w + r.width))}px`;
-  menu.style.insetBlockStart = `${Math.max(8, Math.min(window.innerHeight - h - 8, r.bottom + 6))}px`;
-
-  const untrap = trapFocus(menu);
-  const onDown = (e) => { if (!menu.contains(e.target)) closeMenu(); };
-  const onKey = (e) => { if (e.key === "Escape") { e.stopPropagation(); closeMenu(); } };
-  document.addEventListener("mousedown", onDown, true);
-  document.addEventListener("keydown", onKey, true);
-  menu.querySelector("a,button")?.focus();
-
-  closeMenu = () => {
-    document.removeEventListener("mousedown", onDown, true);
-    document.removeEventListener("keydown", onKey, true);
-    untrap();
-    menu.remove();
-    closeMenu = null;
-    anchor.focus?.();
-  };
+  let close = null;
+  const menu = buildChatMenu(chat, {
+    pinned,
+    alertsUrl: alertsHref(id),
+    onSync: () => { syncChat(id); close(); },
+    onPin: (next) => { togglePin(id, next); close(); },
+    onWriteMode: (mode) => { setWriteMode(chat, mode); close(); },
+  });
+  close = openChatMenu(menu, anchor);
 }
 
 /* ── amallar ───────────────────────────────────────────────────────── */
@@ -405,7 +410,8 @@ function banner(kind, text, action) {
 }
 
 async function loadChats() {
-  const data = await get(`/api/accounts/${state.accountId}/chats?limit=${FETCH_LIMIT}`);
+  // `spark=1` — 14-kunlik trend (M3), bitta guruhlangan so'rov bilan (chatdata.py::spark_series).
+  const data = await get(`/api/accounts/${state.accountId}/chats?limit=${FETCH_LIMIT}&spark=1`);
   state.rows = data.items || [];
   state.truncated = state.rows.length >= FETCH_LIMIT;
   // ⌘K palitrasi shu ro'yxatdan oziqlanadi (qo'shimcha so'rov yo'q).

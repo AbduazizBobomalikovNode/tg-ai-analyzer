@@ -10,7 +10,7 @@
  * hammasi `el()` / `textContent` orqali chiziladi.
  */
 
-import { el } from "../lib/dom.js";
+import { el, trapFocus } from "../lib/dom.js";
 import { icon } from "../lib/icons.js";
 import { t } from "../lib/i18n.js";
 import { get, put } from "../lib/api.js";
@@ -185,3 +185,74 @@ export const WRITE_MODES = ["read_only", "write_with_confirm", "autonomous"];
 
 export const writeModeLabel = (mode) =>
   t(`web.chats.wm_${mode === "write_with_confirm" ? "confirm" : mode === "autonomous" ? "autonomous" : "read_only"}`);
+
+/* ── kontekst menyusi (`/chats` qatori va `/chats/{id}` topbar'i — bitta manba) ── */
+
+function menuItemEl(iconName, label, onclick, extra) {
+  return el("button", { type: "button", onclick, ...(extra || {}) }, [icon(iconName), label]);
+}
+
+/**
+ * Chatga oid amallar menyusi. Har bir amal ixtiyoriy — chaqiruvchi
+ * bermagan callback'ning bandi chizilmaydi (masalan `/chats/{id}` topbar'i
+ * pin'ni ko'rsatmaydi, chunki u yerda `pinned` ro'yxati yuklanmagan).
+ *
+ * @param {object} chat
+ * @param {{pinned?: boolean, alertsUrl?: string|null,
+ *          onSync?: () => void, onPin?: (next: boolean) => void,
+ *          onWriteMode?: (mode: string) => void}} opts
+ */
+export function buildChatMenu(chat, opts = {}) {
+  const { pinned = false, alertsUrl, onSync, onPin, onWriteMode } = opts;
+  const items = [
+    el("a", { href: askHref([chat.id]), role: "menuitem" }, [icon("sparkles"), t("web.chats.ask")]),
+  ];
+  if (onSync) items.push(menuItemEl("refresh-cw", t("web.chats.sync"), onSync, { role: "menuitem" }));
+  if (onPin) {
+    items.push(menuItemEl(pinned ? "pin-off" : "pin", pinned ? t("web.chats.unpin") : t("web.chats.pin"),
+      () => onPin(!pinned), { role: "menuitem" }));
+  }
+  if (alertsUrl) items.push(el("a", { href: alertsUrl, role: "menuitem" }, [icon("bell"), t("web.chats.alerts")]));
+  if (onWriteMode) {
+    items.push(el("div.ctx-sec", { role: "presentation" }, t("web.chats.write_mode")));
+    for (const mode of WRITE_MODES) {
+      items.push(menuItemEl(chat.write_mode === mode ? "check" : "chevron-right", writeModeLabel(mode),
+        () => onWriteMode(mode), { role: "menuitemradio", "aria-checked": String(chat.write_mode === mode) }));
+    }
+  }
+  return el("div.ctx-menu", { role: "menu", "aria-label": t("web.chats.menu") }, items);
+}
+
+let _closeChatMenu = null;
+
+/**
+ * Menyuni `anchor` yonida ochadi: joylashtirish, fokus tuzog'i, tashqi
+ * bosish/`Escape` bilan yopish. Bir vaqtda faqat bitta menyu ochiq
+ * turadi. `close()` funksiyasini qaytaradi.
+ */
+export function openChatMenu(menu, anchor) {
+  _closeChatMenu?.();
+  document.body.appendChild(menu);
+  const r = anchor.getBoundingClientRect();
+  const w = menu.offsetWidth || 220, h = menu.offsetHeight || 260;
+  menu.style.insetInlineStart = `${Math.max(8, Math.min(window.innerWidth - w - 8, r.left - w + r.width))}px`;
+  menu.style.insetBlockStart = `${Math.max(8, Math.min(window.innerHeight - h - 8, r.bottom + 6))}px`;
+
+  const untrap = trapFocus(menu);
+  const onDown = (e) => { if (!menu.contains(e.target)) close(); };
+  const onKey = (e) => { if (e.key === "Escape") { e.stopPropagation(); close(); } };
+  document.addEventListener("mousedown", onDown, true);
+  document.addEventListener("keydown", onKey, true);
+  menu.querySelector("a,button")?.focus();
+
+  function close() {
+    document.removeEventListener("mousedown", onDown, true);
+    document.removeEventListener("keydown", onKey, true);
+    untrap();
+    menu.remove();
+    if (_closeChatMenu === close) _closeChatMenu = null;
+    anchor.focus?.();
+  }
+  _closeChatMenu = close;
+  return close;
+}

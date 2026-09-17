@@ -22,6 +22,21 @@ import { ui } from "/static/lib/store.js";
 const WRITE_MODES = ["read_only", "write_with_confirm", "autonomous"];
 const state = { me: null, account: null, chats: [], prefs: {}, briefChats: null, unlinkId: null };
 
+/**
+ * `display_name` hozircha Telegram profilida alohida ism bo'lmasa
+ * `username`/`id<tg_user_id>` ga tushadi — u holda ism yo'q, faqat
+ * `@username` ko'rsatiladi (L1, `pages/today.js::realName` bilan bir xil
+ * mezon; ism hech qachon "to'qib chiqarilmaydi").
+ */
+function displayValue(user) {
+  if (!user) return "";
+  const dn = String(user.display_name || "").trim();
+  const uname = String(user.username || "").trim();
+  const isReal = dn && dn !== uname && !(user.tg_user_id != null && dn === `id${user.tg_user_id}`);
+  if (isReal) return dn;
+  return uname ? `@${uname}` : dn;
+}
+
 /* ── prefs ───────────────────────────────────────────────────────────── */
 
 const savePrefs = debounce(async (patchBody) => {
@@ -308,7 +323,7 @@ async function loadSystem() {
 async function main() {
   try { state.me = await get("/api/me"); } catch (err) { toastError(err); return; }
   state.prefs = (state.me.user && state.me.user.prefs) || {};
-  $("#set-name").value = (state.me.user && state.me.user.display_name) || "";
+  $("#set-name").value = displayValue(state.me.user);
   paintAccounts();
 
   // Ko'rinish
@@ -357,15 +372,32 @@ ready(() => {
   });
 
   // Desktop sub-nav: skroll bilan faol bo'lim belgilanadi.
+  //
+  // M4: bitta `entries` chaqiruvida faqat **o'zgargan** bo'limlar keladi
+  // (IntersectionObserver shartnomasi) — avvalgi kodi shu batch ichidagi
+  // har bir yozuv uchun HAMMA link'ni qayta belgilardi, ya'ni bir vaqtda
+  // ikki bo'lim ko'rinib tursa (yoki eski holat yangilanmasa) ikkalasi
+  // ham "faol" bo'lib qolardi. Endi ko'rinib turgan bo'limlar to'plami
+  // saqlanadi va har chaqiruvda **faqat bittasi** (sahifa tartibida
+  // birinchisi) faol deb belgilanadi.
   const links = $$(".set-nav a");
-  if (links.length && "IntersectionObserver" in window) {
+  const sections = $$(".set-section");
+  if (links.length && sections.length && "IntersectionObserver" in window) {
+    const visible = new Set();
+    const paintActive = () => {
+      const active = sections.find((s) => visible.has(s.id));
+      for (const a of links) {
+        a.setAttribute("aria-current", String(Boolean(active) && a.getAttribute("href") === `#${active.id}`));
+      }
+    };
     const obs = new IntersectionObserver((entries) => {
       for (const e of entries) {
-        if (!e.isIntersecting) continue;
-        for (const a of links) a.setAttribute("aria-current", String(a.getAttribute("href") === `#${e.target.id}`));
+        if (e.isIntersecting) visible.add(e.target.id);
+        else visible.delete(e.target.id);
       }
+      paintActive();
     }, { rootMargin: "-20% 0px -70% 0px" });
-    for (const s of $$(".set-section")) obs.observe(s);
+    for (const s of sections) obs.observe(s);
   }
 
   main();
