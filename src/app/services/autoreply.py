@@ -27,6 +27,7 @@ from app.config import get_settings
 from app.db.models import Account, ActionStatus, AgentAction, AgentRun, AutoReplyRule, Chat, Message
 from app.llm import LLM, LLMError, Msg, Task
 from app.logging import get_logger
+from app.services import untrusted as U
 from app.services.prompts import AUTOREPLY_PROMPT
 from app.services.search import compact_text
 
@@ -213,14 +214,15 @@ async def draft_reply(
         when = m.published_at.strftime("%m-%d %H:%M") if m.published_at else "?"
         who = f"user:{m.sender_id}" if m.sender_id else "—"
         lines.append(f"[{when}] #{m.tg_msg_id} {who}: {compact_text(m.text or '', max_chars=400)}")
-    body = "\n".join(lines)
+    body = U.neutralize("\n".join(lines))
+    target_text = U.neutralize(compact_text(target.text or "", max_chars=1500))
     user = (
         f"Rule instructions from the owner:\n{rule.instructions.strip() or '(none)'}\n\n"
-        f'<untrusted_data source="telegram" chat="{chat_title}" kind="recent">\n'
+        f'<untrusted_data source="telegram" chat="{U.attr(chat_title)}" kind="recent">\n'
         f"{body}\n</untrusted_data>\n\n"
         f"Reply to message #{target.tg_msg_id}:\n"
         f'<untrusted_data source="telegram" kind="target">\n'
-        f"{compact_text(target.text or '', max_chars=1500)}\n</untrusted_data>"
+        f"{target_text}\n</untrusted_data>"
     )
     try:
         res = await (llm or LLM()).chat(

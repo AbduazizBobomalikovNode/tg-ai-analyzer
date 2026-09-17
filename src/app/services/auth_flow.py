@@ -27,6 +27,7 @@ import asyncio
 import secrets
 import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
@@ -41,6 +42,7 @@ log = get_logger(__name__)
 
 
 class FlowStatus(StrEnum):
+    QR_PENDING = "qr_pending"  # QR chizildi, skanerlash kutilmoqda
     CODE_SENT = "code_sent"
     NEEDS_2FA = "needs_2fa"
     DONE = "done"
@@ -81,11 +83,19 @@ class PendingLogin:
     phone: str = field(default="", repr=False)  # sign_in uchun kerak, saqlanmaydi
     phone_code_hash: str = field(default="", repr=False)
     code_type: str = ""  # app | sms | call | flash_call | ...
+    # Telegram aytadi: qayta yuborilsa kod QANDAY kelishi (odatda `sms`).
+    # `None` — qayta yuborish umuman mumkin emas, UI tugmani ko'rsatmasin.
+    next_type: str = ""
     code_length: int | None = None
     timeout: int | None = None
     attempts: int = 0
     result: LoggedIn | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    # ── QR login ──
+    qr: Any = field(default=None, repr=False)  # telethon QRLogin
+    qr_url: str = field(default="", repr=False)  # tg://login?token=…
+    watcher: Any = field(default=None, repr=False)  # skanerlashni kutuvchi task
+    error: str = ""  # fon vazifasi uzilib qolsa — UI ko'rsatadi
 
 
 MAX_CODE_ATTEMPTS = 5
@@ -94,6 +104,29 @@ MAX_CODE_ATTEMPTS = 5
 def _code_type_name(sent_type: Any) -> str:
     name = type(sent_type).__name__  # SentCodeTypeApp / SentCodeTypeSms / ...
     return name.removeprefix("SentCodeType").lower() or "unknown"
+
+
+_QR_MIN_WAIT = 5.0  # tokenning oxirgi soniyalarida kutib o'tirmaymiz
+_QR_MAX_WAIT = 60.0
+
+
+def _qr_seconds_left(qr: Any) -> float:
+    """Token eskirishigacha qolgan vaqt (soniya), xavfsiz chegaralar bilan."""
+    expires = getattr(qr, "expires", None)
+    if expires is None:
+        return _QR_MAX_WAIT
+    try:
+        left = (expires - datetime.now(UTC)).total_seconds()
+    except (TypeError, ValueError):
+        return _QR_MAX_WAIT
+    return max(_QR_MIN_WAIT, min(float(left), _QR_MAX_WAIT))
+
+
+def _next_type_name(next_type: Any) -> str:
+    """`auth.CodeTypeSms` → `sms`. Bo'sh = qayta yuborish mumkin emas."""
+    if next_type is None:
+        return ""
+    return type(next_type).__name__.removeprefix("CodeType").lower()
 
 
 class AuthFlowStore:
@@ -119,18 +152,21 @@ class AuthFlowStore:
         dead = [fid for fid, f in self._flows.items() if now - f.created_at > self._ttl]
         for fid in dead:
             flow = self._flows.pop(fid)
+            _cancel_watcher(flow)
             _fire_and_forget(_disconnect(flow.client))
             log.info("auth.flow_expired", flow_id=fid[:8])
 
     async def cancel(self, flow_id: str) -> None:
         flow = self._flows.pop(flow_id, None)
         if flow is not None:
+            _cancel_watcher(flow)
             await _disconnect(flow.client)
 
     async def close_all(self) -> None:
         flows = list(self._flows.values())
         self._flows.clear()
         for f in flows:
+            _cancel_watcher(f)
             await _disconnect(f.client)
 
     @property
@@ -175,12 +211,133 @@ class AuthFlowStore:
             phone=phone,
             phone_code_hash=getattr(sent, "phone_code_hash", "") or "",
             code_type=_code_type_name(getattr(sent, "type", None)),
+            next_type=_next_type_name(getattr(sent, "next_type", None)),
             code_length=getattr(getattr(sent, "type", None), "length", None),
             timeout=getattr(sent, "timeout", None),
         )
         self._flows[flow.id] = flow
         log.info(
             "auth.code_sent",
+            flow_id=flow.id[:8],
+            phone_hash=flow.phone_hash[:12],
+            code_type=flow.code_type,
+        )
+        return flow
+
+    async def start_qr(self, *, owner_user_id: int | None = None) -> PendingLogin:
+        """QR login: telefon ham, kod ham kerak emas.
+
+        Telegram token beradi (`auth.ExportLoginToken`), biz uni `tg://login`
+        havolasi qilib QR'ga aylantiramiz. Foydalanuvchi telefonidagi Telegram
+        bilan skaner qiladi (Sozlamalar → Qurilmalar → Qurilma ulash).
+
+        Token ~1 daqiqada eskiradi, shuning uchun fon vazifasi uni avtomatik
+        yangilab turadi — foydalanuvchi sahifani qayta yuklamaydi.
+        """
+        client = self._client_factory()
+        try:
+            await client.connect()
+            with auth_window():
+                qr = await client.qr_login()
+        except tg_errors.FloodWaitError as exc:
+            await _disconnect(client)
+            raise AuthError("flood", retry_after=int(exc.seconds)) from exc
+        except tg_errors.RPCError as exc:
+            await _disconnect(client)
+            raise AuthError("telegram", detail=type(exc).__name__) from exc
+        except (OSError, ConnectionError, TimeoutError) as exc:
+            await _disconnect(client)
+            raise AuthError("network", detail=str(exc)[:100]) from exc
+
+        flow = PendingLogin(
+            id=secrets.token_urlsafe(24),
+            client=client,
+            phone_hash="",  # QR'da telefon yo'q — `_complete` da `me` dan olinadi
+            created_at=time.monotonic(),
+            owner_user_id=owner_user_id,
+            status=FlowStatus.QR_PENDING,
+            qr=qr,
+            qr_url=getattr(qr, "url", "") or "",
+        )
+        self._flows[flow.id] = flow
+        flow.watcher = asyncio.ensure_future(self._watch_qr(flow))
+        log.info("auth.qr_started", flow_id=flow.id[:8])
+        return flow
+
+    async def _watch_qr(self, flow: PendingLogin) -> None:
+        """Skanerlashni kutadi; token eskirsa yangisini oladi.
+
+        Bu **fon vazifasi**: HTTP so'rov uni kutmaydi, frontend holatni
+        so'rab turadi. Shuning uchun bu yerda istisno chiqib ketmasligi kerak —
+        aks holda oqim jim o'lib qoladi.
+        """
+        try:
+            while True:
+                try:
+                    with auth_window():
+                        await flow.qr.wait(timeout=_qr_seconds_left(flow.qr))
+                except TimeoutError:
+                    if flow.status is not FlowStatus.QR_PENDING:
+                        return
+                    with auth_window():
+                        await flow.qr.recreate()
+                    flow.qr_url = getattr(flow.qr, "url", "") or flow.qr_url
+                    continue
+                except tg_errors.SessionPasswordNeededError:
+                    flow.status = FlowStatus.NEEDS_2FA
+                    log.info("auth.needs_2fa", flow_id=flow.id[:8])
+                    return
+                async with flow.lock:
+                    await self._complete(flow)
+                return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # fon vazifasi jim o'lmasin
+            flow.error = type(exc).__name__
+            log.warning("auth.qr_failed", flow_id=flow.id[:8], error=flow.error)
+
+    async def resend(self, flow_id: str) -> PendingLogin:
+        """Kodni qayta yuborish (`auth.ResendCode`) — odatda SMS'ga o'tadi.
+
+        Telegram faol sessiya ko'rsa kodni Telegram **ilovasiga** tashlaydi
+        (`code_type=app`). Foydalanuvchi o'sha ilovaga kira olmasa, bu yagona
+        chiqish yo'li: oqimni qaytadan boshlash yordam bermaydi, u yana
+        ilovaga yuboradi.
+
+        Oqim davom etadi: `phone_code_hash` yangilanadi, urinishlar hisobi
+        **saqlanadi** (aks holda bu brute-force qopqog'ini aylanib o'tish
+        yo'liga aylanardi).
+        """
+        from telethon.tl import functions as tlf
+
+        flow = self.get(flow_id)
+        async with flow.lock:
+            if flow.status is not FlowStatus.CODE_SENT:
+                raise AuthError("wrong_step")
+            if not flow.next_type:
+                raise AuthError("resend_unavailable")
+            try:
+                with auth_window():
+                    sent = await flow.client(
+                        tlf.auth.ResendCodeRequest(
+                            phone_number=flow.phone, phone_code_hash=flow.phone_code_hash
+                        )
+                    )
+            except tg_errors.PhoneCodeExpiredError as exc:
+                raise AuthError("code_expired") from exc
+            except tg_errors.FloodWaitError as exc:
+                raise AuthError("flood", retry_after=int(exc.seconds)) from exc
+            except tg_errors.RPCError as exc:
+                raise AuthError("telegram", detail=type(exc).__name__) from exc
+
+            flow.phone_code_hash = getattr(sent, "phone_code_hash", "") or flow.phone_code_hash
+            flow.code_type = _code_type_name(getattr(sent, "type", None))
+            flow.next_type = _next_type_name(getattr(sent, "next_type", None))
+            flow.code_length = getattr(getattr(sent, "type", None), "length", None)
+            flow.timeout = getattr(sent, "timeout", None)
+
+        log.info(
+            "auth.code_resent",
             flow_id=flow.id[:8],
             phone_hash=flow.phone_hash[:12],
             code_type=flow.code_type,
@@ -254,6 +411,10 @@ class AuthFlowStore:
         """Login bo'ldi: `me` ni olib, session'ni chiqarib, klientni yopamiz."""
         me = await flow.client.get_me()
         session_string = flow.client.session.save()
+        # QR yo'lida telefon kiritilmagan — hash'ni `me` dan olamiz, aks holda
+        # akkaunt yozuvi telefon hash'siz qolardi (qayta ulanishda kerak).
+        if not flow.phone_hash and getattr(me, "phone", None):
+            flow.phone_hash = phone_hash(str(me.phone))
         flow.result = LoggedIn(
             tg_user_id=int(me.id),
             first_name=getattr(me, "first_name", "") or "",
@@ -271,6 +432,7 @@ class AuthFlowStore:
         flow = self._flows.pop(flow_id, None)
         if flow is None or flow.result is None:
             raise AuthError("flow_expired")
+        _cancel_watcher(flow)
         _fire_and_forget(_disconnect(flow.client))
         return flow.result
 
@@ -281,6 +443,14 @@ class AuthFlowStore:
 def _normalize_phone(phone: str) -> str:
     digits = "".join(ch for ch in phone if ch.isdigit())
     return f"+{digits}" if digits else ""
+
+
+def _cancel_watcher(flow: PendingLogin) -> None:
+    """QR kutuvchi fon vazifasini to'xtatadi (klient yopilishidan oldin)."""
+    task = flow.watcher
+    flow.watcher = None
+    if task is not None and not task.done():
+        task.cancel()
 
 
 async def _disconnect(client: Any) -> None:

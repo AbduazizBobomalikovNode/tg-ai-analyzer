@@ -1,0 +1,47 @@
+/* pages/onboarding.css — `/onboarding`: 4 bosqichli ulash oqimi. */
+
+.onb {
+  display: flex; flex-direction: column; gap: var(--s-4);
+  inline-size: 100%; max-inline-size: 560px; margin-inline: auto;
+  padding: var(--s-5) var(--s-4) calc(var(--s-7) + var(--pad-bottom));
+}
+
+.onb-steps { display: flex; gap: var(--s-2); align-items: center; }
+.onb-steps > i {
+  flex: 1 1 0; block-size: 4px; border-radius: 2px;
+  background: var(--panel-3);
+  transition: background var(--t-pane) var(--ease);
+}
+.onb-steps > i.is-done { background: var(--accent); }
+.onb-steps > i.is-active { background: var(--accent-2); }
+
+.onb-step { display: grid; gap: var(--s-3); }
+.onb-step[hidden] { display: none !important; }
+.onb-step h2 { margin: 0; font-size: var(--fs-xl); letter-spacing: -.01em; }
+.onb-step p { margin: 0; color: var(--muted); font-size: var(--fs-sm); line-height: var(--lh-body); }
+
+.onb-nav { display: flex; gap: var(--s-2); align-items: center; flex-wrap: wrap; }
+.onb-nav .spacer { flex: 1 1 auto; }
+
+/* `.consent-list` — `css/components.css` ga ko'chdi (R2C ulashiladigan
+ * blok): `/settings` ham xuddi shu sinfni ishlatadi (maxfiylik bo'limi),
+ * faqat shu fayl yuklanganda ikkinchisida standart `<ul>` nuqtasi +
+ * sprite ikonka qo'shilib "ikkilangan belgi" chiqardi. */
+
+/* ── 3-qadam: sync progressi ─────────────────────────────────────────── */
+.onb-counts { display: flex; gap: var(--s-2); flex-wrap: wrap; }
+.onb-sync-rows { display: grid; gap: var(--s-2); max-block-size: 260px; overflow: auto; }
+.onb-sync-row { display: grid; gap: var(--s-1); font-size: var(--fs-sm); }
+.onb-sync-row .onb-sync-head { display: flex; justify-content: space-between; gap: var(--s-2); }
+
+/* ── 4-qadam: birinchi savollar ──────────────────────────────────────── */
+.onb-questions { display: grid; gap: var(--s-2); }
+.onb-questions .chip-btn { justify-content: flex-start; border-radius: var(--r-md, 12px); }
+
+/* ── QR ──────────────────────────────────────────────────────────────── */
+.onb-qr { display: grid; justify-items: center; gap: var(--s-3); }
+.onb-qr img {
+  inline-size: 220px; block-size: 220px;
+  background: #fff; padding: var(--s-2); border-radius: var(--r-md, 12px);
+  border: 1px solid var(--border);
+}

@@ -1,0 +1,78 @@
+{% extends "_shell.html" %}
+{% import "_macros.html" as m %}
+{% set nav_current = "briefings" %}
+{% block title %}{{ t('web.brief.title') }} · {{ t('web.title') }}{% endblock %}
+{% block body_class %}page-dash{% endblock %}
+
+{% block head %}{{ super() }}
+  <link rel="stylesheet" href="{{ asset('css/pages/briefings.css') }}">
+{% endblock %}
+
+{# M2: v2 karkasga ko'chirildi — avval sahifa o'z brend/lang-switch'ini
+   chizardi (`m.brand` + `m.lang_switch`), garchi `_shell.html` rail'i
+   ularni chapda allaqachon bergan bo'lsa ham (audit § Templates dagi
+   nusxa hikoyasi qaytarilgan edi). Boshqa `topbar-v2` sahifalar bilan
+   bir xil: sarlavha + tema tugmasi, boshqa hech narsa. #}
+{% block topbar %}
+<header class="topbar-v2">
+  <span class="topbar-h1">{{ t('web.brief.title') }}</span>
+  <span class="spacer"></span>
+  <button type="button" class="icon-btn-v2" data-theme-toggle aria-label="{{ t('web.theme.title') }}">{{ m.icon("monitor") }}</button>
+</header>
+{% endblock %}
+
+{% block pane_content %}
+<div class="pane-content scrolls">
+<div class="pane-inner page">
+
+  <div class="page-head">
+    <div>
+      <h1 class="page-title">{{ t('web.brief.title') }}</h1>
+      <p class="page-sub">{{ t('web.brief.quiet_note') }}</p>
+    </div>
+    <span class="spacer"></span>
+    <a class="btn ghost small" href="/dashboard">{{ m.icon("arrow-left") }} {{ t('web.dash.title') }}</a>
+  </div>
+
+  <section class="grid2">
+    {% call m.card(t('web.brief.list')) %}
+      <ul class="review" id="brief-list" aria-live="polite"></ul>
+    {% endcall %}
+    <div class="card card-v2">
+      <h3 id="brief-day">{{ t('web.brief.today') }}</h3>
+      <div id="brief-body" class="md" aria-live="polite"></div>
+      <p class="muted small" id="brief-meta"></p>
+    </div>
+  </section>
+
+  {% call m.card(t('web.brief.settings')) %}
+    <form id="brief-settings" class="fields two" autocomplete="off">
+      <div class="field wide"><label class="opt">{{ t('web.brief.enabled') }}<input type="checkbox" id="b-enabled"></label></div>
+      <label class="field">
+        <span>{{ t('web.brief.hour') }}</span>
+        <input type="number" id="b-hour" min="0" max="23" value="8">
+      </label>
+      <label class="field">
+        <span>{{ t('web.brief.tz') }}</span>
+        <input type="text" id="b-tz" value="Asia/Tashkent" maxlength="64">
+      </label>
+      <label class="field">
+        <span>{{ t('web.brief.quiet_from') }}</span>
+        <input type="time" id="b-qfrom">
+      </label>
+      <label class="field">
+        <span>{{ t('web.brief.quiet_to') }}</span>
+        <input type="time" id="b-qto">
+      </label>
+      <div class="field wide form-actions">
+        <button class="btn primary small" type="submit">{{ t('web.brief.save') }}</button>
+        <span class="muted small" id="brief-saved" role="status"></span>
+      </div>
+    </form>
+  {% endcall %}
+
+</div>
+</div>
+<script>window.TGAI_BRIEF_DAY = "{{ day }}";</script>
+{% endblock %}
+{% block scripts %}{{ super() }}<script type="module" src="{{ asset('briefings.js') }}"></script>{% endblock %}

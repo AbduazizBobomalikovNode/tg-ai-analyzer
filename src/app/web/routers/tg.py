@@ -5,6 +5,10 @@ GET  /api/accounts/{id}/dialogs/{peer_id}/messages?limit=50
 GET  /api/accounts/{id}/chats                               DB registry + sync progress
 POST /api/accounts/{id}/sync                                to'liq ingestion boshlash
 POST /api/accounts/{id}/chats/{chat_id}/sync                bitta chat
+GET  /api/accounts/{id}/chats/{chat_id}/avatar              profil rasmi (fayl)
+
+Qolgan chat ma'lumotlari (`chats/search`, `messages/search`, `chats/{id}`,
+`.../stats`, `.../digests`) — `routers/chatdata.py`, shu router ostida.
 """
 
 from __future__ import annotations
@@ -12,15 +16,23 @@ from __future__ import annotations
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import FileResponse
 from sqlalchemy import select
 
 from app.config import get_settings
 from app.db.base import session_scope
 from app.db.models import Account, Chat
 from app.mtproto.pool import PoolError, pool
+from app.services import avatars as AV
+from app.web.routers import chatdata as chatdata_router
+from app.web.routers.chatdata import chat_out
 from app.web.security import WebIdentity, require_csrf, require_identity
 
 router = APIRouter(prefix="/api/accounts", tags=["telegram"])
+# ui/R1a: chat profili / qidiruv / statistika endpoint'lari alohida modulda,
+# lekin **shu** router ostiga ulanadi — `web/main.py` (R1b) tegilmaydi.
+# `chatdata.router` prefikssiz: yakuniy yo'l `/api/accounts/...` bo'ladi.
+router.include_router(chatdata_router.router)
 
 
 async def _own_account(user_id: int, account_id: int) -> Account:
@@ -93,44 +105,67 @@ async def messages(
     }
 
 
-def _chat_out(c: Chat) -> dict[str, Any]:
-    est = c.total_estimate or 0
-    if est:
-        pct = min(100, round(100 * c.synced_total / est))
-    else:
-        pct = 100 if c.sync_state == "done" else 0
-    return {
-        "id": c.id,
-        "peer_id": c.tg_peer_id,
-        "title": c.title,
-        "type": c.type,
-        "username": c.username,
-        "is_admin": c.is_admin,
-        "is_writable": c.is_writable,
-        "write_mode": c.write_mode,
-        "participants_count": c.participants_count,
-        "sync_state": c.sync_state,
-        "synced_total": c.synced_total,
-        "total_estimate": c.total_estimate,
-        "progress": pct,
-        "sync_error": c.sync_error,
-        "last_sync_at": c.last_sync_at.isoformat() if c.last_sync_at else None,
-        "last_message_at": c.last_message_at.isoformat() if c.last_message_at else None,
-    }
+#: Chat qatorining JSON ko'rinishi — yagona manba `routers/chatdata.py`
+#: (u yerda `chats/search`, `chats/{id}` ham shu shaklni qaytaradi).
+_chat_out = chat_out
+
+
+@router.get("/{account_id}/chats/{chat_id}/avatar")
+async def chat_avatar(
+    account_id: int, chat_id: int, ident: Annotated[WebIdentity, Depends(require_identity)]
+) -> Any:
+    """Chat profil rasmi — faqat egasiga (`services/avatars.py` yozadi).
+
+    ETag = Telegram `photo_id`, ya'ni rasm almashsa URL ham, ETag ham o'zgaradi.
+    """
+    await _own_account(ident.user_id, account_id)
+    async with session_scope() as db:
+        chat = await db.get(Chat, chat_id)
+        if chat is None or chat.account_id != account_id:
+            raise HTTPException(status_code=404, detail={"code": "pool.err.no_dialog"})
+        mime = chat.avatar_mime
+        photo_id = chat.avatar_photo_id
+    if not mime or not photo_id:
+        raise HTTPException(status_code=404, detail={"code": "chat.err.no_avatar"})
+    path = AV.path_for(chat_id, mime)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail={"code": "chat.err.no_avatar"})
+    return FileResponse(
+        str(path),
+        media_type=mime,
+        headers={"Cache-Control": "private, max-age=86400", "ETag": f'"{photo_id}"'},
+    )
 
 
 @router.get("/{account_id}/chats")
 async def chats(
-    account_id: int, ident: Annotated[WebIdentity, Depends(require_identity)]
+    account_id: int,
+    ident: Annotated[WebIdentity, Depends(require_identity)],
+    limit: Annotated[int, Query(ge=0, le=1000)] = 0,
+    spark: bool = False,
 ) -> dict[str, Any]:
+    """Akkauntning chat registri. `limit` — UI select'lari uchun (0 = hammasi).
+
+    `spark=1` — har chatga 14-kunlik `spark: [int, ...]` qo'shadi (ui/M3),
+    **bitta** guruhlangan so'rov bilan (`chatdata.spark_series`) — chat
+    sonicha alohida so'rov emas.
+    """
     await _own_account(ident.user_id, account_id)
     async with session_scope() as db:
-        rows = await db.execute(
+        stmt = (
             select(Chat)
             .where(Chat.account_id == account_id)
             .order_by(Chat.last_message_at.desc().nulls_last(), Chat.id)
         )
-        items = [_chat_out(c) for c in rows.scalars().all()]
+        if limit:
+            stmt = stmt.limit(limit)
+        rows = await db.execute(stmt)
+        chat_rows = rows.scalars().all()
+        items = [_chat_out(c) for c in chat_rows]
+        if spark:
+            spark_map = await chatdata_router.spark_series(db, [c.id for c in chat_rows])
+            for it in items:
+                it["spark"] = spark_map.get(it["id"], [0] * 14)
     running = sum(1 for c in items if c["sync_state"] == "running")
     return {"items": items, "running": running}
 

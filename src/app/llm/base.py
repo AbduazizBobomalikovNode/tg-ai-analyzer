@@ -17,11 +17,28 @@ import random
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from app.logging import get_logger
 
 log = get_logger(__name__)
+
+#: 4 belgi ≈ 1 token — `services/images.py::_CHARS_PER_TOKEN` bilan bir xil
+#: taxmin. Ba'zi provider javoblari (Gemini `embed_content`, sinxron ham
+#: batch ham) usage/token hisoblagichini umuman bermaydi; shu holatda
+#: `tokens_in` 0 bo'lib qolsa `pricing.estimate_cost` ham 0 qaytaradi va
+#: kunlik xarajat limiti (`llm_daily_cost_budget_usd`) o'sha sarfni
+#: **umuman ko'rmaydi** — jimgina ishlamay qolish. Aniq son uchun alohida
+#: `count_tokens` RPC kerak bo'lardi (qo'shimcha kechikish/xarajat har
+#: chaqiruvda); o'rniga hujjatlashtirilgan taxmin — provider-agnostik,
+#: shuning uchun shu yerda (`app.llm.gemini` va `services.embed_batches`
+#: ikkalasi ham shu funksiyadan foydalanadi).
+_CHARS_PER_TOKEN = 4
+
+
+def estimate_tokens_heuristic(texts: list[str]) -> int:
+    """`ceil(len(text)/4)` — har matn uchun, yig'indi. Bo'sh matn → 0 token."""
+    return sum(-(-len(t) // _CHARS_PER_TOKEN) for t in texts if t)
 
 
 class Capability(StrEnum):
@@ -29,6 +46,7 @@ class Capability(StrEnum):
     TOOLS = "tools"  # function calling
     JSON_MODE = "json_mode"
     EMBED = "embed"
+    BATCH_EMBED = "batch_embed"  # asinxron (arzon) embedding batch job
     IMAGE_GEN = "image_gen"
     LONG_CONTEXT = "long_context"  # >= 200k token
     EXPLICIT_CACHE = "explicit_cache"  # boshqariladigan context caching
@@ -103,12 +121,59 @@ class ChatResult:
     reasoning: str | None = None
 
 
+# Embedding vazifasi: indekslashda hujjat, qidiruvda so'rov (asimmetrik retrieval).
+# Gemini buni hisobga oladi va vektorlarni boshqa fazoga tushiradi — ikkalasi ham
+# default bilan yuborilsa bepul aniqlik yo'qoladi (arxitektura v2, 5.3-band).
+EmbedTaskType = Literal["RETRIEVAL_DOCUMENT", "RETRIEVAL_QUERY"]
+EMBED_DOCUMENT: EmbedTaskType = "RETRIEVAL_DOCUMENT"
+EMBED_QUERY: EmbedTaskType = "RETRIEVAL_QUERY"
+
+
 @dataclass(slots=True)
 class EmbedResult:
     vectors: list[list[float]]
     model: str
     provider: str
     usage: Usage
+
+
+# ─── batch (asinxron) embedding — 4-bosqich/C ────────────────────────────────
+#
+# Gemini Batch API sinxron narxning **yarmini** oladi, evaziga javob soatlar
+# ichida keladi (SLA 24 soat). Indekslash — fon ishi, kechikish muhim emas;
+# shuning uchun `embed_messages` / `embed_nodes` uchun bu to'g'ridan-to'g'ri
+# 50% chegirma. Qidiruv tomoni (`RETRIEVAL_QUERY`) **hech qachon** batch
+# bo'lmaydi — u user kutib turgan yo'l.
+
+
+class BatchState(StrEnum):
+    """Provider holatlarining normallashtirilgan ko'rinishi."""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    EXPIRED = "expired"
+    CANCELLED = "cancelled"
+
+    @property
+    def done(self) -> bool:
+        return self is not BatchState.PENDING and self is not BatchState.RUNNING
+
+
+@dataclass(slots=True)
+class BatchStatus:
+    job: str
+    state: BatchState
+    #: provider qaytargan xom holat (`JOB_STATE_...`) — loglar uchun
+    raw_state: str = ""
+    #: API qaytargan model nomi (narx qoidasi: so'ralgani emas, qaytgani)
+    model: str = ""
+    error: str = ""
+
+    @property
+    def done(self) -> bool:
+        return self.state.done
 
 
 class LLMError(RuntimeError):
@@ -158,8 +223,55 @@ class BaseProvider(ABC):
         json_mode: bool = False,
     ) -> ChatResult: ...
 
-    async def embed(self, texts: list[str], *, model: str, dim: int) -> EmbedResult:
+    async def embed(
+        self,
+        texts: list[str],
+        *,
+        model: str,
+        dim: int,
+        task_type: EmbedTaskType = EMBED_DOCUMENT,
+    ) -> EmbedResult:
+        """Provider `task_type` ni qo'llamasa — e'tiborsiz qoldiradi (xato emas)."""
         raise CapabilityError(self.name, "embedding qo'llab-quvvatlanmaydi")
+
+    # ── batch embedding ──────────────────────────────────────────────────────
+    #
+    # Uch bosqich ataylab ajratilgan: submit qaytarishi bilan jarayon o'lishi
+    # mumkin, job esa serverda qoladi. Shuning uchun `job` nomi **DB'da**
+    # saqlanadi (`embed_batches`) va poll/fetch boshqa cron yugurishida,
+    # boshqa jarayonda bo'ladi. Provider obyektida hech qanday holat yo'q.
+
+    async def embed_batch_submit(
+        self,
+        texts: list[str],
+        *,
+        model: str,
+        dim: int,
+        task_type: EmbedTaskType = EMBED_DOCUMENT,
+        tag: str = "",
+    ) -> str:
+        """Batch job yaratadi va uning **nomini** qaytaradi (`batches/…`)."""
+        raise CapabilityError(self.name, "batch embedding qo'llab-quvvatlanmaydi")
+
+    async def embed_batch_poll(self, job: str) -> BatchStatus:
+        raise CapabilityError(self.name, "batch embedding qo'llab-quvvatlanmaydi")
+
+    async def embed_batch_fetch(self, job: str, *, model: str = "") -> EmbedResult:
+        """Tugagan jobning vektorlari — **kirish tartibida**.
+
+        `list[list[float]]` emas, `EmbedResult`: chaqiruvchiga API qaytargan
+        model nomi ham kerak (narx qoidasi, `pricing.py`).
+
+        `model` — job yuborilganda **so'ralgan** model. API javobida model
+        maydoni bo'lmasa (Gemini buni qiladi) normallashtirish va
+        `message_embeddings.model` shu nomga tayanadi; usiz qator `model=''`
+        bilan yozilib, qidiruv filtridan hech qachon o'tmasdi.
+
+        `usage.tokens_in` javobda yo'q/0 bo'lishi mumkin (usage metadata
+        kelmasa) — narx taxminini tiklash chaqiruvchi tomonda
+        (`services/embed_batches.py::_poll_one`, `estimate_tokens_heuristic`).
+        """
+        raise CapabilityError(self.name, "batch embedding qo'llab-quvvatlanmaydi")
 
     async def generate_image(self, prompt: str, *, model: str) -> bytes:
         raise CapabilityError(self.name, "rasm generatsiya qo'llab-quvvatlanmaydi")

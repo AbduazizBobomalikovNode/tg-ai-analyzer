@@ -15,18 +15,31 @@ Konfiguratsiya `provider:model` spec ko'rinishida beriladi, masalan:
 
 Bo'sh qoldirilsa — `LLM_PROVIDER` va o'sha providerning shu vazifa uchun
 standart modeli ishlatiladi.
+
+Bundan tashqari **model override** bor (phase4/B):
+
+    LLM_MODEL_ROUTE=gemini-2.5-flash-lite-002
+    LLM_MODEL_EMBED=gemini-embedding-2
+
+Bu faqat model nomini almashtiradi — provider tanlash o'zgarmaydi. Model
+tanlangan providerning imkoniyatiga mos kelmasa **aniq xato** tashlanadi
+(jimgina boshqa modelga o'tilmaydi): noto'g'ri nom deploy paytida ko'rinsin.
 """
 
 from __future__ import annotations
 
+from datetime import UTC, date, datetime
 from enum import StrEnum
+from typing import Any
 
 from app.config import get_settings
 from app.llm.base import (
+    EMBED_DOCUMENT,
     BaseProvider,
     Capability,
     ChatResult,
     EmbedResult,
+    EmbedTaskType,
     LLMError,
     Msg,
     ToolSpec,
@@ -60,8 +73,41 @@ PROVIDERS = ("claude", "claude_code", "gemini", "deepseek")
 # `LLM_PROVIDER=auto` uchun maxsus qiymat
 AUTO = "auto"
 
+# Vazifa → model override env nomi. `IMAGE` ham shu yerda (avval yo'q edi —
+# bitta model deb hisoblangan; endi Gemini rasm modeli ham almashtiriladi).
+MODEL_OVERRIDE_ENV: dict[Task, str] = {
+    Task.ROUTE: "LLM_MODEL_ROUTE",
+    Task.SEARCH: "LLM_MODEL_SEARCH",
+    Task.TOOLS: "LLM_MODEL_TOOLS",
+    Task.DEEP: "LLM_MODEL_DEEP",
+    Task.EMBED: "LLM_MODEL_EMBED",
+    Task.IMAGE: "LLM_MODEL_IMAGE",
+}
+
+#: Provider e'lon qilgan / kuzatilgan eskirish (yopilish) sanalari (ISO).
+#: Model shu ro'yxatda bo'lsa va sanagacha `RETIRING_WARN_DAYS` dan kam
+#: qolsa (yoki sana allaqachon o'tgan bo'lsa) — jarayon davomida bir marta
+#: ogohlantirish (`resolve()` — istalgan `Task` uchun, faqat ROUTE emas).
+#: Default **o'zgartirilmaydi**: vorisga o'tish `LLM_MODEL_*` override
+#: orqali, o'lchovdan keyin (model almashtirish sifatni tebratadi).
+#:
+#: 2026-09-15 da loyiha kaliti bilan tekshirilgan: 2.5 avlod suhbat
+#: modellari (`flash-lite`, `flash`, `pro`) Gemini API'da yangi
+#: mijozlarga **404 "no longer available to new users"** qaytaradi —
+#: 2026-09 da yopilgan. Aniq kun e'lon qilinmagan, shuning uchun oy
+#: boshi ishlatiladi (sana allaqachon o'tgan bo'lsa ham ogohlantirish
+#: chiqaveradi — `retiring_note` buni qo'llab-quvvatlaydi).
+RETIRING: dict[str, str] = {
+    "gemini-2.5-flash-lite": "2026-09-01",  # yopiq yangi mijozlarga, 2026-09
+    "gemini-2.5-flash": "2026-09-01",  # yopiq yangi mijozlarga, 2026-09
+    "gemini-2.5-pro": "2026-09-01",  # yopiq yangi mijozlarga, 2026-09
+}
+RETIRING_WARN_DAYS = 45
+
 
 _instances: dict[str, BaseProvider] = {}
+# Eskiruv ogohlantirishi jarayonda bir marta (log shovqini yo'q).
+_retiring_warned: set[str] = set()
 # `auto` qarori — jarayon davomida bir marta hisoblanadi (kredensial probe arzon,
 # lekin har chaqiruvda takrorlash shart emas). None = hali hisoblanmagan.
 _auto_choice: str | None = None
@@ -152,7 +198,8 @@ def default_model(provider: str, task: Task) -> str:
             Task.SEARCH: s.gemini_model_fast,
             Task.TOOLS: s.gemini_model_fast,
             Task.DEEP: s.gemini_model_deep,
-            Task.EMBED: s.gemini_model_embed,
+            # phase4/B: `EMBED_MODEL` (yangi nom) → `GEMINI_MODEL_EMBED` (eski)
+            Task.EMBED: s.embed_model,
             Task.IMAGE: s.gemini_model_image,
         }[task]
     if provider == "deepseek":
@@ -190,8 +237,97 @@ def _parse_spec(spec: str, task: Task) -> tuple[str, str]:
     return provider, model or default_model(provider, task)
 
 
+def embed_model_name() -> str:
+    """Joriy embedding modeli (override + config), provider yaratmasdan.
+
+    `message_embeddings.model` / `retrieval_node_embeddings.model` filtrlari
+    uchun **yagona manba**: model o'zgarsa eski qatorlar joyida qoladi, yangi
+    fazoga tegishli qatorlar esa alohida yoziladi — ikki fazo aralashmaydi.
+
+    Ustuvorlik `resolve(Task.EMBED)` bilan **bir xil** bo'lishi shart (M5):
+
+      1. `LLM_TASK_EMBED` ning model qismi (`provider:model`) — u `resolve`
+         da eng ustuvor, shuning uchun bu yerda ham;
+      2. `LLM_MODEL_EMBED`;
+      3. `EMBED_MODEL` (config defaulti).
+
+    Ilgari 1-band yo'q edi: `LLM_TASK_EMBED=gemini:gemini-embedding-2` bilan
+    router bir model bilan embed qilar, filtr esa boshqasini qidirardi — yangi
+    qatorlar yozilaverib, qidiruv esa **bo'sh** qaytarardi.
+    """
+    s = get_settings()
+    _, _, spec_model = _spec_for(Task.EMBED).partition(":")
+    return spec_model.strip() or (s.llm_model_embed or "").strip() or s.embed_model
+
+
+def _model_override(task: Task) -> str:
+    s = get_settings()
+    return {
+        Task.ROUTE: s.llm_model_route,
+        Task.SEARCH: s.llm_model_search,
+        Task.TOOLS: s.llm_model_tools,
+        Task.DEEP: s.llm_model_deep,
+        Task.EMBED: s.llm_model_embed,
+        Task.IMAGE: s.llm_model_image,
+    }.get(task, "").strip()
+
+
+def _apply_override(task: Task, model: str, provider: BaseProvider) -> tuple[BaseProvider, str]:
+    """Override modelini tanlangan provider imkoniyati bilan tekshiradi.
+
+    Fallback **yo'q**: override — bu aniq ko'rsatma, uni jimgina boshqa modelga
+    almashtirish "nega eski model ishlayapti?" degan tunggi savolni tug'diradi.
+    """
+    needed = TASK_REQUIREMENTS[task]
+    if needed <= provider.capabilities(model):
+        return provider, model
+    raise LLMError(
+        "router",
+        f"{MODEL_OVERRIDE_ENV[task]}={model!r} — '{provider.name}' provider'ida bu model "
+        f"quvvatlamaydi: {', '.join(sorted(needed - provider.capabilities(model)))}. "
+        f"Kerak: {', '.join(sorted(needed))}",
+    )
+
+
+def retiring_note(
+    model: str, *, today: date | None = None, within_days: int = RETIRING_WARN_DAYS
+) -> dict[str, Any] | None:
+    """Model eskirish ro'yxatida va sana yaqinmi? Sof funksiya (soat beriladi)."""
+    key = model.split("/")[-1].strip().lower()
+    iso = RETIRING.get(key)
+    if iso is None:
+        return None
+    days = (date.fromisoformat(iso) - (today or datetime.now(UTC).date())).days
+    if days > within_days:
+        return None
+    return {"model": key, "retires": iso, "days_left": days}
+
+
+def warn_retiring_once(model: str, *, today: date | None = None) -> dict[str, Any] | None:
+    """Jarayon davomida bir marta `llm.model_retiring` ogohlantirishi."""
+    note = retiring_note(model, today=today)
+    if note is None or note["model"] in _retiring_warned:
+        return None
+    _retiring_warned.add(str(note["model"]))
+    log.warning("llm.model_retiring", hint="LLM_MODEL_ROUTE bilan vorisga o'ting", **note)
+    return note
+
+
 def resolve(task: Task) -> tuple[BaseProvider, str]:
     """Vazifa uchun (provider, model) juftini qaytaradi. Kerak bo'lsa fallback."""
+    provider, model = _resolve_default(task)
+    override = _model_override(task)
+    if override:
+        provider, model = _apply_override(task, override, provider)
+    # Har qanday `Task` uchun hal qilingan model tekshiriladi — ilgari faqat
+    # ROUTE edi, lekin SEARCH/TOOLS/DEEP ham eskirayotgan modelga tushishi
+    # mumkin (masalan LLM_PROVIDER default'i yoki override orqali).
+    warn_retiring_once(model)
+    return provider, model
+
+
+def _resolve_default(task: Task) -> tuple[BaseProvider, str]:
+    """Override'siz marshrut: `llm_task_*` spec yoki `llm_provider` + standart model."""
     s = get_settings()
     needed = TASK_REQUIREMENTS[task]
 
@@ -299,9 +435,18 @@ class LLM:
         )
         return result
 
-    async def embed(self, texts: list[str], *, dim: int | None = None) -> EmbedResult:
+    async def embed(
+        self,
+        texts: list[str],
+        *,
+        dim: int | None = None,
+        task_type: EmbedTaskType = EMBED_DOCUMENT,
+    ) -> EmbedResult:
+        """`task_type`: indekslashda DOCUMENT (default), qidiruvda QUERY."""
         provider, model = resolve(Task.EMBED)
-        return await provider.embed(texts, model=model, dim=dim or get_settings().embed_dim)
+        return await provider.embed(
+            texts, model=model, dim=dim or get_settings().embed_dims, task_type=task_type
+        )
 
     async def generate_image(self, prompt: str) -> bytes:
         provider, model = resolve(Task.IMAGE)
@@ -312,6 +457,7 @@ def reset() -> None:
     """Provider keshini va `auto` qarorini tozalaydi (testlar, qayta konfiguratsiya)."""
     global _auto_choice
     _instances.clear()
+    _retiring_warned.clear()
     _auto_choice = None
 
 

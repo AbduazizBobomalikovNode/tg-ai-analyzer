@@ -9,7 +9,10 @@ Xato formati: `{"detail": {"code": "<i18n kalit>", ...}}` — kalitlar
 `action.err.*`, `sync.err.*`).
 
 ## Sahifalar
-`GET /` → `/chat` yoki `/login` · `GET /login` · `GET /chat` · `GET /dashboard` ·
+`GET /` → `/login` (sessiya yo'q) · `/onboarding` (tugatilmagan) · `/today` ·
+`GET /login` · `GET /onboarding` · `GET /today` · `GET /chats[/{id}]` ·
+`GET /ask[/{id}]` (`GET /chat` → 302 `/ask`) · `GET /alerts` · `GET /actions` ·
+`GET /settings` · `GET /dashboard` · `GET /briefings[/{day}]` ·
 `?lang=uz|ru|en` (cookie'ga yoziladi) · `GET /health`.
 
 ## Auth (telefon → kod → 2FA)
@@ -20,7 +23,8 @@ Xato formati: `{"detail": {"code": "<i18n kalit>", ...}}` — kalitlar
 | POST | `/api/auth/password` | `{flow_id, password}` | `{status:"done", account_id}` + cookie |
 | POST | `/api/auth/cancel` | `{flow_id}` | |
 | POST | `/api/auth/logout` | | cookie o'chadi (session saqlanadi) |
-| GET | `/api/me` | | `{user, accounts[], max_accounts}` |
+| POST | `/api/auth/telegram` | `{init_data}` | Mini App: `initData` HMAC tekshiriladi → `{status:"done", user_id}` + cookie. `403 auth.err.not_linked` — bu Telegram akkaunt ulanmagan (**akkaunt yaratmaydi**, QR login kerak); `400 auth.err.init_data` / `init_data_expired`; IP rate limit |
+| GET | `/api/me` | | `{user: {id, tg_user_id, username, display_name, avatar_url, prefs}, accounts[{…, chats_total, chats_synced}], max_accounts}` |
 
 `done` bo'lganda `sync_account` navbatga tushadi (Redis bo'lsa).
 
@@ -37,16 +41,57 @@ Xato formati: `{"detail": {"code": "<i18n kalit>", ...}}` — kalitlar
 ## AI chat
 | Metod | Yo'l | Tana / javob |
 |---|---|---|
-| GET | `/api/conversations` | `{items:[{id,title,account_id,updated_at}]}` |
+| GET | `/api/conversations?limit=1..100&before=<ISO updated_at>` | `{items:[{id,title,account_id,updated_at}], next_before}` — kursorli sahifalash (`next_before` null bo'lsa oxiri) |
 | POST | `/api/conversations` | `{account_id?, title?}` |
-| GET | `/api/conversations/{id}/messages` | `{conversation, items:[…, actions?]}` |
+| PATCH | `/api/conversations/{id}` | `{title}` (≤120, zararsizlantiriladi) → `{id, title, account_id}` |
+| GET | `/api/conversations/{id}/messages?limit=1..500&before=<msg id>` | `{conversation, items:[…, actions?], next_before}` — **eng yangisi oxirida**, `before` dan eski qatorlar |
 | DELETE | `/api/conversations/{id}` | |
-| POST | `/api/conversations/{id}/messages` | `{text, mode?: auto|agent|direct, account_id?, deep?, context?: {account_id, peer_id, limit?, strategy?: auto|recent|search|window}}` → `{text, model, provider, tokens_in, tokens_out, latency_ms, cost_usd, context, actions[]}` |
+| POST | `/api/conversations/{id}/messages` | `{text, mode?: auto|agent|direct|deep, account_id?, deep?, context?: {account_id, peer_id, limit?, strategy?: auto|recent|search|window}}` → `{conversation_id, user_message_id, assistant_message_id, text, model, provider, tokens_in, tokens_out, latency_ms, cost_usd, context, actions[]}` |
+| POST | `/api/conversations/{id}/messages/stream` | o'sha tana → **SSE** (quyida) |
+| POST | `/api/conversations/{id}/messages/{mid}/regenerate` | `{context?, mode?, deep?, account_id?, stream?}` — oxirgi user turn'ini qayta yugurtiradi (eski javob o'chadi, matn saqlangan savoldan olinadi). Javob `/messages` bilan bir xil; `stream: true` → SSE. `409 chat.err.not_last` — bu oxirgi turn emas |
 | POST | `/api/conversations/{id}/messages/{mid}/rate` | `{rating: 1|-1|0, comment?}` |
 
 `context` javobda: `strategy`, `source` (`db`/`live`/`tools`), `est_tokens`,
 `truncated`, `hits`, agent rejimida `tools`, `tool_calls`, `iterations`, `run_id`,
 `action_ids`.
+
+### SSE: `POST /api/conversations/{id}/messages/stream`
+
+Ramka `POST /api/deep/stream` bilan **bir xil** (`event: <nom>` + `data: <json>`
++ bo'sh satr) — `EventSource` emas, `fetch` + `ReadableStream`; CSRF odatdagidek
+`X-Requested-With: fetch`. Auth (401) va CSRF (403) oqim boshlanishidan oldin,
+odatdagi HTTP status bilan; **byudjet/shift xatolari esa `error` hodisasi
+bo'lib** keladi (status allaqachon 200).
+
+| Hodisa | `data` |
+|---|---|
+| `status` | `{stage: "thinking"｜"tool"｜"writing", tool?: "<tool nomi>"}` |
+| `token` | `{text: "<~400 belgili bo'lak>"}` — hammasi ketma-ket qo'shiladi |
+| `done` | `{conversation_id, user_message_id, assistant_message_id, text, model, provider, tokens_in, tokens_out, cost_usd, latency_ms, context, actions: [...]}` |
+| `error` | `{code: "chat.err.<x>", detail: "<qisqa>"}` |
+
+Tartib: `thinking` → (`tool`)* → `writing` → `token`* → `done`. LLM fasadida
+hozircha rost oqim yo'q, `token` bo'laklari tayyor javobdan kesiladi —
+shartnoma oqim qo'shilganda ham o'zgarmaydi. Saqlash oqimsiz yo'l bilan
+**aynan bir xil** (yagona yozuvchi `chat_service.send_message`).
+
+## Sozlamalar va akkaunt (ui/R1b)
+| Metod | Yo'l | Tana / javob |
+|---|---|---|
+| GET | `/api/settings/prefs` | `{prefs: {theme: system｜light｜dark, locale: ""｜uz｜ru｜en, default_mode, default_strategy, deep_default: bool, density: comfortable｜compact, onboarding_done: bool, pinned_chats: [id], recent_chats: [id]}}` |
+| PUT | `/api/settings/prefs` | qisman JSON → merge qilingan `{prefs}`. **Faqat tanilgan kalitlar**, noma'lum/buzuq qiymat jimgina tashlanadi (422 emas) |
+| DELETE | `/api/accounts/{id}` | akkauntni uzadi → `{status:"revoked", id}`. Saqlangan MTProto session o'chadi, status `revoked`, joblar bekor qilinadi; **ma'lumot qoladi**. `auth.LogOut` chaqirilmaydi (DENIED) |
+| GET | `/api/accounts/{id}/sync/status` | `{running: bool, chats: [{chat_id, state, progress, synced_total, total_estimate, error}], counts: {<state>: n}, poll_seconds}` — yengil (dialoglar RPC'si yo'q), 5 s poll uchun. `chats` = hozir `running`/`failed` bo'lganlar (≤50) |
+| GET | `/api/accounts/{id}/sync/stream` | SSE: har 2 s `status` (yuqoridagi tana), sync tugagach `done {running:false}`. `GET` — CSRF kerak emas, `EventSource` ham ishlaydi |
+
+`prefs.locale` to'ldirilgan bo'lsa sahifa tili **shundan** olinadi (`?lang=` va
+`lang` cookie mantiqi o'z joyida qoladi; aniq `?lang=` bir safarga ustun).
+
+## Static va kesh
+`asset("app.css")` (Jinja global) → `/static/app.css?v=<sha1[:10]>`. `v=` bo'lgan
+so'rov `Cache-Control: public, max-age=31536000, immutable`, versiyasiz —
+`no-cache`. HTML sahifalar: `Cache-Control: no-cache` + `ETag` (mos kelsa 304).
+`/static/vendor/telegram-web-app.js` — lokal nusxa, CDN yo'q (`vendor/VENDOR.md`).
 
 ## Yozish amallari
 | Metod | Yo'l | Izoh |

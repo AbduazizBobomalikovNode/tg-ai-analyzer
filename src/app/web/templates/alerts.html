@@ -1,0 +1,111 @@
+{% extends "_shell.html" %}
+{% import "_macros.html" as m %}
+{% set nav_current = "alerts" %}
+{% block title %}{{ t('web.alerts.title') }} · {{ t('web.title') }}{% endblock %}
+{% block body_class %}page-alerts{% endblock %}
+
+{% block head %}{{ super() }}
+  <link rel="stylesheet" href="{{ asset('css/pages/alerts.css') }}">
+{% endblock %}
+
+{% block topbar %}
+<header class="topbar-v2">
+  <span class="topbar-h1">{{ t('web.alerts.title') }}</span>
+  <span class="spacer"></span>
+  <button type="button" class="btn primary small" id="al-new">{{ m.icon("plus") }} {{ t('web.alerts.new') }}</button>
+  <button type="button" class="icon-btn-v2" data-theme-toggle aria-label="{{ t('web.theme.title') }}">{{ m.icon("monitor") }}</button>
+</header>
+{% endblock %}
+
+{% block pane_content %}
+<div class="pane-content scrolls">
+<div class="pane-inner page">
+
+  <div class="page-head">
+    <div>
+      <h1 class="page-title">{{ t('web.alerts.title') }}</h1>
+      <p class="page-sub">{{ t('web.alerts.hint') }}</p>
+    </div>
+  </div>
+
+  <div class="tabs-v2" role="tablist" aria-label="{{ t('web.alerts.title') }}">
+    <button type="button" role="tab" id="tab-rules" aria-controls="panel-rules" aria-selected="true">{{ t('web.alerts.tab_rules') }}</button>
+    <button type="button" role="tab" id="tab-events" aria-controls="panel-events" aria-selected="false">{{ t('web.alerts.tab_events') }}</button>
+  </div>
+
+  <section id="panel-rules" role="tabpanel" aria-labelledby="tab-rules">
+    <div class="rule-list" id="al-rules" aria-live="polite">{{ m.skeleton_rows(3) }}</div>
+  </section>
+
+  <section id="panel-events" role="tabpanel" aria-labelledby="tab-events" hidden>
+    <div id="al-events" aria-live="polite"></div>
+  </section>
+
+</div>
+</div>
+
+{# ── Qoida formasi (pastki varaq) ── #}
+<div class="sheet alert-sheet" id="al-sheet" hidden>
+  <div class="sheet-box" role="dialog" aria-modal="true" aria-labelledby="al-sheet-title">
+    <div class="sheet-grab" aria-hidden="true"></div>
+    <form class="alert-form" id="al-form" autocomplete="off" novalidate>
+      <h2 class="sheet-title" id="al-sheet-title">{{ t('web.alerts.new') }}</h2>
+
+      <div class="fields two">
+        <label class="field">
+          <span>{{ t('web.alerts.account') }}</span>
+          <select id="al-account" required></select>
+        </label>
+        <label class="field">
+          <span>{{ t('web.alerts.kind') }}</span>
+          <select id="al-kind">
+            <option value="keyword">{{ t('web.alerts.kind_keyword') }}</option>
+            <option value="semantic">{{ t('web.alerts.kind_semantic') }}</option>
+          </select>
+        </label>
+
+        <div class="field wide picker" id="al-chat-picker">
+          <label for="al-chat-q">{{ t('web.alerts.chat') }}</label>
+          <input type="text" id="al-chat-q" role="combobox" aria-expanded="false"
+                 aria-controls="al-chat-list" aria-autocomplete="list"
+                 placeholder="{{ t('web.alerts.chat_all') }}">
+          <ul class="picker-list" id="al-chat-list" role="listbox"
+              aria-label="{{ t('web.alerts.chat') }}" hidden></ul>
+          <span class="field-note" id="al-chat-current"></span>
+        </div>
+
+        <label class="field wide">
+          <span>{{ t('web.alerts.pattern') }}</span>
+          <input type="text" id="al-pattern" maxlength="300" required
+                 placeholder="{{ t('web.alerts.pattern_ph') }}">
+        </label>
+        <div class="field wide"><span class="field-err" id="al-err" role="alert"></span></div>
+
+        <label class="field">
+          <span>{{ t('web.alerts.label') }}</span>
+          <input type="text" id="al-label" maxlength="64">
+        </label>
+        <label class="field">
+          <span>{{ t('web.alerts.cooldown') }}</span>
+          <input type="number" id="al-cooldown" min="0" max="1440" step="1" value="30">
+        </label>
+        <label class="field semantic-only" id="al-threshold-field" hidden>
+          <span>{{ t('web.alerts.threshold') }}</span>
+          <input type="number" id="al-threshold" min="0.5" max="0.95" step="0.01" value="0.80">
+        </label>
+      </div>
+
+      <p class="set-note semantic-only" id="al-semantic-note" hidden>{{ t('web.alerts.semantic_note') }}</p>
+
+      <div class="form-actions">
+        <button type="submit" class="btn primary" id="al-save">{{ t('web.alerts.save') }}</button>
+        <button type="button" class="btn ghost" data-sheet-cancel>{{ t('web.alerts.cancel') }}</button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}{{ super() }}
+<script type="module" src="{{ asset('pages/alerts.js') }}"></script>
+{% endblock %}

@@ -20,7 +20,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from telethon import errors as tg_errors
 
@@ -163,6 +163,27 @@ async def reject_action(session: AsyncSession, user_id: int, action_id: int) -> 
     return _view(a)
 
 
+async def _claim_proposed(session: AsyncSession, a: AgentAction) -> bool:
+    """`proposed → confirmed` **atomik**: shartli UPDATE, rowcount bilan.
+
+    Ikkita parallel tasdiq (ikki tab, ikki so'rov) bir amalni ikki marta
+    yubormasligi uchun holat o'tishi bitta statement ichida bo'ladi. Faqat
+    `status`/`confirmed_at` o'zgaradi — append-only trigger ruxsat beradi.
+    """
+    now = datetime.now(UTC)
+    res = await session.execute(
+        update(AgentAction)
+        .where(AgentAction.id == a.id, AgentAction.status == ActionStatus.PROPOSED)
+        .values(status=ActionStatus.CONFIRMED, confirmed_at=now)
+        .execution_options(synchronize_session=False)
+    )
+    if int(getattr(res, "rowcount", 0) or 0) != 1:
+        return False
+    a.status = ActionStatus.CONFIRMED  # ORM holati DB bilan mos bo'lsin
+    a.confirmed_at = now
+    return True
+
+
 async def confirm_action(session: AsyncSession, user_id: int, action_id: int) -> ActionView:
     a = await _owned(session, user_id, action_id)
     if a.status != ActionStatus.PROPOSED:
@@ -173,7 +194,10 @@ async def confirm_action(session: AsyncSession, user_id: int, action_id: int) ->
         a.error = "expired"
         await session.flush()
         raise ActionError("expired")
-    await execute_action(session, a, actor=f"user:{user_id}")
+    if not await _claim_proposed(session, a):
+        # boshqa so'rov ulgurdi — ikkinchi yuborish bo'lmaydi
+        raise ActionError("wrong_status", "already_confirmed")
+    await execute_action(session, a, actor=f"user:{user_id}", confirmed=True)
     return _view(a)
 
 
@@ -194,8 +218,14 @@ async def _rate_ok(session: AsyncSession, account_id: int) -> bool:
     return int(n or 0) < limit
 
 
-async def execute_action(session: AsyncSession, a: AgentAction, *, actor: str) -> int | None:
-    """Tasdiqlangan amalni MTProto orqali bajaradi. Qaytaradi: natija xabar id."""
+async def execute_action(
+    session: AsyncSession, a: AgentAction, *, actor: str, confirmed: bool = False
+) -> int | None:
+    """Tasdiqlangan amalni MTProto orqali bajaradi. Qaytaradi: natija xabar id.
+
+    `confirmed=True` — chaqiruvchi holatni allaqachon atomik `proposed →
+    confirmed` qilib olgan (`confirm_action`); bu yerda qayta yozilmaydi.
+    """
     run = await session.get(AgentRun, a.run_id)
     if run is None or run.account_id is None:
         raise ActionError("not_found")
@@ -203,8 +233,9 @@ async def execute_action(session: AsyncSession, a: AgentAction, *, actor: str) -
     args = a.args or {}
     peer_id = int(args.get("peer_id") or a.target_peer_id or 0)
 
-    a.status = ActionStatus.CONFIRMED
-    a.confirmed_at = datetime.now(UTC)
+    if not confirmed:  # autonomous yo'l: amal shu tranzaksiyada yaratilgan
+        a.status = ActionStatus.CONFIRMED
+        a.confirmed_at = datetime.now(UTC)
     await session.flush()
 
     try:

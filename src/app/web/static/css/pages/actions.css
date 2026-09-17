@@ -1,0 +1,20 @@
+/* pages/actions.css — `/actions`: tasdiq kutayotgan yozish amallari.
+ *
+ * Karta ko'rinishining o'zi `components.css` dagi `.action-card` da —
+ * `/ask` sahifasidagi inline kartalar bilan bitta manba.
+ */
+
+.actions-list { display: grid; gap: var(--s-3); }
+
+.ttl {
+  font-variant-numeric: tabular-nums;
+}
+.ttl.is-soon { color: var(--danger); font-weight: 700; }
+
+.actions-filters { display: flex; gap: var(--s-2); align-items: center; flex-wrap: wrap; }
+
+.invariant-note {
+  display: flex; gap: var(--s-3); align-items: flex-start;
+  font-size: var(--fs-sm); color: var(--muted); line-height: var(--lh-body);
+}
+.invariant-note .icon { color: var(--accent-text); margin-block-start: 2px; }

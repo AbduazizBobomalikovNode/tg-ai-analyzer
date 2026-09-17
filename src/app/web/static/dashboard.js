@@ -7,7 +7,12 @@
     return v;
   };
   const $ = (id) => document.getElementById(id);
-  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  // Yagona escape manbai — `md.js` (renderer bilan bir xil mantiq).
+  const esc = window.TGAI.esc;
+  // Sprite ikonkalari (Lucide) — emoji o'rniga: platformada bir xil
+  // ko'rinadi va ekran o'quvchi uni ism deb o'qimaydi (aria-hidden).
+  const SPRITE = (window.TGAI && window.TGAI.sprite) || "/static/icons.svg";
+  const ico = (name) => `<svg class="icon" aria-hidden="true" focusable="false"><use href="${SPRITE}#${name}"></use></svg>`;
   const fmt = (n) => n == null ? "—" : n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e4 ? (n / 1e3).toFixed(0) + "k" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(Math.round(n));
   const money = (v) => v == null ? "—" : "$" + (v < 1 ? v.toFixed(3) : v.toFixed(2));
   const ms = (v) => v == null || v === 0 ? "—" : v >= 1000 ? (v / 1000).toFixed(1) + " s" : v + " ms";
@@ -41,6 +46,13 @@
       lbl.textContent = fmt((max * i) / 3); svg.appendChild(lbl);
     }
     const slot = iw / n, bw = Math.max(2, Math.min(18, slot * 0.7));
+    // M7: avval "har 8-chidan bittasi" + "oxirgisi majburiy" ikkalasi ham
+    // ko'rsatilardi — ular yonma-yon (bir-ikki ustun farqi) tushib qolsa
+    // matnlari bir-birining ustiga chiqib ketardi. Endi — ustunlar orasidagi
+    // masofa **kamida** yorliq kengligicha (`floor(width/64)` maksimal
+    // yorliq soni), oxirgisini majburiy chiqarish yo'q.
+    const maxLabels = Math.max(2, Math.floor(iw / 64));
+    const labelStep = Math.max(1, Math.ceil(n / maxLabels));
     days.forEach((d, i) => {
       const x = padL + i * slot + (slot - bw) / 2;
       let yBase = padT + ih;
@@ -59,7 +71,7 @@
         if (stacked) yBase = y - 2;
         parts.push(v);
       });
-      if (n <= 31 && (i % Math.ceil(n / 8) === 0 || i === n - 1)) {
+      if (n <= 31 && i % labelStep === 0) {
         const tx = g("text", { x: x + bw / 2, y: H - 6, "text-anchor": "middle", "font-size": 10, fill: cssVar("--muted") });
         tx.textContent = d.day.slice(5); svg.appendChild(tx);
       }
@@ -77,14 +89,16 @@
       rows.map((r) => `<tr>${cols.map((c) => `<td class="${c.num ? "num" : ""}">${esc(c.fmt ? c.fmt(r[c.key], r) : r[c.key] ?? "—")}</td>`).join("")}</tr>`).join("");
   }
 
-  const stars = (v) => v == null ? "—" : "★".repeat(Math.round(v)) + "☆".repeat(5 - Math.round(v)) + ` ${Number(v).toFixed(1)}`;
+  // Reyting: emoji/yulduzcha o'rniga son + sprite (ekran o'quvchi emojini
+  // ism deb o'qiydi va platformalarda har xil ko'rinadi — `docs/ui-v2.md` § 7).
+  const stars = (v) => v == null ? "—" : `${Number(v).toFixed(1)} / 5`;
 
   let last = null;
   function drawCharts(ov) {
     const c1 = cssVar("--series-1"), c2 = cssVar("--series-2"), good = cssVar("--good"), bad = cssVar("--bad");
     barChart($("chart-requests"), ov.daily, [{ key: "requests", color: c1, label: t("web.dash.requests") }]);
     barChart($("chart-tokens"), ov.daily, [{ key: "tokens_in", color: c1, label: t("web.dash.tokens_in") }, { key: "tokens_out", color: c2, label: t("web.dash.tokens_out") }], { stacked: true });
-    barChart($("chart-ratings"), ov.daily, [{ key: "up", color: good, label: "👍" }, { key: "down", color: bad, label: "👎" }], { stacked: false });
+    barChart($("chart-ratings"), ov.daily, [{ key: "up", color: good, label: t("web.chat.rate_up") }, { key: "down", color: bad, label: t("web.chat.rate_down") }], { stacked: false });
   }
   async function load() {
     const days = +$("days").value;
@@ -93,7 +107,7 @@
     if (sys) {
       const b = sys.budget || {};
       const hb = sys.heartbeats && !sys.heartbeats._error ? Object.entries(sys.heartbeats) : [];
-      const okTxt = (o) => o && o.ok ? `✅ ${t("web.dash.ok")} · ${o.ms} ms` : `❌ ${t("web.dash.fail")}${o && o.error ? " · " + esc(o.error) : ""}`;
+      const okTxt = (o) => o && o.ok ? `${ico("check")} ${t("web.dash.ok")} · ${o.ms} ms` : `${ico("alert-triangle")} ${t("web.dash.fail")}${o && o.error ? " · " + esc(o.error) : ""}`;
       const rows = [
         [t("web.dash.db"), okTxt(sys.db)],
         [t("web.dash.redis"), okTxt(sys.redis)],
@@ -112,7 +126,7 @@
     set("latency", ms(T.latency_p50_ms));
     set("latency_sub", `${t("web.dash.avg")} ${ms(T.latency_avg_ms)}`);
     set("satisfaction", T.satisfaction == null ? "—" : T.satisfaction + "%");
-    set("satisfaction_sub", `👍 ${T.up} · 👎 ${T.down} · ${t("web.dash.rated", { n: T.rated, total: T.requests })}`);
+    set("satisfaction_sub", `${t("web.chat.rate_up")} ${T.up} · ${t("web.chat.rate_down")} ${T.down} · ${t("web.dash.rated", { n: T.rated, total: T.requests })}`);
     set("auto", T.auto_relevance == null ? "—" : `${T.auto_relevance.toFixed(1)} / 5`);
     set("auto_sub", T.auto_relevance == null ? t("web.dash.auto_none") : `${t("web.dash.usefulness")} ${T.auto_usefulness?.toFixed(1)} · ${t("web.dash.ungrounded")} ${T.ungrounded}/${T.auto_evaluated}`);
 
@@ -155,7 +169,7 @@
     ], ov.top_chats);
 
     $("review").innerHTML = ov.review.length ? ov.review.map((r) => `
-      <li><a href="/chat#c${r.conversation_id}"><b>${r.rating === -1 ? "👎" : ""}${r.auto_relevance != null ? ` ★${r.auto_relevance}` : ""}</b> ${esc(r.excerpt)}</a>
+      <li><a href="/ask#c${r.conversation_id}"><b>${r.rating === -1 ? ico("thumbs-down") : ""}${r.auto_relevance != null ? ` ${esc(String(r.auto_relevance))}/5` : ""}</b> ${esc(r.excerpt)}</a>
       <div class="muted small">${esc(r.model || "")} · ${esc((r.created_at || "").slice(0, 16).replace("T", " "))}${r.comment ? ` · “${esc(r.comment)}”` : ""}${r.auto_note ? ` · ${esc(r.auto_note)}` : ""}</div></li>`).join("")
       : `<li class="muted">${esc(t("web.dash.review_empty"))}</li>`;
   }

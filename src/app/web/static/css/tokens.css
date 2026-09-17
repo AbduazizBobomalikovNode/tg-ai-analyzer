@@ -1,0 +1,275 @@
+/* tokens.css — dizayn tokenlari v2 (UI redizayn, `docs/ui-v2.md`).
+ *
+ * Yuklash tartibi: tokens → base → app (eski sahifa uslublari) → shell →
+ * components. Bu fayl **faqat** custom property e'lon qiladi, hech qanday
+ * ko'rinadigan qoida yo'q — shuning uchun uni birinchi qo'yish xavfsiz.
+ *
+ * Uch qatlam:
+ *   1. `:root`                       — yorug' (default, "system" rejimi)
+ *   2. `@media (prefers-color-scheme: dark) :root:not([data-theme="light"])`
+ *   3. `:root[data-theme="dark"]` / `:root[data-theme="light"]`
+ * Spetsifiklik: `[data-theme]` selektorlari (0,2,0) media ichidagi `:root`
+ * (0,1,0) dan kuchli, ya'ni foydalanuvchi tanlovi **har doim** ustun —
+ * `app.css` dagi eski `prefers-color-scheme` bloki ham shu sababli
+ * to'siq bo'lmaydi.
+ *
+ * Telegram Mini App (4-qatlam) `.in-telegram` da: `--tg-theme-*` bo'lsa
+ * o'sha, bo'lmasa bizning qiymat (`var(--tg-theme-x, fallback)`).
+ */
+
+:root {
+  /* ── 1. Masofa (4pt shkala) ──────────────────────────────────────────── */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 24px;
+  --s-6: 32px;
+  --s-7: 48px;
+
+  /* ── 2. Tipografika — `clamp()` bilan suyuq ──────────────────────────── */
+  --fs-xs: clamp(11px, 0.68rem + 0.1vw, 12px);
+  --fs-sm: clamp(12.5px, 0.76rem + 0.14vw, 14px);
+  --fs-md: clamp(14px, 0.85rem + 0.2vw, 15.5px);
+  --fs-lg: clamp(15.5px, 0.92rem + 0.3vw, 17px);
+  --fs-xl: clamp(18px, 1.02rem + 0.7vw, 22px);
+  --fs-2xl: clamp(22px, 1.2rem + 1.4vw, 30px);
+  --lh-tight: 1.25;
+  --lh-body: 1.55;
+  --lh-answer: 1.65;
+  --measure: 68ch;        /* AI javobining o'lchovi */
+  --measure-narrow: 52ch; /* bo'sh holat, yordam matni */
+
+  /* ── 3. Karkas o'lchamlari ───────────────────────────────────────────── */
+  --bp-mobile: 860px;     /* YAGONA breakpoint manbai; JS `matchMedia` bilan o'qiydi */
+  --bp-wide: 1200px;
+  --rail-w: 64px;         /* desktop ikonka raili */
+  --list-w: 336px;        /* 2/3-panelning ro'yxat ustuni */
+  --content-max: 1100px;
+  --topbar-h: 52px;
+  --tabbar-h: 56px;
+  --tap: 44px;            /* minimal teginish nishoni */
+
+  /* ── 4. Xavfsiz zona + klaviatura ────────────────────────────────────── */
+  /* `--kb` ni `lib/theme.js` `visualViewport` dan yozadi (WebKit 217754:
+   * klaviatura ochilganda `safe-area-inset-bottom` kichraymaydi). */
+  --kb: 0px;
+  --sa-top: env(safe-area-inset-top, 0px);
+  --sa-bottom: env(safe-area-inset-bottom, 0px);
+  --sa-left: env(safe-area-inset-left, 0px);
+  --sa-right: env(safe-area-inset-right, 0px);
+  --pad-bottom: max(var(--sa-bottom), var(--kb));
+
+  /* ── 5. Yangi semantik ranglar (yorug') ──────────────────────────────── */
+  --cite: #0b6ea8;
+  --cite-bg: #eaf5fd;
+  --cite-border: #b9dffb;
+  --stage-idle: #cbd5e0;
+  --stage-active: #0d78b8;
+  --stage-done: #0f9960;
+  --stage-failed: #e5484d;
+  --skeleton: #e6ebf1;
+  --skeleton-hi: #f2f6fa;
+  --scrim: rgba(23, 33, 43, .42);
+
+  /* ── 6. Peer palitrasi (Telegram 7 rangi) ────────────────────────────── */
+  /* `hash(peer_id) % 7` → `--peer-N`. Har juftning kontrasti (WCAG) izohda;
+   * hisob `docs/ui-v2.md` dagi jadvalda. Hammasi >= 4.5:1. */
+  --peer-1: #c0392b; --peer-1-ink: #ffffff;  /* 5.44:1 */
+  --peer-2: #c05621; --peer-2-ink: #ffffff;  /* 4.57:1 */
+  --peer-3: #7a3fa8; --peer-3-ink: #ffffff;  /* 6.77:1 */
+  --peer-4: #2f7a45; --peer-4-ink: #ffffff;  /* 5.26:1 */
+  --peer-5: #0e7490; --peer-5-ink: #ffffff;  /* 5.36:1 */
+  --peer-6: #2159b8; --peer-6-ink: #ffffff;  /* 6.59:1 */
+  --peer-7: #b03a7a; --peer-7-ink: #ffffff;  /* 5.63:1 */
+
+  /* ── 7. Harakat ──────────────────────────────────────────────────────── */
+  --t-hover: 110ms;
+  --t-chip: 180ms;
+  --t-card: 140ms;
+  --t-sheet: 260ms;
+  --t-pane: 220ms;
+  --ease-out-back: cubic-bezier(.34, 1.4, .64, 1);
+  --ease-sheet: cubic-bezier(.32, .72, 0, 1);
+
+  /* ── 8. Z-qatlamlar ──────────────────────────────────────────────────── */
+  --z-rail: 20;
+  --z-topbar: 30;
+  --z-tabbar: 40;
+  --z-sheet: 60;
+  --z-palette: 70;
+  --z-toast: 80;
+}
+
+/* ── Qorong'u: tizim tanlovi (foydalanuvchi "light" demagan bo'lsa) ────── */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --cite: #7cc4fa;
+    --cite-bg: #16304a;
+    --cite-border: #1d4162;
+    --stage-idle: #33455a;
+    --stage-active: #5eb5f7;
+    --stage-done: #3fc08a;
+    --stage-failed: #ff6b6b;
+    --skeleton: #1e2b38;
+    --skeleton-hi: #27364a;
+    --scrim: rgba(0, 0, 0, .6);
+
+    --peer-1: #ef8d84; --peer-1-ink: #3a0f0a;  /* 7.04:1 */
+    --peer-2: #efa06a; --peer-2-ink: #3a1c07;  /* 7.34:1 */
+    --peer-3: #c79bea; --peer-3-ink: #2a1038;  /* 7.57:1 */
+    --peer-4: #79ce93; --peer-4-ink: #0c2c17;  /* 7.97:1 */
+    --peer-5: #6fc7dd; --peer-5-ink: #042b36;  /* 7.76:1 */
+    --peer-6: #8db4f2; --peer-6-ink: #0b2049;  /* 7.55:1 */
+    --peer-7: #eb9bc6; --peer-7-ink: #3a0e28;  /* 7.88:1 */
+  }
+}
+
+/* ── Qorong'u: aniq tanlov (tizimdan qat'i nazar) ─────────────────────── */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  /* eski (app.css) semantik tokenlarni ham qayta e'lon qilamiz, chunki
+   * app.css ularni faqat `@media (prefers-color-scheme: dark)` da beradi */
+  --bg: #0b1219;
+  --panel: #151f2a;
+  --panel-2: #1b2733;
+  --panel-3: #22303e;
+  --overlay: rgba(0, 0, 0, .55);
+  --text: #e8eef5;
+  --muted: #93a4b7;
+  --faint: #78899d;
+  --border: #24323f;
+  --border-soft: #1d2938;
+  --border-strong: #33455a;
+  --accent: #5eb5f7;
+  --accent-2: #86c9fb;
+  --accent-text: #7cc4fa;
+  --accent-ink: #06202f;
+  --accent-soft: #16304a;
+  --accent-soft-2: #1d4162;
+  --danger: #ff6b6b;
+  --danger-soft: #35191b;
+  --danger-ink: #ffb3b3;
+  --warn-bg: #33290d;
+  --warn-text: #ffd66b;
+  --warn-border: #4d3d13;
+  --ok: #3ddc97;
+  --ok-soft: #102b22;
+  --bubble-user: #235272;
+  --bubble-user-ink: #eaf5ff;
+  --bubble-ai: #18242f;
+  --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70;
+  --good: #3aa53a; --bad: #e66767;
+  --sh-1: 0 1px 2px rgba(0, 0, 0, .35);
+  --sh-2: 0 2px 10px rgba(0, 0, 0, .40);
+  --sh-3: 0 12px 34px rgba(0, 0, 0, .50);
+  --sh-4: 0 28px 70px rgba(0, 0, 0, .60);
+
+  --cite: #7cc4fa;
+  --cite-bg: #16304a;
+  --cite-border: #1d4162;
+  --stage-idle: #33455a;
+  --stage-active: #5eb5f7;
+  --stage-done: #3fc08a;
+  --stage-failed: #ff6b6b;
+  --skeleton: #1e2b38;
+  --skeleton-hi: #27364a;
+  --scrim: rgba(0, 0, 0, .6);
+
+  --peer-1: #ef8d84; --peer-1-ink: #3a0f0a;
+  --peer-2: #efa06a; --peer-2-ink: #3a1c07;
+  --peer-3: #c79bea; --peer-3-ink: #2a1038;
+  --peer-4: #79ce93; --peer-4-ink: #0c2c17;
+  --peer-5: #6fc7dd; --peer-5-ink: #042b36;
+  --peer-6: #8db4f2; --peer-6-ink: #0b2049;
+  --peer-7: #eb9bc6; --peer-7-ink: #3a0e28;
+}
+
+/* ── Yorug': aniq tanlov — tizim qorong'u bo'lsa ham ──────────────────── */
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --bg: #eef1f5;
+  --panel: #ffffff;
+  --panel-2: #f4f7fa;
+  --panel-3: #e9eef4;
+  --overlay: rgba(23, 33, 43, .38);
+  --text: #17212b;
+  --muted: #55636f;
+  --faint: #667689;
+  --border: #e3e8ee;
+  --border-soft: #eef2f6;
+  --border-strong: #cbd5e0;
+  --accent: #0d78b8;
+  --accent-2: #0a6497;
+  --accent-text: #0b6ea8;
+  --accent-ink: #ffffff;
+  --accent-soft: #eaf5fd;
+  --accent-soft-2: #cbe6f8;
+  --danger: #e5484d;
+  --danger-soft: #fdecec;
+  --danger-ink: #8a1c1c;
+  --warn-bg: #fff7e0;
+  --warn-text: #78560a;
+  --warn-border: #f2dfae;
+  --ok: #0f9960;
+  --ok-soft: #e6f6ef;
+  --bubble-user: #dceffd;
+  --bubble-user-ink: #0d2f45;
+  --bubble-ai: #ffffff;
+  --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a;
+  --good: #008300; --bad: #e34948;
+  --sh-1: 0 1px 2px rgba(23, 33, 43, .06), 0 1px 1px rgba(23, 33, 43, .04);
+  --sh-2: 0 2px 8px rgba(23, 33, 43, .08), 0 1px 2px rgba(23, 33, 43, .05);
+  --sh-3: 0 10px 30px rgba(23, 33, 43, .12), 0 2px 8px rgba(23, 33, 43, .06);
+  --sh-4: 0 24px 60px rgba(23, 33, 43, .20), 0 6px 18px rgba(23, 33, 43, .10);
+
+  --cite: #0b6ea8;
+  --cite-bg: #eaf5fd;
+  --cite-border: #b9dffb;
+  --stage-idle: #cbd5e0;
+  --stage-active: #0d78b8;
+  --stage-done: #0f9960;
+  --stage-failed: #e5484d;
+  --skeleton: #e6ebf1;
+  --skeleton-hi: #f2f6fa;
+  --scrim: rgba(23, 33, 43, .42);
+
+  --peer-1: #c0392b; --peer-1-ink: #ffffff;
+  --peer-2: #c05621; --peer-2-ink: #ffffff;
+  --peer-3: #7a3fa8; --peer-3-ink: #ffffff;
+  --peer-4: #2f7a45; --peer-4-ink: #ffffff;
+  --peer-5: #0e7490; --peer-5-ink: #ffffff;
+  --peer-6: #2159b8; --peer-6-ink: #ffffff;
+  --peer-7: #b03a7a; --peer-7-ink: #ffffff;
+}
+
+/* ── Telegram Mini App mapping ────────────────────────────────────────── */
+/* `.in-telegram` sinfini `lib/tg.js` `<html>` ga qo'yadi. Har bir
+ * `--tg-theme-*` ning **fallback**i bor — Telegram kalitni bermasa yoki
+ * bo'sh yuborsa UI o'z palitrasida qoladi (mijozlar ba'zi kalitlarni
+ * bermaydi: `section_bg_color` faqat 6.1+). */
+:root.in-telegram {
+  --bg: var(--tg-theme-secondary-bg-color, #eef1f5);
+  --panel: var(--tg-theme-bg-color, #ffffff);
+  --panel-2: var(--tg-theme-section-bg-color, var(--tg-theme-bg-color, #f4f7fa));
+  --panel-3: var(--tg-theme-secondary-bg-color, #e9eef4);
+  --text: var(--tg-theme-text-color, #17212b);
+  --muted: var(--tg-theme-hint-color, #55636f);
+  --faint: var(--tg-theme-hint-color, #667689);
+  --border: var(--tg-theme-section-separator-color, #e3e8ee);
+  --accent: var(--tg-theme-button-color, #0d78b8);
+  --accent-ink: var(--tg-theme-button-text-color, #ffffff);
+  --accent-text: var(--tg-theme-link-color, #0b6ea8);
+  --danger: var(--tg-theme-destructive-text-color, #e5484d);
+
+  /* Telegram o'z xavfsiz zonasini beradi — bo'lmasa `env()` ga qaytamiz. */
+  --sa-top: var(--tg-content-safe-area-inset-top, env(safe-area-inset-top, 0px));
+  --sa-bottom: var(--tg-safe-area-inset-bottom, env(safe-area-inset-bottom, 0px));
+}
+
+/* Telegram ichida `100svh` emas — barqaror viewport balandligi. */
+:root.in-telegram .shell {
+  block-size: var(--tg-viewport-stable-height, 100svh);
+}

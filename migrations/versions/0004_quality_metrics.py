@@ -31,9 +31,7 @@ COLS = (
 def upgrade() -> None:
     for col in COLS:
         op.add_column("conversation_messages", col)
-    op.create_index(
-        "ix_conversation_messages_created_at", "conversation_messages", ["created_at"]
-    )
+    op.create_index("ix_conversation_messages_created_at", "conversation_messages", ["created_at"])
 
 
 def downgrade() -> None:

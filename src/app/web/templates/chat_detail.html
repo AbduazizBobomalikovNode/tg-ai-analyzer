@@ -1,0 +1,57 @@
+{% extends "chats.html" %}
+{% import "_macros.html" as m %}
+
+{# chat_detail.html — `/chats/{id}` (R2-A).
+
+   Ro'yxat paneli `chats.html` dan meros (desktopda ikkala panel ko'rinadi),
+   bu yerda faqat kontent paneli almashadi. Mobilda `pages.py` `pane="content"`
+   beradi va `body[data-detail="1"]` tufayli `lib/shell.js` Telegram
+   BackButton'ini yoqadi (= `history.back()`).
+
+   Karkas bo'sh: sarlavha, KPI plitalari, heatmap va digest'lar
+   `static/pages/chat_detail.js` da quriladi (`el()`, `innerHTML` yo'q;
+   yagona istisno — digest matni `md()` chiqishi, u escape-first). #}
+
+{% block title %}{{ t('web.chats.title') }} · {{ t('web.title') }}{% endblock %}
+{% block body_class %}page-chats page-chat-detail{% endblock %}
+{% block body_attrs %} data-detail="1"{% endblock %}
+
+{% block page_head %}
+  <link rel="modulepreload" href="{{ asset('pages/chat_detail.js') }}">
+{% endblock %}
+
+{# H4: mobilda `chats.html` (ota shablon) topbar bloki bermaydi — natijada
+   status-bar tepasida orqaga qaytish yo'li yo'q edi. `data-detail="1"`
+   (yuqorida) Telegram BackButton'ini `lib/shell.js` orqali allaqachon
+   yoqadi; bu yerdagi `‹` esa oddiy brauzer/desktop uchun. Sarlavha va
+   `⋯` menyu holati `pages/chat_detail.js` bilan to'ldiriladi. #}
+{% block topbar %}
+<header class="topbar-v2 cd-topbar">
+  <button type="button" class="icon-btn-v2 cd-back" id="cd-back" aria-label="{{ t('web.chats.title') }}">
+    {{ m.icon("chevron-left") }}
+  </button>
+  <span class="topbar-h1 cd-topbar-title" id="cd-topbar-title">{{ t('web.chats.title') }}</span>
+  <span class="spacer"></span>
+  <button type="button" class="icon-btn-v2" id="cd-menu" aria-label="{{ t('web.chats.menu') }}" hidden>
+    {{ m.icon("more-horizontal") }}
+  </button>
+  <button type="button" class="icon-btn-v2" data-theme-toggle aria-label="{{ t('web.theme.title') }}">{{ m.icon("monitor") }}</button>
+</header>
+{% endblock %}
+
+{% block pane_content %}
+<div class="pane-content scrolls" id="chats-content">
+  <div class="pane-inner">
+    <div class="chat-detail" id="chat-detail" aria-busy="true">
+      {{ m.skeleton_rows(4) }}
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block page_scripts %}
+  <script type="module">
+    import { initChatDetail } from "{{ asset('pages/chat_detail.js') }}";
+    initChatDetail({ chatId: {{ selected_id | default(0) | int }} });
+  </script>
+{% endblock %}

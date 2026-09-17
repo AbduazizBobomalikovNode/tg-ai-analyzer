@@ -6,7 +6,7 @@ requires-python = ">=3.12"
 
 dependencies = [
     # Telegram
-    "telethon>=1.36",
+    "telethon>=1.44",  # layer 227+: channels.SearchPosts(query=), CheckSearchPostsFlood
     "aiogram>=3.15",
     # web / api (Mini App fallback auth)
     "fastapi>=0.115",
@@ -23,7 +23,9 @@ dependencies = [
     "redis>=5.2",
     "arq>=0.26",
     # llm
-    "google-genai>=0.3",
+    # >=2.23: `batches.create_embeddings` (phase4/C batch embedding). Eski
+    # versiyada metod yo'q — `GeminiProvider._batches()` aniq xato beradi.
+    "google-genai>=2.23",
     "anthropic>=0.122",
     # kuzatuv
     "prometheus-client>=0.21",
@@ -35,6 +37,9 @@ dependencies = [
     "httpx>=0.28",
     "qrcode[pil]>=8.0",
     "orjson>=3.10",
+    # til aniqlash (ingest) — o'zbek tili lingua ro'yxatida yo'q, shuning uchun
+    # ru/en ni lingua, uz ni marker so'zlar hal qiladi (services/ingestion.py)
+    "lingua-language-detector>=2.0",
 ]
 
 [project.optional-dependencies]
@@ -62,10 +67,33 @@ src = ["src"]
 select = ["E", "F", "I", "UP", "B", "ASYNC", "S", "RUF"]
 ignore = ["S101"]  # assert allowed in tests
 
+[tool.ruff.lint.per-file-ignores]
+# Bu fayllar ataylab kirill/o'zbek matnini **ma'lumot** sifatida saqlaydi
+# (fold jadvallari, stop-so'zlar, paritet korpusi) — RUF001/2/3 "ASCII'ga
+# o'xshash belgi" ogohlantirishlari bu yerda shovqin.
+"src/app/services/stopwords.py" = ["RUF001", "RUF002", "RUF003"]
+"src/app/services/textnorm.py" = ["RUF001", "RUF002", "RUF003"]
+"migrations/versions/0008_retrieval_foundation.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_textnorm.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_db_integration.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_ingest_normalization.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_alerts.py" = ["RUF001", "RUF002", "RUF003"]  # phase3/C: fold parite korpusi
+# phase4/A: entity regexlari kirill hashtag'larni ham qamraydi — namunalar kirillda.
+"src/app/services/entities.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_entities.py" = ["RUF001", "RUF002", "RUF003"]
+# perf o'lchovi: korpus **sintetik** — `random` shu yerda kriptografiya emas,
+# takrorlanadigan urug' (S311). `S608` esa `EXPLAIN` uchun o'zimiz kompilyatsiya
+# qilgan SQL matnini oldiga qo'shishdan kelib chiqadi, foydalanuvchi kiritmasi yo'q.
+"evals/perf/seed.py" = ["S311", "RUF001", "RUF002", "RUF003"]
+"evals/perf/bench.py" = ["S311", "S608", "RUF001", "RUF002", "RUF003"]
+"tests/test_perf_smoke.py" = ["S311", "RUF001", "RUF002", "RUF003"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-pythonpath = ["src"]
+# "src" birinchi (ilova paketi), "." — repo ildizi: `evals/` paketi
+# `tests/test_evals.py` uchun oddiy `pytest` da ham import bo'lsin.
+pythonpath = ["src", "."]
 
 [tool.mypy]
 python_version = "3.12"

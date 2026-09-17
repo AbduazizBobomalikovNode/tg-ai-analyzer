@@ -1,0 +1,178 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+
+{# _shell.html — navigatsiya karkasi (desktop rail / mobil tab bar).
+   Sahifalar shundan meros oladi va `{% block pane_list %}` /
+   `{% block pane_content %}` ni to'ldiradi.
+
+   Marshrutlar: `ROUTES` da `none` — hali yo'q sahifa. U holda element
+   ko'rinadi (IA ko'rinib tursin) lekin **havola emas** — o'lik link yo'q.
+   R2 dan keyin `none` qolmadi: IA dagi to'qqizta sahifa ham jonli.
+   Yangi sahifa qo'shilganda shu xarita va `base.html` dagi `TGAI.routes`
+   yangilanadi, boshqa hech nima emas
+   (`test_web.py::test_routes_map_has_no_dead_links`). #}
+
+{% set ROUTES = {
+  "today": "/today", "chats": "/chats", "ask": "/ask", "alerts": "/alerts",
+  "actions": "/actions", "dashboard": "/dashboard", "briefings": "/briefings",
+  "settings": "/settings", "onboarding": "/onboarding"
+} %}
+
+{% set NAV = [
+  ("today",     "home",           "web.nav.today"),
+  ("chats",     "messages-square","web.nav.chats"),
+  ("ask",       "sparkles",       "web.nav.ask"),
+  ("alerts",    "bell",           "web.nav.alerts"),
+  ("actions",   "check-check",    "web.nav.actions"),
+  ("dashboard", "bar-chart-3",    "web.nav.dashboard"),
+] %}
+
+{% set TABS = [
+  ("today",  "home",            "web.nav.today"),
+  ("chats",  "messages-square", "web.nav.chats"),
+  ("ask",    "sparkles",        "web.nav.ask"),
+  ("alerts", "bell",            "web.nav.alerts"),
+] %}
+
+{% set nav_current = nav_current | default("") %}
+
+{% block content %}
+<a class="skip-link" href="#main-content">{{ t('web.a11y.skip') }}</a>
+
+<div class="shell">
+  <div class="shell-row">
+
+    {# ── Desktop rail (>=860px) ── #}
+    <nav class="rail" aria-label="{{ t('web.a11y.primary_nav') }}">
+      <a class="rail-brand" href="{{ ROUTES.ask or '/ask' }}" aria-label="{{ t('web.title') }}">{{ m.icon("sparkles") }}</a>
+      {% for key, ico, label in NAV %}
+        {% set href = ROUTES[key] %}
+        {% if href %}
+        <a class="rail-item" href="{{ href }}"{% if nav_current == key %} aria-current="page"{% endif %}>
+          {{ m.icon(ico) }}<span class="sr-only">{{ t(label) }}</span>
+          <span class="rail-tip" aria-hidden="true">{{ t(label) }}</span>
+          {# Badge slot: `lib/actions-badge.js` `[data-actions-badge]` bo'yicha to'ldiradi. #}
+          {% if key == 'actions' %}<span class="nav-badge" id="rail-actions-badge" data-actions-badge hidden>0</span>{% endif %}
+        </a>
+        {% else %}
+        <span class="rail-item is-disabled" aria-disabled="true" title="{{ t('web.nav.soon') }}">
+          {{ m.icon(ico) }}<span class="sr-only">{{ t(label) }} — {{ t('web.nav.soon') }}</span>
+        </span>
+        {% endif %}
+      {% endfor %}
+
+      <span class="rail-spacer"></span>
+
+      <button type="button" class="rail-item" data-cmdk-open aria-label="{{ t('web.cmd.open') }}">
+        {{ m.icon("command") }}<span class="rail-tip" aria-hidden="true">{{ t('web.cmd.open') }}</span>
+      </button>
+      <button type="button" class="rail-item" data-theme-toggle aria-label="{{ t('web.theme.title') }}">
+        {{ m.icon("monitor") }}
+      </button>
+      {% if ROUTES.settings %}
+      <a class="rail-item" href="{{ ROUTES.settings }}"{% if nav_current == 'settings' %} aria-current="page"{% endif %}>
+        {{ m.icon("settings") }}<span class="sr-only">{{ t('web.nav.settings') }}</span>
+        <span class="rail-tip" aria-hidden="true">{{ t('web.nav.settings') }}</span>
+      </a>
+      {% else %}
+      <button type="button" class="rail-item" data-sheet-open aria-label="{{ t('web.nav.more') }}">
+        {{ m.icon("more-horizontal") }}<span class="rail-tip" aria-hidden="true">{{ t('web.nav.more') }}</span>
+      </button>
+      {% endif %}
+    </nav>
+
+    {# ── Asosiy ustun ── #}
+    <div class="shell-main">
+      {% block topbar %}{% endblock %}
+      <div class="shell-body" id="main-content" data-pane="{{ pane | default('content') }}">
+        {% block pane_list %}{% endblock %}
+        {% block pane_content %}{% endblock %}
+      </div>
+    </div>
+  </div>
+
+  {# ── Mobil tab bar (<860px) ── #}
+  <nav class="tabbar" aria-label="{{ t('web.a11y.primary_nav') }}">
+    {% for key, ico, label in TABS %}
+      {% set href = ROUTES[key] %}
+      {% if href %}
+      <a class="tabbar-item" href="{{ href }}"{% if nav_current == key %} aria-current="page"{% endif %}>
+        {{ m.icon(ico) }}<span>{{ t(label) }}</span>
+      </a>
+      {% else %}
+      <span class="tabbar-item is-disabled" aria-disabled="true">{{ m.icon(ico) }}<span>{{ t(label) }}</span></span>
+      {% endif %}
+    {% endfor %}
+    <button type="button" class="tabbar-item" data-sheet-open aria-haspopup="dialog" aria-controls="more-sheet">
+      {{ m.icon("menu") }}<span>{{ t('web.nav.more') }}</span>
+    </button>
+  </nav>
+</div>
+
+{# ── Mobil "More" varag'i ── #}
+<div class="sheet" id="more-sheet" hidden>
+  <div class="sheet-box" role="dialog" aria-modal="true" aria-label="{{ t('web.nav.more') }}">
+    <div class="sheet-grab" aria-hidden="true"></div>
+    {% for key, ico, label in [("actions","check-check","web.nav.actions"), ("briefings","inbox","web.nav.briefings"), ("dashboard","bar-chart-3","web.nav.dashboard"), ("settings","settings","web.nav.settings")] %}
+      {% if ROUTES[key] %}
+      {# `briefings` faqat shu varaqda ko'rinadi (rail/tabbar'da yo'q) —
+         `aria-current` shu yerda ham qo'yilmasa u yagona "joriy sahifasiz"
+         marshrut bo'lib qolardi. #}
+      <a class="sheet-item" href="{{ ROUTES[key] }}"{% if nav_current == key %} aria-current="page"{% endif %}>{{ m.icon(ico) }}{{ t(label) }}</a>
+      {% else %}
+      <span class="sheet-item is-disabled" aria-disabled="true">{{ m.icon(ico) }}{{ t(label) }} — {{ t('web.nav.soon') }}</span>
+      {% endif %}
+    {% endfor %}
+    <button type="button" class="sheet-item" data-theme-toggle>
+      {{ m.icon("monitor") }}{{ t('web.theme.title') }} · <span data-theme-label></span>
+    </button>
+    <button type="button" class="sheet-item" data-cmdk-open>{{ m.icon("command") }}{{ t('web.cmd.open') }}</button>
+    <div class="sheet-item" style="justify-content: space-between">
+      {{ m.lang_switch(t, langs, lang) }}
+    </div>
+    {# L5: chiqish — o'z destruktiv qatori, til qatoriga qo'shilgan
+       mute'langan tugma emas. `lib/shell.js::initLogout` bog'laydi. #}
+    <button type="button" class="sheet-item is-danger" id="btn-logout-sheet">{{ m.icon("log-out") }}{{ t('web.chat.logout') }}</button>
+    <button type="button" class="sheet-item" data-sheet-close>{{ m.icon("x") }}{{ t('web.close') }}</button>
+  </div>
+</div>
+
+{# ── Buyruq palitrasi (⌘K) ── #}
+<div class="cmdk" id="cmdk" hidden>
+  <div class="cmdk-box" role="dialog" aria-modal="true" aria-label="{{ t('web.cmd.open') }}">
+    <div class="cmdk-head">
+      {{ m.icon("search") }}
+      <input id="cmdk-input" type="text" role="combobox" autocomplete="off" spellcheck="false"
+             aria-expanded="true" aria-controls="cmdk-list" aria-autocomplete="list"
+             placeholder="{{ t('web.cmd.placeholder') }}" aria-label="{{ t('web.cmd.placeholder') }}">
+      <span class="cmdk-kbd" aria-hidden="true">⌘K</span>
+    </div>
+    <ul class="cmdk-list" id="cmdk-list" role="listbox" aria-label="{{ t('web.cmd.results') }}"></ul>
+  </div>
+</div>
+
+{{ m.toast_root() }}
+{% endblock %}
+
+{% block head %}
+  {# Modul grafi: kirish nuqtasi `lib/shell.js`, u `theme/tg/palette-cmd` ni
+     tortadi. `modulepreload` ularni parallel yuklaydi (aks holda zanjir). #}
+  <link rel="modulepreload" href="{{ asset('lib/shell.js') }}">
+  <link rel="modulepreload" href="/static/lib/theme.js">
+  <link rel="modulepreload" href="/static/lib/palette-cmd.js">
+{% endblock %}
+
+{% block scripts %}
+<script type="module">
+  {# ⌘K "Chats" bo'limi — `initShell()` o'zi `/api/me` orqali yuklaydi va
+     `tgai:chats` hodisasini tinglaydi (`lib/shell.js::loadPaletteChats`,
+     H3). Bu yerda qo'shimcha kod kerak emas. #}
+  import { initShell } from "{{ asset('lib/shell.js') }}";
+  initShell();
+</script>
+<script type="module">
+  // Tasdiq kutayotgan amallar soni — rail badge'i (ui/R2C).
+  import { initActionsBadge } from "/static/lib/actions-badge.js";
+  initActionsBadge();
+</script>
+{% endblock %}

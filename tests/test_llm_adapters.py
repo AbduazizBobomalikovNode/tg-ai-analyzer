@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import math
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -284,3 +287,154 @@ def test_as_json_object_wraps_non_objects() -> None:
     assert _as_json_object('{"a":1}') == {"a": 1}
     assert _as_json_object("oddiy matn") == {"result": "oddiy matn"}
     assert _as_json_object("[1,2]") == {"result": [1, 2]}
+
+
+def test_deepseek_strips_leaked_tool_markup() -> None:
+    """V4 uzun transkriptdan keyin ichki razmetkani matn kanalida chiqaradi.
+
+    Razmetka `finish_reason="stop"` bilan ham keladi, shuning uchun adapter uni
+    kesadi — aks holda foydalanuvchi javob o'rniga xom markup ko'radi.
+    """
+    from app.llm.deepseek import _strip_tool_markup
+
+    bar = "｜"  # noqa: RUF001  (FULLWIDTH VERTICAL LINE — razmetka aynan shunday keladi)
+    leaked = (
+        "Serverdan qidiraman:\n\n"
+        f"<{bar}{bar}DSML{bar}{bar}tool_calls>\n"
+        f'<{bar}{bar}DSML{bar}{bar}invoke name="search_telegram">'
+    )
+    assert _strip_tool_markup(leaked) == "Serverdan qidiraman:"
+
+    clean = "Javob: #843 da kv puli haqida yozilgan."
+    assert _strip_tool_markup(clean) == clean
+    assert _strip_tool_markup("") == ""
+
+
+# ─── phase4/B: Gemini embedding — o'lcham va normallashtirish ────────────────
+
+
+class _FakeEmbeddings:
+    """`client.aio.models` o'rnini bosadi: chaqiruv konfiguratsiyasini yozib oladi."""
+
+    def __init__(self, vectors: list[list[float]]) -> None:
+        self.vectors = vectors
+        self.calls: list[dict[str, Any]] = []
+
+    async def embed_content(self, *, model: str, contents: Any, config: Any) -> Any:
+        self.calls.append({"model": model, "contents": contents, "config": config})
+        return SimpleNamespace(
+            embeddings=[SimpleNamespace(values=v) for v in self.vectors],
+            metadata=SimpleNamespace(billable_character_count=7),
+        )
+
+
+def _gemini_with(vectors: list[list[float]]) -> tuple[Any, _FakeEmbeddings]:
+    from app.llm.gemini import GeminiProvider
+
+    provider = GeminiProvider(api_key="test-key")  # soxta kalit — tarmoqqa chiqmaydi
+    fake = _FakeEmbeddings(vectors)
+    provider._client = SimpleNamespace(aio=SimpleNamespace(models=fake))
+    return provider, fake
+
+
+def _norm(vec: list[float]) -> float:
+    return math.sqrt(sum(v * v for v in vec))
+
+
+def test_embed_passes_output_dimensionality_and_task_type() -> None:
+    provider, fake = _gemini_with([[3.0, 4.0]])
+    res = asyncio.run(
+        provider.embed(
+            ["salom"], model="gemini-embedding-001", dim=768, task_type="RETRIEVAL_QUERY"
+        )
+    )
+    cfg = fake.calls[0]["config"]
+    assert cfg.output_dimensionality == 768
+    assert cfg.task_type == "RETRIEVAL_QUERY"
+    assert res.model == "gemini-embedding-001"
+
+
+def test_embedding_001_vectors_are_normalized_client_side() -> None:
+    """Kesilgan vektor birlik uzunlikda emas — 001 uchun biz normallashtiramiz."""
+    provider, _ = _gemini_with([[3.0, 4.0], [0.0, 0.0]])
+    res = asyncio.run(provider.embed(["a", "b"], model="gemini-embedding-001", dim=2))
+    assert _norm(res.vectors[0]) == pytest.approx(1.0)
+    assert res.vectors[0] == pytest.approx([0.6, 0.8])
+    assert res.vectors[1] == [0.0, 0.0]  # nol vektor — bo'lish yo'q
+
+
+def test_embedding_2_vectors_are_left_untouched() -> None:
+    """embedding-2 o'zi normallashtiradi — ikkinchi marta bo'lish keraksiz."""
+    provider, _ = _gemini_with([[3.0, 4.0]])
+    res = asyncio.run(provider.embed(["a"], model="gemini-embedding-2", dim=2))
+    assert res.vectors[0] == [3.0, 4.0]
+
+
+def test_normalize_vectors_handles_model_prefix() -> None:
+    from app.llm.gemini import NORMALIZE_CLIENT_SIDE, normalize_vectors
+
+    assert NORMALIZE_CLIENT_SIDE == frozenset({"gemini-embedding-001"})
+    out = normalize_vectors("models/gemini-embedding-001", [[3.0, 4.0]])
+    assert _norm(out[0]) == pytest.approx(1.0)
+
+
+# ─── 2026-09-16: embed usage yo'q bo'lsa token taxmini (byudjet qopqog'i) ────
+
+
+class _FakeEmbeddingsNoUsage:
+    """`embed_content` javobida usage/metadata umuman yo'q — jonli holat."""
+
+    def __init__(self, vectors: list[list[float]], *, metadata: Any = None) -> None:
+        self.vectors = vectors
+        self.metadata = metadata
+        self.calls: list[dict[str, Any]] = []
+
+    async def embed_content(self, *, model: str, contents: Any, config: Any) -> Any:
+        self.calls.append({"model": model, "contents": contents, "config": config})
+        return SimpleNamespace(
+            embeddings=[SimpleNamespace(values=v) for v in self.vectors], metadata=self.metadata
+        )
+
+
+def _gemini_no_usage(
+    vectors: list[list[float]], *, metadata: Any = None
+) -> tuple[Any, _FakeEmbeddingsNoUsage]:
+    from app.llm.gemini import GeminiProvider
+
+    provider = GeminiProvider(api_key="test-key")
+    fake = _FakeEmbeddingsNoUsage(vectors, metadata=metadata)
+    provider._client = SimpleNamespace(aio=SimpleNamespace(models=fake))
+    return provider, fake
+
+
+def test_embed_estimates_tokens_when_metadata_is_missing() -> None:
+    """`resp.metadata` yo'q — `tokens_in` 0 qolib, narx (`estimate_cost`) ham 0
+    bo'lib qolmasin (kunlik xarajat limiti jimgina ishlamay qoladi)."""
+    provider, _ = _gemini_no_usage([[3.0, 4.0]], metadata=None)
+    res = asyncio.run(provider.embed(["a" * 40], model="gemini-embedding-001", dim=2))
+    assert res.usage.tokens_in == 10  # ceil(40 / 4)
+
+
+def test_embed_estimates_tokens_when_billable_count_is_zero() -> None:
+    """`resp.metadata` bor, lekin `billable_character_count` yo'q/0 — bir xil taxmin."""
+    provider, _ = _gemini_no_usage(
+        [[3.0, 4.0], [1.0, 0.0]], metadata=SimpleNamespace(billable_character_count=0)
+    )
+    res = asyncio.run(provider.embed(["a" * 4, "b" * 6], model="gemini-embedding-001", dim=2))
+    assert res.usage.tokens_in == 1 + 2  # ceil(4/4) + ceil(6/4)
+
+
+def test_embed_prefers_real_usage_over_estimate() -> None:
+    """Javobda haqiqiy son bo'lsa taxminga tushilmaydi."""
+    provider, _ = _gemini_no_usage(
+        [[3.0, 4.0]], metadata=SimpleNamespace(billable_character_count=999)
+    )
+    res = asyncio.run(provider.embed(["a" * 4000], model="gemini-embedding-001", dim=2))
+    assert res.usage.tokens_in == 999
+
+
+def test_estimate_tokens_heuristic_matches_char_over_four() -> None:
+    from app.llm.base import estimate_tokens_heuristic
+
+    assert estimate_tokens_heuristic([]) == 0
+    assert estimate_tokens_heuristic(["", "abcd", "abcde"]) == 1 + 2  # bo'sh satr hisobga kirmaydi

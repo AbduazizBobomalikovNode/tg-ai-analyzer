@@ -1,32 +1,57 @@
 {% extends "base.html" %}
+{% import "_macros.html" as m %}
 {% block title %}{{ t('web.login.title') }} · {{ t('web.title') }}{% endblock %}
 {% block body_class %}page-login{% endblock %}
 {% block content %}
 <main class="login-wrap">
   <div class="login-card">
     <div class="brand">
-      <div class="brand-logo" aria-hidden="true">✈️</div>
+      <div class="brand-logo" aria-hidden="true">{{ m.icon("sparkles") }}</div>
       <div>
         <div class="brand-name">{{ t('web.title') }}</div>
         <div class="brand-sub">{{ t('web.login.title') }}</div>
       </div>
-      <nav class="lang-switch" aria-label="{{ t('web.lang') }}">
-        {% for l in langs %}<a href="?lang={{ l }}" class="{% if l == lang %}active{% endif %}">{{ l|upper }}</a>{% endfor %}
-      </nav>
+      {{ m.lang_switch(t, langs, lang) }}
+      <button type="button" class="icon-btn-v2" data-theme-toggle aria-label="{{ t('web.theme.title') }}">{{ m.icon("monitor") }}</button>
     </div>
 
     <p class="muted">{{ t('web.login.subtitle') }}</p>
 
     <div id="alert" class="alert" hidden></div>
 
-    <!-- 1. telefon -->
-    <form id="step-phone" class="step" autocomplete="on">
-      <label for="phone">{{ t('web.login.phone') }}</label>
-      <input id="phone" name="phone" type="tel" inputmode="tel" autocomplete="tel"
-             placeholder="+998 90 123 45 67" required autofocus>
-      <small class="hint">{{ t('web.login.phone_hint') }}</small>
-      <button type="submit" class="btn primary" id="btn-phone">{{ t('web.login.send_code') }}</button>
-    </form>
+    <!-- 1. QR — asosiy yo'l: telefon ham, kod ham kerak emas -->
+    <div id="step-qr" class="step">
+      <!-- H7: QR muvaffaqiyatsiz bo'lganda (429/5xx/tarmoq) shu blok yashiriladi
+           va o'rniga #qr-retry ko'rsatiladi — "Skanerlash kutilmoqda…" matni QR
+           rasmisiz hech qachon qolmaydi (`login.js::startQr`). -->
+      <div id="qr-live">
+        <div class="qr-box"><img id="qr-img" alt="{{ t('web.login.qr_alt') }}" width="220" height="220"></div>
+        <ol class="qr-steps">
+          <li>{{ t('web.login.qr_step1') }}</li>
+          <li>{{ t('web.login.qr_step2') }}</li>
+          <li>{{ t('web.login.qr_step3') }}</li>
+        </ol>
+        <small class="hint" id="qr-hint">{{ t('web.login.qr_waiting') }}</small>
+        <button type="button" class="btn full" id="btn-qr">{{ m.icon("refresh-cw") }} {{ t('web.login.qr_refresh') }}</button>
+      </div>
+
+      <div class="qr-retry" id="qr-retry" hidden>
+        <p class="alert" id="qr-retry-msg"></p>
+        <button type="button" class="btn full" id="btn-qr-retry" style="margin-block-start: var(--s-3)">{{ m.icon("refresh-cw") }} {{ t('web.login.qr_retry') }}</button>
+      </div>
+
+      <!-- Telefon zaxira yo'li — yopiq disclosure ichida -->
+      <details class="login-fallback" id="phone-fallback">
+        <summary>{{ t('web.login.phone_fallback') }}</summary>
+        <form id="step-phone" class="step" autocomplete="on">
+          <label for="phone">{{ t('web.login.phone') }}</label>
+          <input id="phone" name="phone" type="tel" inputmode="tel" autocomplete="tel"
+                 placeholder="+998 90 123 45 67" required>
+          <small class="hint">{{ t('web.login.phone_hint') }}</small>
+          <button type="submit" class="btn primary full" id="btn-phone">{{ t('web.login.send_code') }}</button>
+        </form>
+      </details>
+    </div>
 
     <!-- 2. kod -->
     <form id="step-code" class="step" hidden autocomplete="off">
@@ -34,7 +59,8 @@
       <input id="code" name="code" type="text" inputmode="numeric" pattern="[0-9]*"
              autocomplete="one-time-code" maxlength="8" placeholder="• • • • •" required>
       <small class="hint" id="code-hint"></small>
-      <button type="submit" class="btn primary" id="btn-code">{{ t('web.login.verify') }}</button>
+      <button type="submit" class="btn primary full" id="btn-code">{{ t('web.login.verify') }}</button>
+      <button type="button" class="btn link" id="btn-resend" hidden></button>
       <button type="button" class="btn link" data-back>{{ t('web.login.back') }}</button>
     </form>
 
@@ -43,18 +69,25 @@
       <label for="password">{{ t('web.login.password') }}</label>
       <input id="password" name="password" type="password" autocomplete="current-password" required>
       <small class="hint">{{ t('web.login.password_hint') }}</small>
-      <button type="submit" class="btn primary" id="btn-password">{{ t('web.login.submit') }}</button>
+      <button type="submit" class="btn primary full" id="btn-password">{{ t('web.login.submit') }}</button>
       <button type="button" class="btn link" data-back>{{ t('web.login.back') }}</button>
     </form>
 
-    <div id="step-done" class="step done" hidden>✅ {{ t('web.login.success') }}</div>
+    <div id="step-done" class="step done" hidden>{{ m.icon("check") }} {{ t('web.login.success') }}</div>
 
     <footer class="fineprint">
-      <p>🔐 {{ t('web.login.security_note') }}</p>
-      <p>⚠️ {{ t('web.login.tos_note') }}</p>
-      {% if logged_in %}<p><a href="/chat">→ {{ t('web.chat.title') }}</a></p>{% endif %}
+      <p>{{ m.icon("lock") }} {{ t('web.login.security_note') }}</p>
+      <p>{{ m.icon("alert-triangle") }} {{ t('web.login.tos_note') }}</p>
+      {% if logged_in %}<p><a href="/">{{ m.icon("arrow-right") }} {{ t('web.today.title') }}</a></p>{% endif %}
     </footer>
   </div>
 </main>
 {% endblock %}
-{% block scripts %}<script src="/static/login.js"></script>{% endblock %}
+{% block scripts %}
+<script type="module">
+  import * as theme from "{{ asset('lib/theme.js') }}";
+  import { $$ } from "/static/lib/dom.js";
+  theme.init();
+  for (const b of $$("[data-theme-toggle]")) b.addEventListener("click", () => theme.cycle());
+</script>
+<script src="{{ asset('login.js') }}"></script>{% endblock %}
