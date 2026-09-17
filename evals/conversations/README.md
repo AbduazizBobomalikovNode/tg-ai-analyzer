@@ -70,3 +70,12 @@ Runner tool chaqiruvlaridagi `chat` argumentlaridan va `calls_log` dagi
 Live yugurish qimmat (real akkaunt, real model). `priority: 1` to'plami
 ≤ 60 normal + ≤ 10 deep turn'ga sig'adi; `priority: 2` — qo'lda
 (`--priority 2`) yugurtiriladi.
+
+Turn soni — byudjetning **yomon** o'lchovi. 2026-09-17 yugurishida tool'lar
+tiklangandan keyin bitta turn $0.40 gacha chiqdi (agent iteratsiya shiftigacha
+tool zanjirini davom ettirdi), to'plam esa kunlik `LLM_DAILY_TOKEN_BUDGET` ni
+yeb qo'ydi: qolgan 38 turn `chat.err.budget` / `chat.err.rate_limited` bilan
+qaytdi va o'lchov yarim qoldi. Shuning uchun `--max-cost-usd` (default `1.0`)
+bor — jami xarajat shiftga yetsa qolgan senariylar yugurtirilmaydi va hisobot
+sarlavhasida "to'liq yugurmadi" ogohlantirishi chiqadi. Yugurishdan oldin
+kunlik byudjetda joy borligini tekshiring.

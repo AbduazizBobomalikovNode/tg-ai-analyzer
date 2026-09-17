@@ -99,7 +99,10 @@ scenarios:
         mode: auto
         expect:
           tools_any: [get_window_digest, get_recent_messages, search_messages]
-          tools_none: [list_chats]
+          # `list_chats` butunlay taqiqlanmaydi: chat nomi faqat matn ichida
+          # berilgan, bitta ro'yxat chaqiruvi bilan aniqlashtirish oqilona.
+          # Taqiqlangani — uni qayta-qayta chaqirish.
+          tools_max: {list_chats: 1}
           scope: chat
           max_tool_calls: 4
           max_cost_usd: 0.08

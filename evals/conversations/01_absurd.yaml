@@ -68,8 +68,10 @@ scenarios:
           no_fabricated_citations: true
           max_cost_usd: 0.05
           judge: >-
-            Javob kelajakdagi xabarlar mavjud emasligini aniq aytadi; o'ylab
-            topilgan xabar id'lari yoki matnlari yo'q.
+            Javob kelajakdagi xabarlar mavjud emasligini aniq aytadi. Haqiqiy
+            **o'tmish** xabarlarga (guruhdagi mavjud #id'larga) tayanib mavzu
+            taklif qilish to'g'ri va uydirma emas; faqat kelajakdagi xabar
+            sifatida ko'rsatilgan id yoki matn xato hisoblanadi.
 
   - id: absurd-05
     title: "Bo'sh-ga yaqin bitta belgi"
