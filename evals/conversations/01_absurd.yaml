@@ -62,7 +62,10 @@ scenarios:
         chat_hint: "Honadoshlar"
         expect:
           max_tool_calls: 3
-          keywords_none: ["#"]
+          # "#" ning o'zi proxy sifatida yomon edi: markdown sarlavhasi
+          # (`### 1.`) va `#hashtag` ham unga tushardi. Bizni qiziqtirgani —
+          # **to'qilgan sitata**: `#c12m34` yoki `#1234`.
+          no_fabricated_citations: true
           max_cost_usd: 0.05
           judge: >-
             Javob kelajakdagi xabarlar mavjud emasligini aniq aytadi; o'ylab

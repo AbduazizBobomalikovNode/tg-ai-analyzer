@@ -410,9 +410,7 @@ def test_sync_status_surfaces_the_current_chat_and_pause(
     assert body["running"] is True
 
 
-def test_expired_pause_is_not_reported(
-    status_client: TestClient, fake_redis: FakeRedis
-) -> None:
+def test_expired_pause_is_not_reported(status_client: TestClient, fake_redis: FakeRedis) -> None:
     """TTL 10 daqiqa, FloodWait 30 soniya — eski kalit "pauzada" demasin."""
     fake_redis.data[SP.progress_key(3)] = json.dumps(
         {"chat_id": 10, "title": "x", "paused_until": SP.now_iso(0.0)}  # 1970

@@ -390,10 +390,7 @@ async def overview(session: AsyncSession, user_id: int, *, days: int = 30) -> di
             }
             for r in strat_rows
         ],
-        "top_chats": [
-            _top_chat_out(r, chat_by_pair)
-            for r in top_chats
-        ],
+        "top_chats": [_top_chat_out(r, chat_by_pair) for r in top_chats],
         "review": [
             {
                 "id": int(r[0]),

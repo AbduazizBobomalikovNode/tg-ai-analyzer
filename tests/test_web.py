@@ -1967,15 +1967,15 @@ def test_dashboard_page_has_the_new_information_hierarchy() -> None:
     → ko'rib chiqish → yig'ilgan "Tizim"."""
     html = (_WEB / "templates/dashboard.html").read_text(encoding="utf-8")
     for anchor in (
-        'id="dash-period"',      # (a) davr almashtirgichi
-        'id="dash-kpis"',        # (b) 4 ta KPI
-        'id="dash-sync"',        # (c) sync salomatligi
-        'id="chart-volume"',     # (d) savollar + xarajat
-        'id="chart-latency"',    # (d) javob vaqti
-        'id="dash-models"',      # (e) modellar
-        'id="dash-chats"',       # (f) eng faol chatlar
-        'id="dash-review"',      # (g) ko'rib chiqish
-        'id="dash-system"',      # (h) tizim
+        'id="dash-period"',  # (a) davr almashtirgichi
+        'id="dash-kpis"',  # (b) 4 ta KPI
+        'id="dash-sync"',  # (c) sync salomatligi
+        'id="chart-volume"',  # (d) savollar + xarajat
+        'id="chart-latency"',  # (d) javob vaqti
+        'id="dash-models"',  # (e) modellar
+        'id="dash-chats"',  # (f) eng faol chatlar
+        'id="dash-review"',  # (g) ko'rib chiqish
+        'id="dash-system"',  # (h) tizim
     ):
         assert anchor in html, anchor
     # Tizim bloki **yig'ilgan** bo'lishi kerak — yo'ldan chetda.
@@ -2003,19 +2003,36 @@ def test_dashboard_speaks_plain_language_not_metric_names() -> None:
         for name in ("uz", "ru", "en")
     }
     required = [
-        "web.dash.period_1", "web.dash.period_7", "web.dash.period_30",
-        "web.dash.kpi_questions", "web.dash.kpi_questions_hint",
-        "web.dash.kpi_cost", "web.dash.kpi_cost_hint",
-        "web.dash.kpi_speed", "web.dash.kpi_speed_hint",
-        "web.dash.kpi_quality", "web.dash.kpi_quality_hint",
-        "web.dash.user_rating", "web.dash.auto_rating",
-        "web.dash.budget_of", "web.dash.budget_none",
-        "web.dash.vs_prev", "web.dash.vs_prev_day", "web.dash.no_prev",
-        "web.dash.chart_volume", "web.dash.chart_volume_hint",
-        "web.dash.chart_latency", "web.dash.chart_latency_hint",
-        "web.dash.legend_p50", "web.dash.legend_p95",
-        "web.dash.models_title", "web.dash.chats_title", "web.dash.review_title",
-        "web.dash.empty_title", "web.dash.empty_text", "web.dash.empty_cta",
+        "web.dash.period_1",
+        "web.dash.period_7",
+        "web.dash.period_30",
+        "web.dash.kpi_questions",
+        "web.dash.kpi_questions_hint",
+        "web.dash.kpi_cost",
+        "web.dash.kpi_cost_hint",
+        "web.dash.kpi_speed",
+        "web.dash.kpi_speed_hint",
+        "web.dash.kpi_quality",
+        "web.dash.kpi_quality_hint",
+        "web.dash.user_rating",
+        "web.dash.auto_rating",
+        "web.dash.budget_of",
+        "web.dash.budget_none",
+        "web.dash.vs_prev",
+        "web.dash.vs_prev_day",
+        "web.dash.no_prev",
+        "web.dash.chart_volume",
+        "web.dash.chart_volume_hint",
+        "web.dash.chart_latency",
+        "web.dash.chart_latency_hint",
+        "web.dash.legend_p50",
+        "web.dash.legend_p95",
+        "web.dash.models_title",
+        "web.dash.chats_title",
+        "web.dash.review_title",
+        "web.dash.empty_title",
+        "web.dash.empty_text",
+        "web.dash.empty_cta",
         "web.dash.what_is_this",
     ]
     for name, data in locales.items():

@@ -561,8 +561,8 @@ def test_tick_values_pick_a_readable_step_not_a_fixed_count() -> None:
     for ticks in out:
         assert ticks[0] == 0
         assert ticks == sorted(ticks)
-    assert out[0][-1] == 10 and 2.5 in out[0]        # 0 · 2,5 · 5 · 7,5 · 10
-    assert out[1] == [0, 1, 2, 3, 4, 5]              # savollar — butun sonlar
+    assert out[0][-1] == 10 and 2.5 in out[0]  # 0 · 2,5 · 5 · 7,5 · 10
+    assert out[1] == [0, 1, 2, 3, 4, 5]  # savollar — butun sonlar
     assert out[2] == [0, 25, 50, 75, 100]
     assert all(float(v).is_integer() for v in out[3])
 
@@ -606,7 +606,7 @@ def test_delta_pct_is_null_without_a_previous_period() -> None:
         "process.stdout.write(JSON.stringify(INPUT.map(([a, b]) => M.deltaPct(a, b))));",
         [[10, 0], [10, 5], [5, 10], [0, 4], [7, 7]],
     )
-    assert out[0] is None          # bo'lish yo'q — sahifa matn bilan aytadi
+    assert out[0] is None  # bo'lish yo'q — sahifa matn bilan aytadi
     assert out[1] == 1.0
     assert out[2] == -0.5
     assert out[3] == -1.0

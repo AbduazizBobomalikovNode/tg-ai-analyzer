@@ -215,7 +215,7 @@ async def _counts(db: Any, account_id: int) -> tuple[dict[str, int], int, int]:
 
 
 def _pending_where(account_id: int) -> Any:
-    """"Navbatda" mezoni: hali ishlanadigan chat.
+    """ "Navbatda" mezoni: hali ishlanadigan chat.
 
     `synced_min_id == 1` — tarix boshiga yetilgan sentinel (CLAUDE.md), ya'ni
     orqaga to'ldiradigan narsa qolmagan. `done` holati ham navbatda emas.
