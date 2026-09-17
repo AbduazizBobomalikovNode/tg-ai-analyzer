@@ -1,8 +1,9 @@
 /* pages/dashboard.css — `/dashboard` (ui/R4).
  *
  * Qoidalar:
- *   * KPI panjarasi `auto-fit, minmax(220px, 1fr)` — 390px da bitta ustun,
- *     1440px da to'rtta, oraliqda o'zi joylashadi (media query kerak emas).
+ *   * KPI panjarasi **aniq** ustun soni bilan: <640px — 2, 640–1099px — 2×2,
+ *     ≥1100px — 4. `auto-fit` emas — u kengliklar orasida 3+1 kabi noqulay
+ *     taqsimot berardi (planshet QA'da tutilgan).
  *   * Grafik kartalari `container-type: inline-size` — ichki o'lchamlar
  *     ekran emas, **konteyner** kengligiga qarab o'zgaradi.
  *   * 640px dan pastda jadval qatorlari kartaga aylanadi.
@@ -20,7 +21,13 @@
 /* ── (b) KPI kartalari ───────────────────────────────────────────────── */
 .dash-kpis {
   display: grid; gap: var(--s-3);
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+/* Planshet: aniq 2×2 — 640px dan 1100px gacha to'rt ustun torlashib
+ * ketardi (qiymatlar kesilib qolardi, mobil QA'da tutilgan). */
+@media (max-width: 1099px) {
+  .dash-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 .kpi {
   display: flex; flex-direction: column; gap: var(--s-1);
@@ -71,10 +78,12 @@
 
 /* Telefonda to'rtta karta bitta ustunda deyarli butun ekranni egallaydi —
  * "10 soniyada tushunarli" degani shu emas. Qiymatlar qisqa ("10",
- * "$0,32", "52,0s", "0%"), shuning uchun 520px dan pastda ikki ustun.
- * Blok **KPI qoidalaridan keyin** turadi: bir xil spetsifiklikda keyingisi
- * yutadi, aks holda bu tuzatishlar jimgina ishlamaydi. */
-@media (max-width: 520px) {
+ * "$0,32", "52,0s", "0%"), shuning uchun 640px dan pastda ikki ustun
+ * (yuqoridagi planshet qoidasi bilan bir xil — bu yerda faqat o'lcham/
+ * bo'shliq torayadi). Blok **KPI qoidalaridan keyin** turadi: bir xil
+ * spetsifiklikda keyingisi yutadi, aks holda bu tuzatishlar jimgina
+ * ishlamaydi. */
+@media (max-width: 639px) {
   .dash-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s-2); }
   .kpi { padding: var(--s-2) var(--s-3); }
   .kpi-value b { font-size: var(--fs-xl); }
@@ -117,9 +126,18 @@
 .hint-btn::after {
   content: ""; position: absolute; inset: calc((28px - var(--tap, 44px)) / 2);
 }
+/* Popover mustaqil "suzuvchi" qatlamda (`document.body`ga qo'shiladi,
+ * `dashboard.js::ensureHintLayer`) — kartaning `overflow`/`container-type`
+ * qoidalariga bog'liq bo'lmasin va karta qiymatining ustiga chiqmasin.
+ * Joyi `placePopover()` bilan hisoblanadi, `left`/`top` inline style. */
+.hint-layer { position: fixed; inset: 0; z-index: 60; pointer-events: none; }
 .hint-pop {
-  position: absolute; inset-block-start: calc(100% + 4px); inset-inline-end: 0;
-  z-index: 5; margin: 0; inline-size: max-content; max-inline-size: min(260px, 72vw);
+  /* `left`/`top` — JS o'rnatadi (`placePopover()`), shuning uchun shu
+   * yerda **jismoniy** xususiyat bilan boshlang'ich qiymat: `pop.style.left`
+   * mantiqiy `inset-inline-start` bilan emas, aynan shu bilan mos keladi. */
+  position: fixed; left: 0; top: 0;
+  pointer-events: auto;
+  margin: 0; max-inline-size: min(320px, calc(100vw - 16px));
   padding: var(--s-2) var(--s-3);
   background: var(--panel); border: 1px solid var(--border);
   border-radius: var(--r-md, 12px); box-shadow: var(--sh-2);
@@ -146,6 +164,9 @@
 }
 .chart-legend span { display: inline-flex; align-items: center; gap: 6px; }
 .chart-legend .sw { inline-size: 10px; block-size: 10px; border-radius: 3px; flex: none; }
+
+/* Kam ma'lumotli davr — grafik deyarli bo'sh ko'rinadi, sababi tushuntiriladi. */
+.chart-sparse { margin: var(--s-2) 0 0; }
 
 /* Jadval muqobili — yig'ilgan, lekin klaviatura bilan ochiladi. */
 .chart-table { margin-block-start: var(--s-2); }

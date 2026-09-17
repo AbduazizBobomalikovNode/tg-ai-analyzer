@@ -831,5 +831,7 @@
   "web.dash.review_open": "Открыть ответ",
   "web.dash.thumb_down": "Бесполезно",
   "web.dash.system_hint": "техническое состояние",
-  "web.dash.version": "Версия"
+  "web.dash.version": "Версия",
+  "web.dash.model_unknown": "Неизвестная модель",
+  "web.dash.chart_sparse": "Мало данных — график заполнится при выборе большего периода"
 }

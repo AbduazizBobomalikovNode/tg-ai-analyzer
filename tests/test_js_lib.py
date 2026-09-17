@@ -611,3 +611,56 @@ def test_delta_pct_is_null_without_a_previous_period() -> None:
     assert out[2] == -0.5
     assert out[3] == -1.0
     assert out[4] == 0.0
+
+
+def test_place_popover_clamps_to_viewport_and_flips_above_when_no_room() -> None:
+    """ⓘ popover: `left` doim `[8, innerWidth - width - 8]` ichida qoladi
+    (mobil QA'da 57px chapga chiqib ketgan edi) va pastda joy tugasa
+    tugma **ustiga** o'tadi (desktop QA'da KPI qiymatini yopib turardi)."""
+    cases = [
+        # markazda, hamma tomondan joy bor — pastda, markazlashtirilgan
+        (
+            {"left": 500, "top": 100, "right": 540, "bottom": 120, "width": 40, "height": 20},
+            {"width": 200, "height": 80},
+            {"width": 1200, "height": 800},
+        ),
+        # chap chetga yaqin — `left` 8px'dan kichik bo'lmasin
+        (
+            {"left": 10, "top": 100, "right": 50, "bottom": 120, "width": 40, "height": 20},
+            {"width": 300, "height": 80},
+            {"width": 400, "height": 800},
+        ),
+        # o'ng chetga yaqin — `left` o'ngdan 8px qoldirsin
+        (
+            {"left": 380, "top": 100, "right": 420, "bottom": 120, "width": 40, "height": 20},
+            {"width": 300, "height": 80},
+            {"width": 400, "height": 800},
+        ),
+        # ekran tagida — pastda joy yo'q, tepaga o'tadi
+        (
+            {"left": 500, "top": 750, "right": 540, "bottom": 770, "width": 40, "height": 20},
+            {"width": 200, "height": 80},
+            {"width": 1200, "height": 800},
+        ),
+        # popover viewport'dan balandroq — pastda qoladi, lekin `top` 8px'ga tortiladi
+        (
+            {"left": 100, "top": 50, "right": 140, "bottom": 70, "width": 40, "height": 20},
+            {"width": 200, "height": 300},
+            {"width": 1200, "height": 200},
+        ),
+    ]
+    out = _dash_module(
+        "process.stdout.write(JSON.stringify(INPUT.map(([a, p, v]) => M.placePopover(a, p, v))));",
+        cases,
+    )
+    assert out[0] == {"left": 420, "top": 126, "placement": "below"}
+    assert out[1] == {"left": 8, "top": 126, "placement": "below"}
+    assert out[2] == {"left": 92, "top": 126, "placement": "below"}
+    assert out[3] == {"left": 420, "top": 664, "placement": "above"}
+    assert out[4] == {"left": 20, "top": 8, "placement": "below"}
+    # Invariant: har holatda `left` viewport ichida — kartaning chap/o'ng
+    # chetidan hech qachon chiqmasin (mobil QA'da aynan shu buzilgan edi).
+    for (_anchor, pop, viewport), result in zip(cases, out, strict=True):
+        assert 0 <= result["left"] <= viewport["width"] - pop["width"]
+        assert result["top"] >= 0
+        assert result["placement"] in ("above", "below")

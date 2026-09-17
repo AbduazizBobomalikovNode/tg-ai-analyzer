@@ -165,23 +165,122 @@ function writeUrl(push) {
 
 /* ══ Umumiy bo'laklar ═════════════════════════════════════════════════ */
 
-/** Bir gapli izoh — texnik bo'lmagan foydalanuvchi uchun (ⓘ). */
+/*
+ * ⓘ popover — mustaqil "suzuvchi" qatlamda joylashadi (`position: fixed`,
+ * `document.body`ga qo'shiladi), tugma ostida `getBoundingClientRect()`
+ * bilan joylashtiriladi. Kartaning o'z qiymati (`.kpi-value`) ustiga
+ * yopilmasin — shu uchun karta ichida emas, alohida qatlamda.
+ */
+let hintSeq = 0;
+let hintLayer = null;
+let openHint = null; // { btn, pop } — bir vaqtda faqat bittasi ochiq
+
+function ensureHintLayer() {
+  if (!hintLayer) {
+    hintLayer = el("div.hint-layer");
+    document.body.appendChild(hintLayer);
+  }
+  return hintLayer;
+}
+
+/**
+ * Popover joyini hisoblaydi — sof funksiya (node testi shuni o'lchaydi).
+ * `left` `[8, innerWidth - width - 8]` oralig'ida qoladi; pastda joy
+ * bo'lmasa tugma **ustiga** o'tadi.
+ * @param {{left:number, top:number, right:number, bottom:number, width:number, height:number}} anchorRect
+ * @param {{width:number, height:number}} popSize
+ * @param {{width:number, height:number}} viewport
+ */
+export function placePopover(anchorRect, popSize, viewport) {
+  const GAP = 6;
+  const EDGE = 8;
+  const minLeft = EDGE;
+  const maxLeft = Math.max(minLeft, viewport.width - popSize.width - EDGE);
+  let left = anchorRect.left + anchorRect.width / 2 - popSize.width / 2;
+  left = Math.min(Math.max(left, minLeft), maxLeft);
+
+  const spaceBelow = viewport.height - anchorRect.bottom - GAP;
+  const spaceAbove = anchorRect.top - GAP;
+  const placement = spaceBelow >= popSize.height || spaceBelow >= spaceAbove ? "below" : "above";
+  let top = placement === "below" ? anchorRect.bottom + GAP : anchorRect.top - GAP - popSize.height;
+  top = Math.min(Math.max(top, EDGE), Math.max(EDGE, viewport.height - popSize.height - EDGE));
+  return { left, top, placement };
+}
+
+function onHintEsc(e) {
+  if (e.key === "Escape") closeHint();
+}
+
+function onHintOutside(e) {
+  if (openHint && !openHint.pop.contains(e.target) && !openHint.btn.contains(e.target)) closeHint();
+}
+
+/** Ochiq popover'ni yopadi va uni **o'z uyiga** qaytaradi (yoki, uy
+ *  allaqachon DOM'dan olib tashlangan bo'lsa, butunlay olib tashlaydi) —
+ *  aks holda har yopilishda `.hint-layer` ichida egasiz tugun qolib
+ *  ketaveradi (KPI kartalari har davr almashtirilganda qayta chiziladi). */
+function closeHint() {
+  if (!openHint) return;
+  const { btn, pop, home } = openHint;
+  pop.hidden = true;
+  pop.style.left = "";
+  pop.style.top = "";
+  pop.classList.remove("is-above");
+  btn.setAttribute("aria-expanded", "false");
+  if (home && home.isConnected) home.appendChild(pop);
+  else pop.remove();
+  window.removeEventListener("scroll", closeHint, true);
+  window.removeEventListener("resize", closeHint);
+  document.removeEventListener("keydown", onHintEsc);
+  document.removeEventListener("pointerdown", onHintOutside, true);
+  openHint = null;
+}
+
+function openHintPopover(btn, pop, home) {
+  if (openHint && openHint.btn === btn) { closeHint(); return; }
+  closeHint();
+  ensureHintLayer().appendChild(pop);
+  pop.style.visibility = "hidden";
+  pop.hidden = false;
+  const anchor = btn.getBoundingClientRect();
+  const size = { width: pop.offsetWidth, height: pop.offsetHeight };
+  const viewport = { width: window.innerWidth, height: window.innerHeight };
+  const { left, top, placement } = placePopover(anchor, size, viewport);
+  pop.style.left = `${left}px`;
+  pop.style.top = `${top}px`;
+  pop.classList.toggle("is-above", placement === "above");
+  pop.style.visibility = "";
+  btn.setAttribute("aria-expanded", "true");
+  openHint = { btn, pop, home };
+  window.addEventListener("scroll", closeHint, { capture: true, passive: true });
+  window.addEventListener("resize", closeHint);
+  document.addEventListener("keydown", onHintEsc);
+  document.addEventListener("pointerdown", onHintOutside, true);
+}
+
+/** Bir gapli izoh — texnik bo'lmagan foydalanuvchi uchun (ⓘ). Popover
+ *  yopiq holda **o'z joyida** (`span.hint` ichida, ko'rinmas) turadi —
+ *  ochilganda `.hint-layer`ga ko'chadi, yopilganda qaytadi. Shu tufayli
+ *  karta almashtirilganda (`replace()`) yopiq popover ham u bilan ketadi,
+ *  hint-layer'da hech narsa "abadiy" qolmaydi. */
 function hint(key) {
   if (!has(key)) return null;
   const text = t(key);
-  const pop = el("p.hint-pop", { hidden: true }, text);
+  const id = `hint-pop-${hintSeq++}`;
+  const pop = el("p.hint-pop", { id, role: "tooltip", hidden: true }, text);
   const btn = el("button.hint-btn", {
     type: "button",
     "aria-label": t("web.dash.what_is_this"),
     "aria-expanded": "false",
+    "aria-describedby": id,
     title: text,
-    onclick: () => {
-      const open = pop.hidden;
-      pop.hidden = !open;
-      btn.setAttribute("aria-expanded", String(open));
+    onclick: (e) => {
+      e.stopPropagation();
+      openHintPopover(btn, pop, home);
     },
   }, icon("info"));
-  return el("span.hint", null, [btn, pop]);
+  const home = el("span.hint", null, [btn, pop]);
+  return home;
 }
 
 /** Sarlavhalardagi `data-hint` slotlarini to'ldiradi (shablon → modul). */
@@ -442,6 +541,12 @@ function chartTable(host, days, cols) {
   ]));
 }
 
+/** ≤2 ta ma'lumotli kun — grafik deyarli bo'sh ko'rinadi, sababini aytamiz. */
+function maybeSparseNote(host, nonZeroDays) {
+  if (nonZeroDays > 2) return;
+  host.appendChild(el("p.chart-sparse.muted.small", null, t("web.dash.chart_sparse")));
+}
+
 function legend(items) {
   return el("div.chart-legend", null, items.map((it) =>
     el("span", null, [el("i.sw", { style: { background: it.color } }), it.label])));
@@ -513,6 +618,7 @@ function drawVolume(host, days) {
     { label: t("web.dash.legend_questions"), get: (d) => d.questions ?? d.requests ?? 0, fmt: (v) => num(v) },
     { label: t("web.dash.legend_cost"), get: (d) => d.cost_usd || 0, fmt: (v) => usd(v) },
   ]);
+  maybeSparseNote(host, days.filter((d) => (d.questions ?? d.requests ?? 0) > 0).length);
 }
 
 /** "Javob vaqti" — kunlik median va eng sekin 5%. */
@@ -560,6 +666,7 @@ function drawLatency(host, days) {
     { label: t("web.dash.legend_p50"), get: (d) => d.p50_ms, fmt: (v) => ms(v) },
     { label: t("web.dash.legend_p95"), get: (d) => d.p95_ms, fmt: (v) => ms(v) },
   ]);
+  maybeSparseNote(host, days.filter((d) => d.p50_ms != null || d.p95_ms != null).length);
 }
 
 function paintCharts(ov) {
@@ -587,9 +694,12 @@ function paintModels(ov) {
   // Mobilda jadval emas — qatorlar (640px dan pastda CSS kartaga o'tkazadi).
   replace(host, el("ul.model-list", null, rows.map((r) => {
     const share = total > 0 ? (r.cost_usd || 0) / total : 0;
+    // Ulush 0 dan katta bo'lsa chiziq **ko'rinishi** kerak — juda kichik
+    // ulush (masalan 0,3%) piksellarda "yo'q"dek ko'rinib qolmasin.
+    const barWidth = share > 0 ? `max(6px, ${share * 100}%)` : "0";
     return el("li.model-row", null, [
       el("div.model-main", null, [
-        el("span.model-name", { title: r.model || "" }, r.model || "—"),
+        el("span.model-name", { title: r.model || "" }, r.model || t("web.dash.model_unknown")),
         el("span.model-sub", null, r.provider || ""),
       ]),
       el("div.model-nums", null, [
@@ -602,7 +712,7 @@ function paintModels(ov) {
         "aria-valuenow": String(Math.round(share * 100)),
         "aria-label": t("web.dash.share_of_cost", { p: pct(share) }),
         title: t("web.dash.share_of_cost", { p: pct(share) }),
-      }, el("i", { style: { inlineSize: `${share * 100}%` } })),
+      }, el("i", { style: { inlineSize: barWidth } })),
     ]);
   })));
 }
@@ -738,6 +848,9 @@ function paintPeriod() {
 }
 
 async function loadOverview() {
+  // KPI kartalari (va ularning ⓘ tugmalari) qayta chiziladi — ochiq
+  // popover bo'lsa, egasi yo'q qolib ketmasin (yopilib, uyiga qaytadi).
+  closeHint();
   skeletonKpis($("#dash-kpis"));
   for (const id of ["#dash-models", "#dash-chats", "#dash-review"]) {
     const node = $(id);

@@ -831,5 +831,7 @@
   "web.dash.review_open": "Open the answer",
   "web.dash.thumb_down": "Not useful",
   "web.dash.system_hint": "technical status",
-  "web.dash.version": "Version"
+  "web.dash.version": "Version",
+  "web.dash.model_unknown": "Unknown model",
+  "web.dash.chart_sparse": "Not enough data yet — the chart fills in once you pick a longer period"
 }

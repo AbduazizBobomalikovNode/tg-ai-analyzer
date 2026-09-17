@@ -831,5 +831,7 @@
   "web.dash.review_open": "Javobni ochish",
   "web.dash.thumb_down": "Foydasiz",
   "web.dash.system_hint": "texnik holat",
-  "web.dash.version": "Versiya"
+  "web.dash.version": "Versiya",
+  "web.dash.model_unknown": "Noma'lum model",
+  "web.dash.chart_sparse": "Kam ma'lumot — grafik davr tanlanganda to'ladi"
 }

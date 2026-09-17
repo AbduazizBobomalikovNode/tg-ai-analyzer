@@ -2034,6 +2034,8 @@ def test_dashboard_speaks_plain_language_not_metric_names() -> None:
         "web.dash.empty_text",
         "web.dash.empty_cta",
         "web.dash.what_is_this",
+        "web.dash.model_unknown",
+        "web.dash.chart_sparse",
     ]
     for name, data in locales.items():
         for key in required:
@@ -2045,3 +2047,52 @@ def test_dashboard_speaks_plain_language_not_metric_names() -> None:
             low = str(value).lower()
             assert "tgai_" not in low, f"{name}: {key} — xom metrika nomi"
             assert "p50" not in low and "p95" not in low, f"{name}: {key} — jargon"
+
+
+# ─── ui/R4 QA: ⓘ popover, planshet panjarasi, model/grafik ehtiyot yo'llari ──
+#
+# Skrinshotlarda tutilgan: desktopda popover KPI qiymatini yopib turardi,
+# mobilda chapdan 57px chiqib ketardi, 640-1100px oralig'ida to'rtta ustun
+# torlashib qiymatlarni kesardi. Clamp/flip matematikasining o'zi
+# `tests/test_js_lib.py::test_place_popover_clamps_to_viewport_and_flips_above_when_no_room`
+# da node'da o'lchanadi — bu yerda faqat "mexanizm joyida" tekshiriladi.
+
+
+def test_dashboard_hint_popover_is_viewport_aware_and_accessible() -> None:
+    """Popover mustaqil `position: fixed` qatlamda, `getBoundingClientRect`
+    bilan joylashtiriladi va a11y atributlari (aria-expanded/-describedby)
+    bilan, Esc/tashqariga bosish/scroll orqali yopiladi."""
+    js = (_WEB / "static/pages/dashboard.js").read_text(encoding="utf-8")
+    assert "export function placePopover" in js
+    assert "getBoundingClientRect" in js
+    assert '"aria-describedby"' in js
+    assert '"aria-expanded"' in js
+    assert 'e.key === "Escape"' in js
+    assert "pointerdown" in js
+    assert '"scroll"' in js
+    css = (_WEB / "static/css/pages/dashboard.css").read_text(encoding="utf-8")
+    assert ".hint-layer" in css
+    assert "position: fixed" in css
+    assert "min(320px" in css
+
+
+def test_dashboard_kpi_grid_has_explicit_tablet_breakpoint() -> None:
+    """640-1100px oralig'ida aniq 2x2, 1100px'dan yuqorida to'rt, 640px'dan
+    past ikki ustun — `auto-fit` emas (u planshet kenglikida noqulay
+    taqsimlardi)."""
+    css = (_WEB / "static/css/pages/dashboard.css").read_text(encoding="utf-8")
+    assert "auto-fit" not in css.split(".dash-kpis")[1][:400]
+    assert "repeat(4, minmax(0, 1fr))" in css
+    assert "max-width: 1099px" in css
+    assert "max-width: 639px" in css
+    assert css.count("repeat(2, minmax(0, 1fr))") >= 2
+
+
+def test_dashboard_model_row_and_sparse_chart_have_plain_language_fallbacks() -> None:
+    """Noma'lum model nomi "—" o'rniga tarjima bilan, chiziq ulushi 0 dan
+    katta bo'lsa kamida 6px ko'rinadi, kam ma'lumotli grafik sababini
+    aytadi (izsiz bo'sh joy o'rniga)."""
+    js = (_WEB / "static/pages/dashboard.js").read_text(encoding="utf-8")
+    assert 't("web.dash.model_unknown")' in js
+    assert 't("web.dash.chart_sparse")' in js
+    assert "max(6px" in js
