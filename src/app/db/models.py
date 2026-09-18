@@ -902,3 +902,86 @@ class Sender(Base):
     username: Mapped[str | None] = mapped_column(String(64))
     is_bot: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now())
+
+
+# ─── korpus miqyosidagi skan (0020) ──────────────────────────────────────────
+
+
+class RelevanceCache(Base):
+    """Bitta savol x bitta xabar uchun filtr bahosi — skan keshi (0020).
+
+    Nega kerak: korpus miqyosidagi kaskad `filter_batched` da har nomzodni
+    Flash-Lite'ga ko'rsatadi. Foydalanuvchi bir savolni ikki marta so'rasa
+    (yoki "chuqurroq qidir" bilan qaytsa) o'sha xabarlar yana modelga
+    ketardi — natija o'zgarmaydi, token esa behuda ketadi (`seen_calls`
+    bilan bir mantiq).
+
+    Kalit `q_hash` = `md5(uz_fold(standalone_question))`: savolning imlo/
+    apostrof/kirill farqi kesh promahiga aylanmasin. Unikal cheklov
+    `(q_hash, chat_id, tg_msg_id)` — `chat_id` allaqachon akkauntga
+    bog'langan, shuning uchun akkauntlararo oqish yo'q; `account_id` esa
+    tozalash (`DELETE ... WHERE account_id`) va audit uchun.
+
+    **Xabar matni bu yerda saqlanmaydi** — faqat baho. Kesh qatori
+    modelga qaytib tushmaydi, u faqat "bu xabarni yana so'ramaymiz"
+    degan belgidir.
+    """
+
+    __tablename__ = "relevance_cache"
+    __table_args__ = (
+        UniqueConstraint("q_hash", "chat_id", "tg_msg_id", name="uq_relcache_q_chat_msg"),
+        Index("ix_relcache_account_created", "account_id", text("created_at DESC")),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"))
+    q_hash: Mapped[str] = mapped_column(String(32))  # md5 hex
+    chat_id: Mapped[int] = mapped_column(ForeignKey("chats.id", ondelete="CASCADE"))
+    tg_msg_id: Mapped[int] = mapped_column(BigInteger)
+    score: Mapped[int] = mapped_column(SmallInteger, default=0)
+    model: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now())
+
+
+class ScanRun(Base):
+    """Bitta korpus skanining audit qatori (0020) — halollik hisobi.
+
+    `agent_runs` token/narxni yozadi, bu jadval esa **qamrovni**: nechta
+    bucket rejalashtirilgan va nechtasi haqiqatan skanlangan, nechta
+    nomzod filtrdan o'tgan, nega to'xtagan (`yield|ceiling|saturation|
+    wall|complete`). Javob ostidagi qamrov hisoboti shu raqamlardan
+    quriladi — "hammasini ko'rdim" degan gap chiqmasin.
+
+    Jadval **faqat qo'shiladi** (`agent_actions` kabi trigger yo'q, lekin
+    kod hech qachon UPDATE qilmaydi): har yugurish o'z qatorini yozadi.
+    """
+
+    __tablename__ = "scan_runs"
+    __table_args__ = (Index("ix_scan_runs_account_created", "account_id", text("created_at DESC")),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"))
+    # `Integer` ataylab aniq: `conversations.id` ham `Integer`, `Mapped[int | None]`
+    # esa `Base` ning annotation map'i bo'yicha `BigInteger` ga tushib ketardi
+    # (migratsiya bilan drift → `alembic check` qizarardi).
+    conversation_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("conversations.id", ondelete="SET NULL")
+    )
+    mode: Mapped[str] = mapped_column(String(16), default="deep")
+    q_hash: Mapped[str] = mapped_column(String(32), default="", server_default="")
+
+    buckets_planned: Mapped[int] = mapped_column(Integer, default=0)
+    buckets_scanned: Mapped[int] = mapped_column(Integer, default=0)
+    candidates: Mapped[int] = mapped_column(Integer, default=0)
+    filtered: Mapped[int] = mapped_column(Integer, default=0)
+    kept: Mapped[int] = mapped_column(Integer, default=0)
+    evidence: Mapped[int] = mapped_column(Integer, default=0)
+    claims: Mapped[int] = mapped_column(Integer, default=0)
+    cache_hits: Mapped[int] = mapped_column(Integer, default=0)
+
+    cost_usd: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+    est_cost_usd: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+    stopped_by: Mapped[str] = mapped_column(String(16), default="complete")
+    truncated: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    elapsed_ms: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now())

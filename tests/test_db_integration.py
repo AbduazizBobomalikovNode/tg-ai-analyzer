@@ -1343,3 +1343,109 @@ async def test_chat_search_sql_uses_uz_fold(pg_engine: AsyncEngine) -> None:
         assert not await CD._search_sql(session, conds, "qwertyxyz", 10)
         # LIKE maxsus belgilari literal sifatida qaraladi (SQL injection emas)
         assert not await CD._search_sql(session, conds, "%", 10)
+
+
+# ─── (e) korpus skani jadvallari (migratsiya 0020) ───────────────────────────
+
+
+async def test_relevance_cache_is_unique_per_question_and_message(
+    pg_engine: AsyncEngine,
+) -> None:
+    """Unikal kalit `(q_hash, chat_id, tg_msg_id)` — bir juftlik ikki marta yozilmaydi.
+
+    Kesh aynan shunga tayanadi: `ON CONFLICT DO NOTHING` bilan yozish
+    idempotent bo'lishi kerak, aks holda qayta yugurish jadvalni
+    ko'chirma qatorlar bilan to'ldirardi.
+    """
+    account_id, chat_id = await _fixture_chat(pg_engine)
+    q_hash = "0" * 32
+    insert = text(
+        "INSERT INTO relevance_cache (account_id, q_hash, chat_id, tg_msg_id, score, model) "
+        "VALUES (:a, :q, :c, :m, :s, 'fake') ON CONFLICT DO NOTHING"
+    )
+    base = {"a": account_id, "q": q_hash, "c": chat_id}
+    async with pg_engine.begin() as conn:
+        for _ in range(3):
+            await conn.execute(insert, {**base, "m": 42, "s": 3})
+        await conn.execute(insert, {**base, "m": 43, "s": 1})
+        rows = (
+            await conn.execute(
+                text(
+                    "SELECT tg_msg_id, score FROM relevance_cache "
+                    "WHERE q_hash = :q AND chat_id = :c ORDER BY tg_msg_id"
+                ),
+                {"q": q_hash, "c": chat_id},
+            )
+        ).all()
+    assert [tuple(r) for r in rows] == [(42, 3), (43, 1)]
+
+
+async def test_relevance_cache_dies_with_its_chat(pg_engine: AsyncEngine) -> None:
+    """Chat o'chsa kesh ham ketadi — orfan qator LLM'ga ko'rinmasa ham, o'smasin."""
+    account_id, chat_id = await _fixture_chat(pg_engine)
+    async with pg_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO relevance_cache (account_id, q_hash, chat_id, tg_msg_id, score) "
+                "VALUES (:a, :q, :c, 1, 2)"
+            ),
+            {"a": account_id, "q": "1" * 32, "c": chat_id},
+        )
+        await conn.execute(text("DELETE FROM chats WHERE id = :c"), {"c": chat_id})
+        left = (
+            await conn.execute(
+                text("SELECT count(*) FROM relevance_cache WHERE chat_id = :c"), {"c": chat_id}
+            )
+        ).scalar_one()
+    assert left == 0
+
+
+async def test_scan_runs_defaults_and_survives_conversation_delete(
+    pg_engine: AsyncEngine,
+) -> None:
+    """`scan_runs` — o'lchov qatori: suhbat o'chsa ham raqamlar qoladi (`SET NULL`)."""
+    account_id, _chat_id = await _fixture_chat(pg_engine)
+    async with pg_engine.begin() as conn:
+        uid = (
+            await conn.execute(
+                text("SELECT user_id FROM accounts WHERE id = :a"), {"a": account_id}
+            )
+        ).scalar_one()
+        conv_id = (
+            await conn.execute(
+                text(
+                    "INSERT INTO conversations (user_id, account_id, title) "
+                    "VALUES (:u, :a, 'test') RETURNING id"
+                ),
+                {"u": uid, "a": account_id},
+            )
+        ).scalar_one()
+        run_id = (
+            await conn.execute(
+                text(
+                    "INSERT INTO scan_runs (account_id, conversation_id, mode, buckets_planned, "
+                    "buckets_scanned, kept, stopped_by) "
+                    "VALUES (:a, :c, 'exhaustive', 400, 180, 310, 'ceiling') RETURNING id"
+                ),
+                {"a": account_id, "c": conv_id},
+            )
+        ).scalar_one()
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT candidates, filtered, claims, cost_usd, truncated, q_hash "
+                    "FROM scan_runs WHERE id = :r"
+                ),
+                {"r": run_id},
+            )
+        ).one()
+        assert tuple(row) == (0, 0, 0, 0.0, False, "")
+
+        await conn.execute(text("DELETE FROM conversations WHERE id = :c"), {"c": conv_id})
+        after = (
+            await conn.execute(
+                text("SELECT conversation_id, buckets_scanned FROM scan_runs WHERE id = :r"),
+                {"r": run_id},
+            )
+        ).one()
+    assert tuple(after) == (None, 180)

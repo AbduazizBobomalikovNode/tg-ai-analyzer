@@ -316,7 +316,11 @@ async def delete_conversation(session: AsyncSession, user_id: int, conversation_
 
 # `deep` — `services/deep_search.py` quvuri (hech qachon `auto` dan tanlanmaydi:
 # u ≈10x qimmat, foydalanuvchi uni UI'da aniq yoqadi — arxitektura v2, 11-bo'lim).
-MODES = ("auto", "agent", "direct", "deep")
+MODES = ("auto", "agent", "direct", "deep", "exhaustive")
+#: Deep quvuriga tushadigan rejimlar. `deep` — korpus kaskadi standart
+#: byudjet bilan, `exhaustive` — kengaytirilgan (o'z devori va narx
+#: qopqog'i bilan, `web/routers/deep.py` da tasdiq talab qiladi).
+DEEP_MODES = ("deep", "exhaustive")
 _GREETING = re.compile(
     r"^\s*(salom|assalomu|hello|hi|hey|привет|здравствуй|rahmat|спасибо|thanks|ok|xop|ha|yo'q)\b[\s!.,]*$",
     re.I,
@@ -331,7 +335,7 @@ def choose_mode(
     Agent: ma'lumot ustida ishlash kerak (sinxron chat bor), savol salomlashish emas,
     va foydalanuvchi aniq strategiya tanlamagan (aniq `search/window/recent` — direct arzon).
     """
-    if mode in ("agent", "direct", "deep"):
+    if mode in ("agent", "direct", *DEEP_MODES):
         return mode
     if not has_synced_chats:
         return "direct"
@@ -391,7 +395,7 @@ async def send_message(
         mode, text=text, has_synced_chats=await _has_synced_chats(session, acc_id), context=context
     )
     degraded: dict[str, str] | None = None
-    if chosen == "deep":
+    if chosen in DEEP_MODES:
         # Deep quvuri o'z sessiyalarini ochadi (parallel kanallar) va ikkala
         # turn'ni **o'zi** yozadi — shuning uchun user qatorini bu yerda
         # yaratmaymiz (ikki yozuvchi bo'lmasin).
@@ -404,6 +408,7 @@ async def send_message(
             account_id=acc_id,
             locale=locale,
             deep=deep,
+            scale_mode=chosen,
             started=started,
             llm=llm,
             events=events,
@@ -595,6 +600,7 @@ async def _send_via_deep(
     locale: str,
     deep: bool,
     started: float,
+    scale_mode: str = "deep",
     llm: LLM | None = None,
     events: EventSink | None = None,
 ) -> Reply:
@@ -616,12 +622,20 @@ async def _send_via_deep(
             locale=locale,
             deep=deep,
             llm=llm,
+            mode=scale_mode,
+            # Chat API'da alohida tasdiq oqimi yo'q — foydalanuvchi rejimni
+            # aniq tanlab yuborgan. Tasdiq talab qiladigan yo'l SSE routerda
+            # (`/api/deep/stream`), u yerda baho avval ko'rsatiladi.
+            confirm=True,
         )
     except DeepSearchError as exc:
         raise ChatError(exc.code, exc.detail) from exc
 
     context_used: dict[str, Any] = {
         "mode": "deep",
+        "scale_mode": result.mode,
+        "scan": result.scan,
+        "estimate": result.estimate,
         "strategy": "deep",
         "source": "deep",
         "account_id": account_id,

@@ -161,6 +161,62 @@ bitta akkaunt kvotasini bo'lishadi).
   dalilda `[server external]` deb belgilanadi — u lokal indeks bilan
   solishtirilmagan.
 
+### Korpus miqyosidagi kaskad (`services/scale_search.py`)
+
+Rejimlar: **`fast`** — yuqoridagi fan-out quvuri, o'zgarmagan; **`deep`** /
+**`exhaustive`** — `deep_search._run_pipeline` dan `scale_search.run_scale`
+ga o'tadi va fan-out→dedup→rerank **o'rniga** turadi. Reja, taint, sintez,
+qamrov va sitata validatsiyasi — o'sha (`deep_search.py`).
+
+    plan_buckets (chat x ISO-hafta, tugun vektorlari bo'yicha;
+                  deep <=200, exhaustive <=400 — o'lchovdan, quyiga qarang)
+      -> pull_candidates (bucket ichida 4 kanalli RRF, k=30, parallel
+         sessiyalar, elbow kesish [200, 3000])
+      -> dedup_fast (sha1 + **banded** simhash, O(n))
+      -> filter_batched (ROUTE/Flash-Lite, 50 satrlik partiya, 0..3 ball)
+      -> select_evidence (ball + chat/hafta kvotasi, <=1000)
+      -> map (bir jinsli 80 xabarlik bo'lak) -> reduce -> da'volar dayjesti
+
+- **Dedup hovuzda O(n) bo'lishi shart.** `cluster.dedup_simhash` har imzoni
+  saqlanganlarning hammasi bilan solishtiradi; 20k nomzodda bu o'ladi.
+  `dedup_banded` imzoni 4 ta 16-bitli bandga bo'ladi (`BAND_BUCKET_MAX=32`
+  chelak qopqog'i bilan) — kosinus/klaster esa **faqat** filtrdan keyingi
+  ≤1000 ta ustida (o'sha yerda O(n²) halol).
+- **Karantin.** `filter`/`map`/`reduce` prompt'lari begona matn ko'radi va
+  `deep_search.QUARANTINED_STAGES` da turadi; `plan`/`reflect` esa **hech
+  qachon** — `_Taint.assert_clean` ularda qizaradi. Yangi bosqich qo'shsangiz
+  uni ro'yxatga qo'shish **ongli qaror** bo'lsin.
+- **Narx qopqog'i kodda**: `COST_CEILING = {fast .01, deep .10, exhaustive
+  .50}` filtr va map orasida tekshiriladi; oshsa bosqich to'xtaydi va
+  `coverage.stopped_by="ceiling"`, `truncated=True` chiqadi. To'xtash sabablari:
+  `yield | ceiling | saturation | wall | complete`.
+- **`estimate()` bitta skan tokenidan oldin** hisoblanadi (bucket sanog'i × k
+  × `llm/pricing.py`). `exhaustive` API'da `confirm: true` talab qiladi —
+  aks holda `estimate` + `done {needs_confirm:true}` qaytadi va yugurish
+  to'xtaydi.
+- **Kaskadda ikkinchi raund yo'q** (`reflect` chaqirilmaydi): bucket fazosi
+  allaqachon aylanib chiqilgan, "boshqa so'z bilan qidir" u yerda qamrov
+  emas, faqat narx qo'shadi.
+- Kesh `relevance_cache` (migratsiya 0020), kalit
+  `md5(uz_fold(standalone_question))`; audit `scan_runs` — har yugurish uchun
+  bitta qator (`buckets_planned/scanned`, `filtered`, `kept`, `stopped_by`).
+- **`BUCKET_MAX_DEEP=200` o'lchovdan.** 2.66M xabarli jonli korpusda
+  (faqat o'qish, 3 savol) `pull_candidates`: cap=100 p50 40.1 s / p95 41.3 s ·
+  cap=200 p50 34.9 s / p95 40.5 s · cap=400 p50 47.0 s / **p95 75.2 s**.
+  `deep` da pull byudjeti ≈53 s, ya'ni 400 p95 da javobni jimgina kesardi.
+  `plan_buckets` p50 ≈1.1 s (cap'dan **deyarli mustaqil**). Narx bucket
+  soniga chiziqli emas: katta chatlarning bir nechta oyi vaqtni yeydi.
+- Pull byudjeti tugasa qolgan bucket'lar qaralmaydi va bu
+  `stopped_by="wall"` bo'lib qamrovga tushadi — jim o'tkazilmaydi.
+- Tugun embedding'lari bo'lmasa (`retrieval_node_embeddings` bo'sh) reja
+  butunlay `(chat, oy)` zaxira yo'liga tushadi — quvur ishlaydi, lekin
+  granularlik oylik. Prod'da bu hozir shunday.
+- Konstantalar o'lchovdan: `evals/perf/bench.py --sections scale` va
+  `evals/calibrate_filter.py` (filtr chegarasi uchun recall jadvali).
+  O'zgartirishdan oldin **kamida 3 marta** qayta o'lchang.
+- TODO: `exhaustive` hozircha sinxron (`EXHAUSTIVE_WALL_S=600`). Batch
+  API / worker vazifasiga ko'chirish seam'i — `filter_batched`.
+
 ### `retrieval_nodes` (`services/nodes.py`, `services/episodes.py`)
 
 - Darajalar: **0** xom xabar · **1** epizod · **2** kun · **3** hafta.

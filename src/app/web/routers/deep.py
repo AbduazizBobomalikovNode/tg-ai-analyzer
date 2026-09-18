@@ -37,9 +37,21 @@ router = APIRouter(prefix="/api/deep", tags=["deep"])
 
 
 class DeepIn(BaseModel):
+    """Kirish tanasi.
+
+    `mode` — `fast | deep | exhaustive`. Eski klientlar `deep: bool` yuboradi;
+    moslik **bitta joyda** (`deep_search.normalize_mode`): `deep=true` → `deep`.
+
+    `confirm` — faqat `exhaustive` uchun majburiy. Tasdiqsiz so'rovda quvur
+    bucket rejasini quradi, `estimate` hodisasini beradi va **bitta skan
+    tokeni ham sarflamasdan** to'xtaydi (`done {needs_confirm: true}`).
+    """
+
     conversation_id: int
     question: str = Field(min_length=1, max_length=20_000)
     deep: bool = True
+    mode: str = ""
+    confirm: bool = False
 
 
 def _http(code: str, detail: str = "") -> HTTPException:
@@ -76,6 +88,19 @@ async def _prepare(ident: WebIdentity, body: DeepIn) -> int:
         return int(conv.account_id)
 
 
+def _confirm(body: DeepIn) -> bool:
+    """`exhaustive` **tasdiq talab qiladi**, qolgan rejimlar yo'q.
+
+    Nega kodda, modelda emas: `exhaustive` o'n minglab nomzodni model bilan
+    elakdan o'tkazadi, ya'ni uning narxi boshqa tartibda. Tasdiq bo'lmasa
+    quvur faqat bahoni qaytaradi — foydalanuvchi nima to'lashini **oldin**
+    ko'radi.
+    """
+    if DS.normalize_mode(body.mode, deep=body.deep) == "exhaustive":
+        return bool(body.confirm)
+    return True
+
+
 def _sse(event: DS.DeepEvent) -> str:
     payload = json.dumps(event.data, ensure_ascii=False, default=str)
     return f"event: {event.kind}\ndata: {payload}\n\n"
@@ -99,6 +124,8 @@ async def deep_stream(
                 body.question,
                 locale=locale,
                 deep=body.deep,
+                mode=DS.normalize_mode(body.mode, deep=body.deep),
+                confirm=_confirm(body),
             ):
                 yield _sse(event)
         except Exception as exc:
@@ -130,6 +157,8 @@ async def deep_once(
             body.question,
             locale=locale_of(request),
             deep=body.deep,
+            mode=DS.normalize_mode(body.mode, deep=body.deep),
+            confirm=_confirm(body),
         )
     except DS.DeepSearchError as exc:
         raise _http(exc.code, exc.detail) from exc

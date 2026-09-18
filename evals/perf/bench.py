@@ -41,6 +41,9 @@ from sqlalchemy.pool import NullPool
 
 EMBED_DIM = 768
 CLUSTER_N = 400
+#: `dedup_fast` o'lchovi uchun olinadigan xom xabarlar soni — real hovuz
+#: (`scale_search.POOL_MAX`) tartibida, ya'ni O(n^2) ga qaytish darhol ko'rinadi.
+SC_POOL_SAMPLE = 20_000
 #: Epizod qurishning **inkremental** yo'lini o'lchash uchun qo'shiladigan
 #: xabarlar soni (real sync bir siklda shu tartibda xabar keltiradi).
 APPEND_MESSAGES = 500
@@ -537,6 +540,109 @@ async def bench_alerts(
         )
 
 
+async def bench_scale(
+    sm: async_sessionmaker[AsyncSession],
+    timings: list[Timing],
+    info: dict[str, Any],
+    *,
+    runs: int,
+    bucket_caps: Sequence[int] = (100, 200, 400),
+) -> None:
+    """Korpus kaskadining ikkita og'ir SQL bosqichi: `plan_buckets` + `pull_candidates`.
+
+    Nega aynan shu ikkitasi: qolgan bosqichlar (filtr, map, reduce) LLM
+    narxi bilan chegaralangan va `COST_CEILING` ularni kodda to'xtatadi.
+    SQL tomonda esa qopqoq **vaqt**: `PULL_BUDGET_S` (≈40 s) ichiga
+    sig'maydigan `BUCKET_MAX` javobni jimgina kesib qo'yadi. Shuning uchun
+    o'lchov uchta qopqoq bilan yuguradi va default shu yerdan tanlanadi.
+    """
+    from app.services import deep_search as DS
+    from app.services import scale_search as SC
+
+    llm: Any = FakeLLM()
+    acc = info["account_id"]
+    titles = {int(c["id"]): str(c["title"]) for c in info["chats"]}
+    print("\n── scale search (bucket rejasi + bucket ichidan tortish)")
+
+    for cap in bucket_caps:
+        plan = DS.DeepPlan(subqueries=QUESTIONS[:3], standalone_question=QUESTIONS[0])
+        meter = DS._Meter(llm)
+        vectors = await SC.query_vectors(meter, question=QUESTIONS[0], subqueries=plan.subqueries)
+
+        async def planned(cap: int = cap, vectors: Any = vectors, plan: Any = plan) -> Any:
+            async with sm() as s:
+                return await SC.plan_buckets(
+                    s, acc, plan=plan, vectors=vectors, chat_titles=titles, limit=cap
+                )
+
+        buckets = await measure(
+            timings,
+            f"plan_buckets (cap {cap})",
+            planned,
+            runs=runs,
+            note_from=lambda r: f"buckets={len(r)}",
+        )
+        if not buckets:
+            print("  (bucket yo'q — tugun/xabar topilmadi, tortish o'tkazib yuborildi)")
+            continue
+
+        spec = SC.build_pull_spec(
+            acc,
+            question=QUESTIONS[0],
+            subqueries=plan.subqueries,
+            qvec=vectors[0] if vectors else None,
+        )
+
+        def factory() -> Any:
+            return sm()
+
+        async def pull(buckets: Any = buckets, spec: Any = spec) -> Any:
+            return await SC.pull_candidates(factory, buckets=buckets, spec=spec, budget_s=120.0)
+
+        await measure(
+            timings,
+            f"pull_candidates (cap {cap}, k={SC.PER_BUCKET_K})",
+            pull,
+            runs=max(3, runs // 2),
+            note_from=lambda r: f"pool={len(r[0])} scanned={r[2]}",
+        )
+
+    # Dedup — sof Python, DB'siz: hovuz o'sganda chiziqli qolishini ko'rsatadi.
+    pool_hits = await _scale_pool(sm, acc)
+    if pool_hits:
+
+        async def dedup(hits: Any = pool_hits) -> Any:
+            return SC.dedup_fast(list(hits))
+
+        await measure(
+            timings,
+            f"dedup_fast ({len(pool_hits)} nomzod, sha1+banded simhash)",
+            dedup,
+            runs=runs,
+            note_from=lambda r: f"kept={len(r)}",
+        )
+
+
+async def _scale_pool(sm: async_sessionmaker[AsyncSession], account_id: int) -> list[Any]:
+    """Dedup o'lchovi uchun xom xabarlar (`Hit` shaklida) — LLM'siz."""
+    from app.db.models import Chat, Message
+    from app.services import search as S
+
+    async with sm() as s:
+        rows = (
+            await s.execute(
+                select(Message.id, Message.tg_msg_id, Message.chat_id, Message.text)
+                .join(Chat, Chat.id == Message.chat_id)
+                .where(Chat.account_id == account_id)
+                .limit(SC_POOL_SAMPLE)
+            )
+        ).all()
+    return [
+        S.Hit(int(r[0]), int(r[1]), 1.0, "bench", chat_id=int(r[2]), text=str(r[3] or ""))
+        for r in rows
+    ]
+
+
 async def bench_misc(
     sm: async_sessionmaker[AsyncSession],
     timings: list[Timing],
@@ -781,6 +887,8 @@ async def run(dsn: str, *, runs: int, json_path: str, sections: set[str]) -> Non
             await bench_alerts(sm, timings, info, big_ids, runs=runs)
         if "misc" in sections:
             await bench_misc(sm, timings, info, big_ids, runs=runs)
+        if "scale" in sections:
+            await bench_scale(sm, timings, info, runs=runs)
 
         plans = await explain_channels(sm, info) if "explain" in sections else {}
         stats = await index_stats(sm)
@@ -821,8 +929,8 @@ def main() -> None:
     ap.add_argument("--json", default="")
     ap.add_argument(
         "--sections",
-        default="hybrid,multi,episodes,nodes,alerts,misc,explain",
-        help="vergul bilan: hybrid,multi,episodes,nodes,alerts,misc,explain",
+        default="hybrid,multi,episodes,nodes,alerts,misc,scale,explain",
+        help="vergul bilan: hybrid,multi,episodes,nodes,alerts,misc,scale,explain",
     )
     args = ap.parse_args()
     dsn = args.dsn or os.environ.get("DATABASE_URL", "")
