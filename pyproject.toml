@@ -87,6 +87,10 @@ ignore = ["S101"]  # assert allowed in tests
 "evals/perf/seed.py" = ["S311", "RUF001", "RUF002", "RUF003"]
 "evals/perf/bench.py" = ["S311", "S608", "RUF001", "RUF002", "RUF003"]
 "tests/test_perf_smoke.py" = ["S311", "RUF001", "RUF002", "RUF003"]
+# Filtr kalibrovkasi: `sample` rejimida embedding **determinstik soxta**
+# vektor bo'lishi mumkin (LLM'siz o'lchov) — `random` shu yerda ham
+# kriptografiya emas, takrorlanadigan urug'.
+"evals/calibrate_filter.py" = ["S311", "RUF001", "RUF002", "RUF003"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

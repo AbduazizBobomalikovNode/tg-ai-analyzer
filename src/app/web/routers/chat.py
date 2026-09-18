@@ -66,7 +66,7 @@ class MessageIn(BaseModel):
     # auto — agent (tool'lar) yoki direct'ni o'zi tanlaydi; agent — majburan tool'lar;
     # direct — faqat oldindan berilgan kontekst; deep — `deep_search` quvuri
     # (oqimsiz yo'l; SSE varianti `routers/deep.py` da)
-    mode: str = Field(default="auto", pattern="^(auto|agent|direct|deep)$")
+    mode: str = Field(default="auto", pattern="^(auto|agent|direct|deep|exhaustive)$")
     account_id: int | None = None  # agent rejimi uchun (chat tanlanmagan bo'lsa ham)
 
 
@@ -488,7 +488,7 @@ class RegenerateIn(BaseModel):
 
     context: ContextIn | None = None
     deep: bool = False
-    mode: str = Field(default="auto", pattern="^(auto|agent|direct|deep)$")
+    mode: str = Field(default="auto", pattern="^(auto|agent|direct|deep|exhaustive)$")
     account_id: int | None = None
     stream: bool = False
 
