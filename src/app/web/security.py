@@ -262,3 +262,19 @@ class RateLimiter:
         hits.append(now)
         self._hits[key] = hits
         return True
+
+    def refund(self, key: str) -> None:
+        """Oxirgi hisoblangan urinishni qaytaradi (ish bajarilmagan bo'lsa).
+
+        Kerak bo'ladigan joy: `exhaustive` deep so'rovi tasdiqsiz kelganda
+        quvur **javob bermaydi** — faqat bahoni ko'rsatadi. Uni shift
+        kvotasiga yozish foydalanuvchini o'zi tanlamagan ish uchun
+        jazolardi: uch marta baho so'rasa, tasdiqlash uchun kvota qolmasdi.
+        """
+        hits = self._hits.get(key)
+        if hits:
+            hits.pop()
+            if hits:
+                self._hits[key] = hits
+            else:
+                del self._hits[key]

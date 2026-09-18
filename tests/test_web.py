@@ -1557,6 +1557,12 @@ def test_new_ui_strings_exist_in_all_three_locales() -> None:
         "web.ask.stopped_saturation",
         "web.ask.stopped_wall",
         "web.ask.stopped_complete",
+        "web.ask.stopped_estimate_only",
+        "web.ask.cov_stopped_pull",
+        "web.ask.cov_stopped_filter",
+        "web.ask.est_weeks_hint",
+        "web.ask.truncated_answer",
+        "web.ask.continue_answer",
     ]
     missing = {name: [k for k in required if not data.get(k)] for name, data in locales.items()}
     assert not any(missing.values()), missing

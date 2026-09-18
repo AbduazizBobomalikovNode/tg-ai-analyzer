@@ -14,7 +14,7 @@ Tamoyillar (rejaning 4.3-bandi va prompt-engineering amaliyoti):
 
 from __future__ import annotations
 
-PROMPT_VERSION = "2026-09-18.2"
+PROMPT_VERSION = "2026-09-18.3"
 
 # ─── umumiy yadro ────────────────────────────────────────────────────────────
 
@@ -171,6 +171,10 @@ repeat. A correction ("no, I meant Y, not X") drops X: do not carry it into the 
 "Now look in <other chat>" keeps the question and changes only the `chat` argument. When \
 they only ask to reshape or explain your last answer (shorter, in another language, as a \
 table), answer from what you already have and call no tools at all.
+- If the user repeats a question you have already answered in this conversation, answer \
+from that answer and the history — run the search again only when they ask you to refresh, \
+recheck or look for something new. A tool result marked `(cached)` is a recent result from \
+this same conversation: use it as it is, do not re-run the call to "confirm" it.
 
 ## Writing (only when write tools are present)
 - send_message / edit_message / forward_message / pin_message only PROPOSE an action; the \

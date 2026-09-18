@@ -16,6 +16,7 @@ o'qiydi (`web/static/pages/ask/deep.js`). Shu sababli CSRF himoyasi ham odatdagi
 
 from __future__ import annotations
 
+import contextlib
 import json
 from collections.abc import AsyncIterator
 from typing import Annotated, Any
@@ -29,6 +30,7 @@ from app.db.models import Account
 from app.logging import get_logger
 from app.services import chat_service as cs
 from app.services import deep_search as DS
+from app.services import limits as LIM
 from app.web.security import WebIdentity, locale_of, require_csrf, require_identity
 
 log = get_logger(__name__)
@@ -101,6 +103,19 @@ def _confirm(body: DeepIn) -> bool:
     return True
 
 
+def _refund_estimate_only(user_id: int) -> None:
+    """Baho bilan tugagan yugurish deep shift slotini **yemasin**.
+
+    Shift `_prepare` da olinadi (u yerda hali natija noma'lum), shuning
+    uchun qaytarish `done {needs_confirm: true}` ko'ringanda bo'ladi.
+    Tekshiruvni tasdiq darvozasidan keyinga ko'chirish emas, aynan qaytarish:
+    baho ham reja + embedding chaqiradi, ya'ni umuman shiftsiz qoldirib
+    bo'lmaydi — u faqat **tasdiqlangan** yugurish uchun band bo'lsin.
+    """
+    with contextlib.suppress(Exception):  # hisob tuzatish javobni buzmaydi
+        LIM.refund_deep_rate(user_id)
+
+
 def _sse(event: DS.DeepEvent) -> str:
     payload = json.dumps(event.data, ensure_ascii=False, default=str)
     return f"event: {event.kind}\ndata: {payload}\n\n"
@@ -127,6 +142,8 @@ async def deep_stream(
                 mode=DS.normalize_mode(body.mode, deep=body.deep),
                 confirm=_confirm(body),
             ):
+                if event.kind == "done" and event.data.get("needs_confirm"):
+                    _refund_estimate_only(ident.user_id)
                 yield _sse(event)
         except Exception as exc:
             # L2: xom istisno matni klientga chiqmaydi (SQL, yo'l, sir bo'lishi
@@ -162,4 +179,6 @@ async def deep_once(
         )
     except DS.DeepSearchError as exc:
         raise _http(exc.code, exc.detail) from exc
+    if result.needs_confirm:
+        _refund_estimate_only(ident.user_id)
     return result.to_dict()

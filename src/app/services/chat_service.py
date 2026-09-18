@@ -678,7 +678,9 @@ async def _send_via_agent(
     llm: LLM | None,
     events: EventSink | None = None,
 ) -> Reply:
+    # Kech import: `deep_search` bu modulga qaytib bog'lanadi (`ChatError`).
     from app.services.agent import run_agent
+    from app.services.deep_search import is_length_finish
 
     hist_msgs: list[Msg] = []
     for row in history:
@@ -697,6 +699,9 @@ async def _send_via_agent(
         locale=locale,
         llm=llm,
         on_event=events,
+        # Tool natijalari keshi suhbat bo'yicha: bir xil savol qayta
+        # berilganda qidiruv ikkinchi marta yugurmasin (eval `econ-01`).
+        conversation_id=conversation.id,
     )
     answer = outcome.text or _empty_answer(outcome.finish_reason)
     cost = estimate_cost(outcome.provider, outcome.model, outcome.tokens_in, outcome.tokens_out)
@@ -713,6 +718,12 @@ async def _send_via_agent(
         # shuning uchun "nechta bajarildi" va "nega to'xtadi" alohida yoziladi.
         "calls_executed": outcome.calls_executed,
         "stop_reason": outcome.stop_reason,
+        # Provider'ning "nega to'xtadi" i — `stop_reason` (bizning byudjet)
+        # bilan **boshqa narsa**. `length`/`MAX_TOKENS` bo'lsa javob jumla
+        # o'rtasida kesilgan va buni jim o'tkazish yaramaydi.
+        "finish_reason": outcome.finish_reason,
+        "truncated_answer": is_length_finish(outcome.finish_reason),
+        "cache_hits": outcome.cache_hits,
         "est_tokens": outcome.result_tokens,
         "run_id": outcome.run_id,
         "action_ids": outcome.action_ids,

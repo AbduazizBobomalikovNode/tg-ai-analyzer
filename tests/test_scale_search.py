@@ -4,7 +4,8 @@ Qo'riqlanadigan narsalar:
 
   * **bucket rejasi** — bir nechta savol vektori bo'yicha *maksimum* olinadi,
     tuguni yo'q chat `(chat, oy)` zaxira yo'liga tushadi, `BUCKET_MAX` qopqoq;
-  * **elbow kesish** `[200, 3000]` oralig'idan chiqmaydi;
+  * **elbow kesish** `[500, 3000]` oralig'idan chiqmaydi va hovuzning
+    `ELBOW_KEEP_MIN_FRAC` qismidan ko'pini tashlamaydi;
   * **dedup O(n)** — banded simhash hamma juftlikni solishtirmaydi (bu shart
     bo'lmasa 20k nomzod 200M taqqoslashga aylanardi);
   * **filtr** — partiya indeksi *global*, chiqish validatsiyasi, kesh
@@ -21,6 +22,7 @@ Hech bir testda real LLM/DB yo'q.
 
 from __future__ import annotations
 
+import math
 import time
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -258,8 +260,8 @@ async def test_plan_buckets_caps_at_bucket_max_and_prefers_plan_chats() -> None:
 
 
 def test_elbow_cut_finds_the_drop_inside_the_window() -> None:
-    scores = [1.0] * 250 + [0.1] * 500
-    assert SC.elbow_cut(scores) == 250
+    scores = [1.0] * 700 + [0.1] * 500
+    assert SC.elbow_cut(scores) == 700
 
 
 def test_elbow_cut_never_leaves_the_bounds() -> None:
@@ -269,6 +271,27 @@ def test_elbow_cut_never_leaves_the_bounds() -> None:
     assert SC.elbow_cut([1.0 - i * 1e-9 for i in range(9_000)]) <= SC.ELBOW_MAX
     # hovuz pastki chegaradan kichik bo'lsa hech narsa kesilmaydi
     assert SC.elbow_cut([1.0, 0.5, 0.1]) == 3
+
+
+def test_elbow_never_discards_more_than_the_keep_fraction() -> None:
+    """Jonli regressiya: 2058 → 239 (88% tashlangan), dalil esa 1-20 ta.
+
+    Sakrash erta bo'lsa ham tirsak hovuzning `ELBOW_KEEP_MIN_FRAC` qismidan
+    ko'pini saqlaydi — haqiqiy shift `FILTER_MAX`, tirsak emas.
+    """
+    for n in (2_058, 4_170):
+        scores = [1.0] * 5 + [0.001] * (n - 5)  # sakrash 5-o'rinda
+        cut = SC.elbow_cut(scores, hi=SC.elbow_hi_for("deep"))
+        assert cut >= math.ceil(n * SC.ELBOW_KEEP_MIN_FRAC)
+        assert cut >= SC.ELBOW_MIN
+        assert cut / n >= SC.ELBOW_KEEP_MIN_FRAC
+    # Pastki chegara ham ko'tarildi: 200 emas, 500.
+    assert SC.ELBOW_MIN == 500
+
+
+def test_elbow_min_is_the_floor_not_the_answer() -> None:
+    """Hovuz kichik bo'lsa (< `ELBOW_MIN`) hech narsa kesilmaydi."""
+    assert SC.elbow_cut([1.0] * 300 + [0.0] * 100) == 400
 
 
 # ─── (c) dedup — O(n) ────────────────────────────────────────────────────────
@@ -493,9 +516,55 @@ def test_select_evidence_respects_the_soft_max() -> None:
 # ─── (f) map / reduce ────────────────────────────────────────────────────────
 
 
+def test_map_is_skipped_on_thin_evidence() -> None:
+    """10 qator dalil 10 ta map chaqirig'iga aylanmasin (jonli regressiya)."""
+    thin = [_hit(i, day=1 + i) for i in range(1, 11)]  # har biri boshqa hafta
+    assert SC.map_chunks(thin) == []
+    assert len(thin) <= SC.MAP_SKIP_TOTAL
+
+
+def _weekly(n: int, *, chat_id: int = 1) -> list[S.Hit]:
+    """Har qatori **boshqa** haftada — jonli yugurishdagi tarqoq dalil."""
+    start = datetime(2026, 1, 5, tzinfo=UTC)
+    out: list[S.Hit] = []
+    for i in range(1, n + 1):
+        hit = _hit(i, chat_id=chat_id)
+        hit.date = start + timedelta(days=7 * i)
+        out.append(hit)
+    return out
+
+
+def test_map_merges_adjacent_small_same_chat_groups() -> None:
+    """Bir chatning mayda haftalari bitta bo'lakka yig'iladi.
+
+    Jonli regressiya: 20 ta tarqoq qator 20 ta map chaqirig'iga aylanardi —
+    map narxi dalil soniga emas, uning **tarqoqligiga** bog'liq edi.
+    """
+    rows = _weekly(20)
+    weeks = len({SC.week_key(h) for h in rows})
+    assert weeks == 20, "test tarqoq dalil holatini modellashtirsin"
+    chunks = SC.map_chunks(rows)
+    assert chunks, "map o'tkazib yuborilmasligi kerak (20 > MAP_SKIP_TOTAL)"
+    assert sum(len(c) for c in chunks) == 20
+    for chunk in chunks:
+        assert len({h.chat_id for h in chunk}) == 1  # bir jinslilik saqlandi
+    assert len(chunks) == math.ceil(20 / SC.MAP_CHUNK_MIN), len(chunks)
+    assert len(chunks) < weeks, (len(chunks), weeks)
+
+
+def test_map_never_merges_across_chats() -> None:
+    rows = [h for cid in (1, 2, 3) for h in _weekly(8, chat_id=cid)]
+    chunks = SC.map_chunks(rows)
+    assert chunks
+    for chunk in chunks:
+        assert len({h.chat_id for h in chunk}) == 1
+
+
 def test_map_chunks_are_homogeneous_and_capped() -> None:
     hits = [_hit(i, chat_id=1 + (i % 3), day=1 + (i % 9)) for i in range(1, 400)]
-    chunks = SC.map_chunks(hits, chunk_size=10, max_chunks=5)
+    # `chunk_min=1` — birlashtirish o'chiq, ya'ni eski (chat, hafta)
+    # granularligi tekshiriladi.
+    chunks = SC.map_chunks(hits, chunk_size=10, max_chunks=5, chunk_min=1)
     assert len(chunks) == 5
     for chunk in chunks:
         assert len({(h.chat_id, SC.week_key(h)) for h in chunk}) == 1
@@ -605,10 +674,61 @@ def test_estimate_is_pure_arithmetic_and_grows_with_the_corpus() -> None:
     }
     small = SC.estimate(_buckets(10), mode="deep", prices=prices)
     big = SC.estimate(_buckets(400), mode="deep", prices=prices)
-    assert small.est_messages == 10 * SC.PER_BUCKET_K
+    # Kichik rejada nomzod sanog'i pastki chegarada (`ELBOW_MIN`), xom
+    # `bucket x k` da emas — aks holda baho har doim qopqoqqa to'yinardi.
+    assert small.est_messages == SC.ELBOW_MIN
     assert big.est_cost_usd > small.est_cost_usd > 0
     assert big.ceiling_usd == SC.COST_CEILING["deep"]
     assert small.to_dict()["mode"] == "deep"
+
+
+def test_estimate_scales_with_the_bucket_count_and_never_saturates_early() -> None:
+    """Jonli regressiya: baho **har doim** 0.1124 chiqardi (= `FILTER_MAX`).
+
+    Endi u bucket soniga qarab o'sadi va faqat haqiqiy qopqoqda to'yinadi.
+    """
+    prices = dict.fromkeys(("filter", "map", "reduce", "synth"), (1.0, 1.0))
+    seen = [
+        SC.estimate(_buckets(n), mode="deep", prices=prices).est_messages for n in (20, 60, 150)
+    ]
+    assert seen == sorted(seen)
+    assert len(set(seen)) == 3, f"baho bucket soniga befarq qoldi: {seen}"
+    for n, value in zip((20, 60, 150), seen, strict=True):
+        expected = min(
+            SC.FILTER_MAX["deep"], max(SC.ELBOW_MIN, int(n * SC.PER_BUCKET_K * SC.EST_PULL_YIELD))
+        )
+        assert value == expected
+    # Qopqoq: `deep` ning xom ko'paytmasi 2100 bo'lsa ham `FILTER_MAX` da to'xtaydi.
+    assert (
+        SC.estimate(_buckets(400), mode="deep", prices=prices).est_messages
+        == (SC.FILTER_MAX["deep"])
+    )
+
+
+def test_estimate_stays_under_the_deep_ceiling_with_default_pricing() -> None:
+    """Sukut narx jadvalida (`FALLBACK_PRICE`) skan bahosi qopqoqdan oshmaydi."""
+    est = SC.estimate(_buckets(SC.BUCKET_MAX_DEEP), mode="deep")
+    assert 0 < est.est_cost_usd <= SC.COST_CEILING["deep"]
+    # Sintez alohida maydonda: qopqoq uni boshqarmaydi, lekin foydalanuvchi
+    # to'laydigan raqam shu.
+    assert est.est_total_usd > est.est_cost_usd
+
+
+def test_estimate_reports_the_planned_range_and_weeks() -> None:
+    est = SC.estimate(_buckets(12), mode="exhaustive")
+    data = est.to_dict()
+    assert data["weeks"] == 12
+    assert data["range"]["from"] and data["range"]["to"]
+    assert data["range"]["from"] < data["range"]["to"]
+    assert "est_total_usd" in data
+
+
+def test_filter_cost_for_600_candidates_stays_cheap() -> None:
+    """Tirsak qopqog'i filtr narxini portlatmasin (o'lchov: <= $0.03/600)."""
+    buckets = _buckets(round(600 / (SC.PER_BUCKET_K * SC.EST_PULL_YIELD)))
+    est = SC.estimate(buckets, mode="deep")
+    assert 580 <= est.est_messages <= 620, est.est_messages
+    assert est.breakdown["filter"] <= 0.03, est.breakdown
 
 
 def test_estimate_respects_the_mode_filter_cap() -> None:
@@ -623,6 +743,7 @@ def test_estimate_respects_the_mode_filter_cap() -> None:
 def test_estimate_needs_no_llm_and_no_db() -> None:
     est = SC.estimate([], mode="deep")
     assert est.buckets == 0 and est.est_messages == 0
+    assert est.est_cost_usd >= 0 and est.weeks == 0
 
 
 def _buckets(n: int) -> list[SC.Bucket]:
@@ -721,6 +842,107 @@ async def test_pull_timeout_is_reported_as_a_wall_stop(monkeypatch: pytest.Monke
     assert outcome.stats.stopped_by == "wall" and outcome.stats.truncated is True
 
 
+def test_stop_reasons_combine_by_severity_not_by_order() -> None:
+    """Jonli regressiya: `filter` "complete" deb `pull` ning "wall" ini yuvardi."""
+    st = SC.ScanStats()
+    st.note_stop("pull", "wall")
+    st.note_stop("filter", "complete")  # keyingi bosqich — lekin yengilroq sabab
+    assert st.pull_stopped_by == "wall"
+    assert st.filter_stopped_by == "complete"
+    assert st.stopped_by == "wall"
+    # ceiling wall'dan ham ustun
+    st.note_stop("filter", "ceiling")
+    assert st.stopped_by == "ceiling"
+    # yield complete'dan ustun, lekin wall'dan past
+    fresh = SC.ScanStats()
+    fresh.note_stop("filter", "yield")
+    assert fresh.stopped_by == "yield"
+    fresh.note_stop("pull", "wall")
+    assert fresh.stopped_by == "wall"
+    assert SC.combine_stops("", "complete", "yield") == "yield"
+    assert set(SC.STOP_RANK) == set(SC.STOP_REASONS)
+
+
+@pytest.mark.asyncio
+async def test_filter_does_not_clobber_the_pull_wall(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`filter_batched` hovuzni tugatsa ham pull qo'ygan sabab saqlanadi."""
+
+    async def nothing(session: Any, **kw: Any) -> Any:
+        return {}
+
+    monkeypatch.setattr(SC, "cache_lookup", nothing)
+    monkeypatch.setattr(SC, "cache_store", nothing)
+    llm = FakeLLM(filter='{"keep": [[0, 3]]}')
+    meter = _meter(llm)
+    stats = SC.ScanStats()
+    stats.note_stop("pull", "wall")
+    await SC.filter_batched(
+        session_factory_of(FakeSession()),
+        account_id=1,
+        question="q",
+        pool=[_hit(1)],
+        bucket_of={1: "c1|2026-W36"},
+        meter=meter,
+        budget=_budget(meter),
+        taint=DS._Taint(),
+        stats=stats,
+    )
+    assert stats.filter_stopped_by == "complete"
+    assert stats.stopped_by == "wall", "pull sababi yuvildi"
+
+
+def test_pull_reserve_leaves_a_workable_deep_budget() -> None:
+    """120 s devorli `deep` da pull kamida 60 s oladi (zaxira 45 → 30 s)."""
+    left = DS.HARD_WALL_S - DS.FAN_OUT_RESERVE_S  # kaskad deadline'i shu
+    assert SC.pull_budget_for(left) >= 60.0
+    assert SC.PULL_RESERVE_S == 30.0
+    # Derivatsiya o'zgarmadi: qolgan vaqt - zaxira, pastdan `PULL_MIN_S`.
+    assert SC.pull_budget_for(100.0) == pytest.approx(100.0 - SC.PULL_RESERVE_S)
+    assert SC.pull_budget_for(1.0) == SC.PULL_MIN_S
+
+
+@pytest.mark.asyncio
+async def test_exhaustive_plans_the_full_range_when_the_window_is_open() -> None:
+    """Oynasiz `exhaustive` tugunsiz oylarni ham oladi — `deep` esa yo'q.
+
+    Jonli regressiya: tugunlar faqat oxirgi haftalarda bor edi, shuning uchun
+    "hammasini ko'r" so'rovi 5-7 bucket / 1 hafta bilan chegaralanardi.
+    """
+    week = datetime(2026, 9, 7, tzinfo=UTC)
+    months = [datetime(2025, m, 1, tzinfo=UTC) for m in range(1, 13)]
+
+    def handler(sql: str) -> list[Any]:
+        if "set_config" in sql:
+            return []
+        if "date_trunc" in sql:
+            return [(1, m, 500) for m in months]
+        return [(1, week, 40, 0.2)]  # bitta chatning bitta hafta tuguni
+
+    plan = DS.DeepPlan(subqueries=["a"], chats=[1])
+    kwargs: dict[str, Any] = {"plan": plan, "vectors": [[0.1] * 8], "chat_titles": {1: "Ish chat"}}
+    deep = await SC.plan_buckets(
+        FakeSession(handler),  # type: ignore[arg-type]
+        1,
+        limit=SC.bucket_max_for("deep"),
+        mode="deep",
+        **kwargs,
+    )
+    full = await SC.plan_buckets(
+        FakeSession(handler),  # type: ignore[arg-type]
+        1,
+        limit=SC.bucket_max_for("exhaustive"),
+        mode="exhaustive",
+        **kwargs,
+    )
+    # `deep`: tuguni bor chat zaxira yo'liga **tushmaydi** → bitta bucket.
+    assert len(deep) == 1 and deep[0].source == "node"
+    # `exhaustive`: o'sha tugun + butun sinxronlangan oraliq oyma-oy.
+    assert len(full) == 1 + len(months)
+    assert len(full) >= len(deep), "exhaustive deep'dan kam rejalashtirmaydi"
+    assert {b.source for b in full} == {"node", "month"}
+    assert min(b.since for b in full) == months[0]
+
+
 def test_normalize_mode_maps_the_old_flag() -> None:
     assert DS.normalize_mode("", deep=True) == "deep"
     assert DS.normalize_mode("", deep=False) == "fast"
@@ -730,6 +952,12 @@ def test_normalize_mode_maps_the_old_flag() -> None:
 
 
 # ─── to'liq soxta yugurish ───────────────────────────────────────────────────
+
+#: Soxta hovuz hajmi — `MAP_SKIP_TOTAL` dan katta bo'lishi kerak, aks holda
+#: kaskad map/reduce'ni ataylab o'tkazib yuboradi (arzon yo'l).
+POOL_N = 20
+#: Filtr hamma nomzodni saqlaydi (soxta model javobi).
+KEEP_ALL = '{"keep": [' + ", ".join(f"[{i}, 3]" for i in range(POOL_N)) + "]}"
 
 
 @pytest.fixture
@@ -746,7 +974,7 @@ def wired(monkeypatch: pytest.MonkeyPatch) -> Any:
             link_prefix="https://t.me/c/1/",
         )
     ]
-    state: dict[str, Any] = {"persisted": None, "chats": chats}
+    state: dict[str, Any] = {"persisted": None, "scan_only": None, "chats": chats}
 
     async def fake_ctx(session: Any, *, account_id: int, conversation_id: int) -> DS.RunContext:
         return DS.RunContext(user_id=7, chats=chats, chat_lines=['id=1 channel "Ish chat"'])
@@ -764,11 +992,18 @@ def wired(monkeypatch: pytest.MonkeyPatch) -> Any:
         state["persisted"] = kw
         kw["result"].assistant_message_id = 55
 
+    async def fake_scan_only(_factory: Any, **kw: Any) -> None:
+        state["scan_only"] = kw
+
     async def fake_plan_buckets(session: Any, account_id: int, **kw: Any) -> list[SC.Bucket]:
         return _buckets(3)
 
     async def fake_pull(_factory: Any, **kw: Any) -> Any:
-        pool = [_hit(1, text=INJECTION), _hit(2), _hit(3)]
+        # `MAP_SKIP_TOTAL` dan ko'p: map/reduce bosqichlari haqiqatan yugursin.
+        pool = [_hit(1, text=INJECTION), *(_hit(i) for i in range(2, POOL_N + 1))]
+        stats = kw.get("stats")
+        if stats is not None:
+            stats.pulled = len(pool)
         return pool, {h.message_id: "c1|2026-W02" for h in pool}, 3
 
     async def fake_cache_lookup(session: Any, **kw: Any) -> dict[Any, int]:
@@ -782,6 +1017,7 @@ def wired(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setattr(DS, "_hydrate", identity)
     monkeypatch.setattr(S, "fetch_vectors", no_vectors)
     monkeypatch.setattr(DS, "_persist", fake_persist)
+    monkeypatch.setattr(DS, "_persist_scan_only", fake_scan_only)
     monkeypatch.setattr(SC, "plan_buckets", fake_plan_buckets)
     monkeypatch.setattr(SC, "pull_candidates", fake_pull)
     monkeypatch.setattr(SC, "cache_lookup", fake_cache_lookup)
@@ -802,7 +1038,7 @@ def factory() -> Any:
 
 @pytest.mark.asyncio
 async def test_scale_run_emits_events_in_order(wired: dict[str, Any]) -> None:
-    llm = FakeLLM()
+    llm = FakeLLM(filter=KEEP_ALL)
     events: list[DS.DeepEvent] = []
 
     async def sink(e: DS.DeepEvent) -> None:
@@ -838,8 +1074,13 @@ async def test_scale_run_emits_events_in_order(wired: dict[str, Any]) -> None:
         "buckets",
         "est_messages",
         "est_cost_usd",
+        "est_total_usd",
         "ceiling_usd",
+        "weeks",
+        "range",
     }
+    assert estimate.data["weeks"] >= 1
+    assert estimate.data["range"]["from"] and estimate.data["range"]["to"]
     coverage = next(e for e in events if e.kind == "coverage")
     for key in ("buckets_scanned", "buckets_planned", "filtered", "kept", "stopped_by"):
         assert key in coverage.data
@@ -850,11 +1091,15 @@ async def test_scale_run_emits_events_in_order(wired: dict[str, Any]) -> None:
     assert result.invalid_citations == 1
     assert result.scan["buckets_planned"] == 3
     assert wired["persisted"]["scan"]["mode"] == "deep"
+    # Audit "nechta nomzod ko'rildi" ni tirsakdan **oldingi** hovuzdan oladi.
+    assert result.scan["pulled"] == POOL_N
+    assert coverage.data["pull_stopped_by"] == ""
+    assert coverage.data["filter_stopped_by"] == "complete"
 
 
 @pytest.mark.asyncio
 async def test_scale_run_keeps_message_text_out_of_the_planner(wired: dict[str, Any]) -> None:
-    llm = FakeLLM()
+    llm = FakeLLM(filter=KEEP_ALL)
     await DS.run_deep_search(
         factory,  # type: ignore[arg-type]
         1,
@@ -899,6 +1144,24 @@ async def test_exhaustive_without_confirm_only_estimates(wired: dict[str, Any]) 
     assert llm.count(SCALE_FILTER_PROMPT) == 0
     assert llm.count(DEEP_SYNTH_PROMPT) == 0
     assert wired["persisted"] is None  # javob yo'q — suhbatga yozilmaydi
+    # ...lekin skan auditi **yoziladi**: reja quriladi, embedding qilinadi.
+    assert result.scan["stopped_by"] == "estimate_only"
+    row = wired["scan_only"]
+    assert row is not None and row["scan"]["mode"] == "exhaustive"
+    assert row["scan"]["stopped_by"] == "estimate_only"
+
+
+@pytest.mark.asyncio
+async def test_estimate_only_run_refunds_the_deep_rate_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Baho so'ragan yugurish deep kvotasini yemasin (`limits.refund_deep_rate`)."""
+    monkeypatch.setattr(LIM, "deep_rate", LIM.RateLimiter(2, 60))
+    assert LIM.check_deep_rate(42) is True
+    assert LIM.check_deep_rate(42) is True
+    assert LIM.check_deep_rate(42) is False  # kvota to'ldi
+    LIM.refund_deep_rate(42)
+    assert LIM.check_deep_rate(42) is True, "qaytarilgan slot ishlatilmadi"
 
 
 @pytest.mark.asyncio

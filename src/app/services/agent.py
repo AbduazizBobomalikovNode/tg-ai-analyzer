@@ -31,6 +31,7 @@ from app.llm import LLM, LLMError, Msg, Task
 from app.llm.pricing import estimate_cost
 from app.logging import get_logger
 from app.observability import TOOL_CALLS
+from app.services import tool_cache as TC
 from app.services import tools as T
 from app.services import write_tools as W
 from app.services.prompts import AGENT_SYSTEM_PROMPT, runtime_note
@@ -77,6 +78,7 @@ class AgentOutcome:
     result_tokens: int = 0  # tool natijalari (taxminiy)
     action_ids: list[int] = field(default_factory=list)  # taklif/bajarilgan yozish amallari
     calls_executed: int = 0  # to'silmagan (haqiqatan bajarilgan) chaqiruvlar
+    cache_hits: int = 0  # suhbat keshidan olingan tool natijalari (`tool_cache`)
     # `answered` | `call_budget` | `cost_budget` | `iterations`
     stop_reason: str = ""
     cost_usd: float | None = None  # taxminiy yig'ma narx (pricing.estimate_cost)
@@ -143,6 +145,7 @@ async def run_agent(
     llm: LLM | None = None,
     max_iterations: int | None = None,
     on_event: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
+    conversation_id: int | None = None,
 ) -> AgentOutcome:
     """`on_event` — UI oqimi uchun ixtiyoriy kuzatuvchi (`chat_service.EventSink`).
 
@@ -151,6 +154,11 @@ async def run_agent(
     ya'ni foydalanuvchiga "hozir shu tool ishlayapti" deyish yolg'on bo'lardi
     (`calls_log` esa uni baribir yozadi — CLAUDE.md, "To'silgan chaqiruv").
     Kuzatuvchidagi xato javobni **buzmaydi**: u faqat ko'rsatish uchun.
+
+    `conversation_id` berilsa o'qish tool'larining natijalari suhbat keshiga
+    (`services/tool_cache.py`, 10 daqiqa) tushadi va bir xil savol qaytarilganda
+    qidiruv **ikkinchi marta yugurmaydi** (eval `econ-01`). Kesh bo'lmasa
+    (Redis yo'q, `conversation_id` yo'q) hech narsa o'zgarmaydi.
     """
     s = get_settings()
     client = llm or LLM()
@@ -212,6 +220,7 @@ async def run_agent(
     finish = ""
     iterations = 0
     calls_executed = 0
+    cache_hits = 0
     stop_reason = ""
     tools_off = False  # byudjet tugadi — keyingi chaqiruv tool'siz
     cost_usd: float | None = None
@@ -251,6 +260,7 @@ async def run_agent(
         messages.append(Msg.assistant(res.text, res.tool_calls, signature=res.signature))
         for call in res.tool_calls[:MAX_CALLS_PER_TURN]:
             t0 = time.monotonic()
+            cached_text: str | None = None
             # ── takroriy chaqiruvlar qopqog'i ──────────────────────────────
             # Aynan bir xil (tool, args) — natija o'zgarmaydi, qayta bajarish
             # DB/MTProto ishini ham, tokenni ham behuda sarflaydi.
@@ -295,7 +305,19 @@ async def run_agent(
                 per_tool[call.name] += 1
                 calls_executed += 1
                 await _notify_tool(on_event, call.name)
-                result = await T.run_tool(call.name, ctx, call.arguments)
+                # Suhbat keshi tool'dan **oldin**: bir xil (tool, argument)
+                # 10 daqiqa ichida ikkinchi marta bajarilmaydi. Byudjet
+                # baribir sanaladi — aks holda kesh cheksiz sikl ochib
+                # qo'yardi (model bir xil chaqiruvni qayta-qayta so'rasa).
+                ckey = TC.cache_key(conversation_id, call.name, call.arguments)
+                cached_text = await TC.get(ckey) if ckey else None
+                if cached_text is not None:
+                    cache_hits += 1
+                    result = T.ToolResult(f"{cached_text}\n{TC.CACHED_NOTE}", ok=True)
+                else:
+                    result = await T.run_tool(call.name, ctx, call.arguments)
+                    if ckey and result.ok:
+                        await TC.put(ckey, result.text)
                 if call.name == "search_messages":
                     folded = fold_query(call.arguments.get("query"))
                     if folded:
@@ -320,6 +342,7 @@ async def run_agent(
                 "args": call.arguments,
                 "ok": result.ok,
                 "ms": int((time.monotonic() - t0) * 1000),
+                **({"cached": True} if cached_text is not None else {}),
                 **{
                     k: v
                     for k, v in result.meta.items()
@@ -407,6 +430,7 @@ async def run_agent(
         result_tokens=used_result_tokens,
         action_ids=action_ids,
         calls_executed=calls_executed,
+        cache_hits=cache_hits,
         stop_reason=stop_reason or "answered",
         cost_usd=cost_usd,
     )
@@ -416,6 +440,7 @@ async def run_agent(
         iterations=iterations,
         tools=[c["tool"] for c in calls_log],
         calls_executed=calls_executed,
+        cache_hits=cache_hits,
         stop_reason=outcome.stop_reason,
         cost_usd=cost_usd,
         tokens_in=tokens_in,

@@ -17,7 +17,7 @@ import asyncio
 import json
 import math
 import warnings
-from typing import Any
+from typing import Any, cast
 
 from google import genai
 from google.genai import types
@@ -48,6 +48,27 @@ log = get_logger(__name__)
 
 # 2.5 avlodning barcha modellari >= 1M kontekst
 _LONG_CONTEXT_PREFIXES = ("gemini-2.5", "gemini-3", "gemini-1.5")
+
+# ─── fikrlash (thinking) byudjeti ────────────────────────────────────────────
+#
+# 2026-09, jonli yugurish: `gemini-3.1-pro-preview` sintezda `tokens_out=2677`
+# bilan `finish_reason=MAX_TOKENS` qaytardi, holbuki `max_tokens` 4000 edi va
+# javob jumla o'rtasida kesildi. Sabab — **fikrlash tokenlari ham shu
+# byudjetdan** yeyiladi: model "o'ylash" ga 3-4 ming token sarflab, ko'rinadigan
+# matnga yetarlicha joy qoldirmaydi. Sozlanmagan holda byudjet dinamik
+# ("model o'zi hal qiladi"), ya'ni kesilish tasodifga bog'liq bo'lib qoladi.
+#
+# Shuning uchun adapter fikrlash byudjetini **aniq** beradi:
+#   * `gemini-3*` — API `thinking_budget` ni qabul qilmaydi, `thinking_level`
+#     ("low" / "high") bilan boshqariladi; modest byudjet → "low";
+#   * `gemini-2.5*` — `thinking_budget` (token soni) ishlaydi;
+#   * `include_thoughts=False` — fikr matni javobda qaytmasin (`_parse_chat`
+#     uni baribir tashlaydi, lekin uzatish ham keraksiz).
+# `GEMINI_THINKING_BUDGET=0` — konfiguratsiya umuman yuborilmaydi (SDK sukuti).
+_THINKING_LEVEL_PREFIXES = ("gemini-3",)
+_THINKING_BUDGET_PREFIXES = ("gemini-2.5",)
+#: Shu chegaradan past byudjet `thinking_level="low"` ga tushadi (Gemini 3).
+THINKING_LEVEL_HIGH_FROM = 4_096
 
 # phase4/B — `output_dimensionality` bilan **kesilgan** vektor endi birlik
 # uzunlikda emas. `gemini-embedding-001` da normallashtirish mijoz tomonida
@@ -96,6 +117,24 @@ def reset_embed_mode_cache() -> None:
 def _base_model(model: str) -> str:
     """`models/gemini-embedding-001` → `gemini-embedding-001`."""
     return model.split("/")[-1].strip().lower()
+
+
+def thinking_config(model: str, *, budget: int) -> types.ThinkingConfig | None:
+    """Model oilasiga mos fikrlash konfiguratsiyasi (yoki `None` — sukut).
+
+    `budget <= 0` yoki fikrlashni sozlab bo'lmaydigan model → `None`.
+    Qaytgan obyekt hech qachon fikr matnini so'ramaydi (`include_thoughts`),
+    ya'ni chiqish byudjeti javobning o'ziga qoladi.
+    """
+    if budget <= 0:
+        return None
+    base = _base_model(model)
+    if base.startswith(_THINKING_LEVEL_PREFIXES):
+        level = "high" if budget >= THINKING_LEVEL_HIGH_FROM else "low"
+        return types.ThinkingConfig(thinking_level=cast(Any, level), include_thoughts=False)
+    if base.startswith(_THINKING_BUDGET_PREFIXES):
+        return types.ThinkingConfig(thinking_budget=budget, include_thoughts=False)
+    return None
 
 
 def l2_normalize(vec: list[float]) -> list[float]:
@@ -171,6 +210,9 @@ class GeminiProvider(BaseProvider):
             cfg_kwargs["max_output_tokens"] = max_tokens
         if json_mode:
             cfg_kwargs["response_mime_type"] = "application/json"
+        think = thinking_config(model, budget=int(get_settings().gemini_thinking_budget))
+        if think is not None:
+            cfg_kwargs["thinking_config"] = think
         if tools:
             cfg_kwargs["tools"] = [
                 types.Tool(function_declarations=[_to_declaration(t) for t in tools])

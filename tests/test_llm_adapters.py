@@ -733,3 +733,74 @@ def test_embed_rejects_an_empty_text_list() -> None:
     provider, _ = _gemini_with([])
     with pytest.raises(LLMError):
         asyncio.run(provider.embed([], model="gemini-embedding-001", dim=2))
+
+
+# ─── fikrlash (thinking) byudjeti ────────────────────────────────────────────
+#
+# Jonli regressiya: `gemini-3.1-pro-preview` sintezda `tokens_out=2677` bilan
+# `MAX_TOKENS` qaytardi (`max_tokens` 4000 edi) — fikrlash tokenlari ham shu
+# byudjetdan yeyiladi. Adapter endi byudjetni **aniq** beradi.
+
+
+def test_thinking_config_picks_the_family_specific_field() -> None:
+    from app.llm.gemini import thinking_config
+
+    three = thinking_config("gemini-3.1-pro-preview", budget=1024)
+    assert three is not None
+    assert str(three.thinking_level).lower().endswith("low")  # modest byudjet
+    assert three.thinking_budget is None  # Gemini 3 token sonini qabul qilmaydi
+    assert three.include_thoughts is False
+
+    high = thinking_config("gemini-3.5-flash", budget=8192)
+    assert high is not None and str(high.thinking_level).lower().endswith("high")
+
+    two_five = thinking_config("models/gemini-2.5-flash", budget=1024)
+    assert two_five is not None
+    assert two_five.thinking_budget == 1024
+    assert two_five.thinking_level is None
+    assert two_five.include_thoughts is False
+
+
+def test_thinking_config_is_off_when_the_budget_is_zero_or_unsupported() -> None:
+    from app.llm.gemini import thinking_config
+
+    assert thinking_config("gemini-3.5-flash", budget=0) is None
+    assert thinking_config("gemini-1.5-pro", budget=1024) is None
+    assert thinking_config("gemini-embedding-001", budget=1024) is None
+
+
+async def test_chat_sends_the_thinking_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.config import get_settings
+    from app.llm import gemini as G
+
+    s = get_settings()
+    monkeypatch.setattr(s, "gemini_thinking_budget", 1024, raising=False)
+    monkeypatch.setattr(G, "get_settings", lambda: s)
+    provider, fake = _gemini_chat([_resp([types.Part(text="ok")])])
+    await provider.chat([Msg.user("savol")], model="gemini-3.1-pro-preview", max_tokens=8000)
+    config = fake.calls[0]["config"]
+    assert config.thinking_config is not None
+    assert config.thinking_config.include_thoughts is False
+    assert config.max_output_tokens == 8000
+
+
+async def test_chat_omits_the_thinking_config_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.config import get_settings
+    from app.llm import gemini as G
+
+    s = get_settings()
+    monkeypatch.setattr(s, "gemini_thinking_budget", 0, raising=False)
+    monkeypatch.setattr(G, "get_settings", lambda: s)
+    provider, fake = _gemini_chat([_resp([types.Part(text="ok")])])
+    await provider.chat([Msg.user("savol")], model="gemini-3.1-pro-preview")
+    assert fake.calls[0]["config"].thinking_config is None
+
+
+def test_parse_chat_surfaces_the_length_finish_reason() -> None:
+    from app.services.deep_search import is_length_finish
+
+    provider, _ = _gemini_chat([_resp([types.Part(text="yarim jumla")], finish="MAX_TOKENS")])
+    res = asyncio.run(provider.chat([Msg.user("savol")], model="gemini-3.5-flash"))
+    assert is_length_finish(res.finish_reason) is True

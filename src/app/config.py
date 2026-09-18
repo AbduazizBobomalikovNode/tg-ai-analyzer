@@ -139,6 +139,12 @@ class Settings(BaseSettings):
     gemini_model_image: str = "gemini-2.5-flash-image"
     gemini_model_embed: str = "gemini-embedding-001"
     embed_dim: int = 768
+    # Fikrlash (thinking) byudjeti — token. Fikrlash tokenlari `max_tokens`
+    # byudjetidan yeyiladi, ya'ni cheklanmagan holda uzun javob jumla
+    # o'rtasida kesilardi (jonli: `gemini-3.1-pro-preview`, sintez).
+    # `gemini-3*` da bu "low"/"high" darajasiga aylanadi, `gemini-2.5*` da
+    # token soni bo'lib ketadi. 0 = sozlamani umuman yubormaslik (SDK sukuti).
+    gemini_thinking_budget: int = Field(default=1024, ge=0, le=32_768)
 
     # ─── DeepSeek (OpenAI-mos API) ───
     deepseek_api_key: str = ""

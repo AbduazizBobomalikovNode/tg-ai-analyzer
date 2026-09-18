@@ -536,3 +536,170 @@ def test_prompt_states_the_numeric_budget_rules() -> None:
     assert "never construct t.me urls yourself" in low
     assert "the answer IS `list_chats`" in p
     assert "cannot exist in Telegram data" in p
+
+
+# ─── suhbat bo'yicha tool natijalari keshi (`services/tool_cache.py`) ────────
+#
+# Eval `econ-01`: bir xil savol qayta berilganda agent aynan o'sha qidiruvni
+# qaytadan bajarardi. Natija o'zgarmaydi, DB/MTProto ishi va token esa
+# ikkinchi marta to'lanadi. `seen_calls` bu yerda yordam bermaydi — u bitta
+# yugurish ichidagi takrorni to'sadi, bu esa turn'lar orasida.
+
+
+class _FakeRedis:
+    """Xotiradagi Redis o'rnini bosuvchi (TTL yozib boriladi, lekin kutilmaydi)."""
+
+    def __init__(self, store: dict[str, str] | None = None) -> None:
+        self.store = store if store is not None else {}
+        self.ttls: dict[str, int] = {}
+        self.closed = 0
+
+    async def get(self, key: str) -> bytes | None:
+        raw = self.store.get(key)
+        return raw.encode("utf-8") if raw is not None else None
+
+    async def set(self, key: str, value: str, *, ex: int | None = None) -> None:
+        self.store[key] = value
+        if ex is not None:
+            self.ttls[key] = ex
+
+    async def aclose(self) -> None:
+        self.closed += 1
+
+
+@pytest.fixture
+def fake_redis(monkeypatch: pytest.MonkeyPatch) -> _FakeRedis:
+    from app.services import tool_cache as TC
+
+    redis = _FakeRedis()
+
+    async def _redis() -> Any:
+        return redis
+
+    monkeypatch.setattr(TC, "_redis", _redis)
+    return redis
+
+
+def test_tool_cache_key_folds_arguments_and_scopes_to_the_conversation() -> None:
+    from app.services import tool_cache as TC
+
+    a = TC.cache_key(7, "search_messages", {"query": "To'lov  MUDDATI", "days": 30})
+    b = TC.cache_key(7, "search_messages", {"days": 30, "query": "to'lov muddati"})
+    assert a == b, "registr/bo'shliq/tartib farqi kesh promahiga aylanmasin"
+    assert a != TC.cache_key(8, "search_messages", {"query": "to'lov muddati", "days": 30})
+    assert a != TC.cache_key(7, "search_telegram", {"query": "to'lov muddati", "days": 30})
+    assert a.startswith(TC.KEY_PREFIX + "7:")
+    # Suhbat yo'q → kesh yo'q (xotira/maxfiylik chegarasi).
+    assert TC.cache_key(None, "search_messages", {"query": "x"}) == ""
+
+
+async def test_tool_cache_round_trip_and_silent_failure(fake_redis: _FakeRedis) -> None:
+    from app.services import tool_cache as TC
+
+    key = TC.cache_key(1, "search_messages", {"query": "q"})
+    assert await TC.get(key) is None
+    await TC.put(key, "natija")
+    assert await TC.get(key) == "natija"
+    assert fake_redis.ttls[key] == TC.TTL_S
+    # Juda uzun natija yozilmaydi
+    long_key = TC.cache_key(1, "search_messages", {"query": "long"})
+    await TC.put(long_key, "x" * (TC.MAX_VALUE_CHARS + 1))
+    assert await TC.get(long_key) is None
+
+
+async def test_tool_cache_is_a_miss_when_redis_is_down(
+    monkeypatch: pytest.MonkeyPatch, fake_tool: list[dict[str, Any]]
+) -> None:
+    from app.services import tool_cache as TC
+
+    async def boom() -> Any:
+        raise RuntimeError("no redis")
+
+    monkeypatch.setattr(TC, "_redis", boom)
+    key = TC.cache_key(1, "search_messages", {"query": "q"})
+    await TC.put(key, "natija")  # jim o'tadi
+    assert await TC.get(key) is None
+    # ...va agent baribir ishlaydi (tool haqiqatan bajariladi)
+    llm = _LLM([_res(calls=[ToolCall("c1", "get_chat_stats", {"days": 7})]), _res("javob")])
+    out = await A.run_agent(
+        _Session(),  # type: ignore[arg-type]
+        user_id=1,
+        account_id=5,
+        question="q",
+        history=[],
+        pinned_chat=None,
+        locale="uz",
+        llm=llm,  # type: ignore[arg-type]
+        conversation_id=1,
+    )
+    assert out.text == "javob" and len(fake_tool) == 1 and out.cache_hits == 0
+
+
+async def _run_once(
+    llm: Any, fake_tool: list[dict[str, Any]], *, conversation_id: int | None
+) -> Any:
+    return await A.run_agent(
+        _Session(),  # type: ignore[arg-type]
+        user_id=1,
+        account_id=5,
+        question="to'lov muddati qachon?",
+        history=[],
+        pinned_chat=None,
+        locale="uz",
+        llm=llm,  # type: ignore[arg-type]
+        conversation_id=conversation_id,
+    )
+
+
+def _two_turns() -> Any:
+    return _LLM([_res(calls=[ToolCall("c1", "search_messages", {"query": "to'lov"})]), _res("ok")])
+
+
+async def test_repeated_question_reuses_the_cached_tool_result(
+    fake_redis: _FakeRedis, fake_tool: list[dict[str, Any]]
+) -> None:
+    first = await _run_once(_two_turns(), fake_tool, conversation_id=42)
+    assert first.cache_hits == 0 and len(fake_tool) == 1
+
+    second = await _run_once(_two_turns(), fake_tool, conversation_id=42)
+    assert len(fake_tool) == 1, "ikkinchi yugurish tool'ni qayta bajardi"
+    assert second.cache_hits == 1
+    assert second.tool_calls[0]["cached"] is True
+    # Byudjet baribir sanaladi — kesh cheksiz sikl ochmaydi.
+    assert second.calls_executed == 1
+
+
+async def test_cache_result_is_marked_for_the_model(
+    fake_redis: _FakeRedis, fake_tool: list[dict[str, Any]]
+) -> None:
+    from app.services import tool_cache as TC
+
+    await _run_once(_two_turns(), fake_tool, conversation_id=42)
+    llm = _two_turns()
+    await _run_once(llm, fake_tool, conversation_id=42)
+    tool_msg = llm.calls[1]["messages"][-1]
+    assert TC.CACHED_NOTE in tool_msg.content
+    assert tool_msg.content.startswith('<untrusted_data source="tool:search_messages"')
+
+
+async def test_cache_does_not_leak_between_conversations(
+    fake_redis: _FakeRedis, fake_tool: list[dict[str, Any]]
+) -> None:
+    await _run_once(_two_turns(), fake_tool, conversation_id=42)
+    out = await _run_once(_two_turns(), fake_tool, conversation_id=43)
+    assert len(fake_tool) == 2 and out.cache_hits == 0
+
+
+async def test_cache_is_off_without_a_conversation_id(
+    fake_redis: _FakeRedis, fake_tool: list[dict[str, Any]]
+) -> None:
+    await _run_once(_two_turns(), fake_tool, conversation_id=None)
+    await _run_once(_two_turns(), fake_tool, conversation_id=None)
+    assert len(fake_tool) == 2
+    assert fake_redis.store == {}
+
+
+def test_agent_prompt_tells_the_model_to_answer_repeats_from_history() -> None:
+    assert "repeats a question you have already answered" in P.AGENT_SYSTEM_PROMPT
+    assert "(cached)" in P.AGENT_SYSTEM_PROMPT
+    assert "2026" not in P.AGENT_SYSTEM_PROMPT  # system kesh prefiksi barqaror

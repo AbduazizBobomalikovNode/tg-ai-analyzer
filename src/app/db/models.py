@@ -982,6 +982,10 @@ class ScanRun(Base):
     cost_usd: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
     est_cost_usd: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
     stopped_by: Mapped[str] = mapped_column(String(16), default="complete")
+    # Bosqich sabablari alohida (0021): `filter` hovuzni tugatib "complete"
+    # deganda ham `pull` qo'ygan "wall" auditda ko'rinib tursin.
+    pull_stopped_by: Mapped[str] = mapped_column(String(16), default="", server_default="")
+    filter_stopped_by: Mapped[str] = mapped_column(String(16), default="", server_default="")
     truncated: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     elapsed_ms: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now())

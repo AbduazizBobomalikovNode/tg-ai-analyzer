@@ -1576,15 +1576,136 @@ def test_plan_prompt_without_history_is_unchanged() -> None:
     assert "<conversation_history" not in DS.build_plan_prompt("savol", [], now=NOW)
 
 
+# ─── kesilgan sintez (thinking byudjeti) ─────────────────────────────────────
+
+
+class _TruncatingLLM:
+    """Birinchi javob `MAX_TOKENS` bilan kesiladi, davomi to'liq keladi."""
+
+    def __init__(self, *, second_finish: str = "STOP") -> None:
+        self.second_finish = second_finish
+        self.calls: list[list[Any]] = []
+
+    async def chat(self, task: Any, messages: list[Any], **kw: Any) -> ChatResult:
+        self.calls.append(list(messages))
+        first = len(self.calls) == 1
+        return ChatResult(
+            text="Kelishuv bor #c1m101, ammo" if first else "davomi: juma kuni.",
+            tool_calls=[],
+            model="fake-model",
+            provider="fake",
+            usage=Usage(tokens_in=10, tokens_out=5),
+            finish_reason="MAX_TOKENS" if first else self.second_finish,
+        )
+
+    async def embed(self, texts: list[str], **kw: Any) -> Any:  # pragma: no cover
+        raise AssertionError("sintez testda embedding chaqirmaydi")
+
+
+def test_is_length_finish_reads_every_provider_spelling() -> None:
+    for raw in ("length", "MAX_TOKENS", "FinishReason.MAX_TOKENS", "max_tokens"):
+        assert DS.is_length_finish(raw) is True
+    for raw in ("", "stop", "STOP", "refusal", "tool_calls"):
+        assert DS.is_length_finish(raw) is False
+
+
+@pytest.mark.asyncio
+async def test_synthesize_continues_once_when_the_answer_is_cut() -> None:
+    llm = _TruncatingLLM()
+    meter = DS._Meter(llm)  # type: ignore[arg-type]
+    answer, _kept, res = await DS.synthesize(
+        meter,
+        "savol?",
+        DS.to_evidence([_hit(1)], []),
+        [],
+        locale="uz",
+        deep=True,
+    )
+    assert len(llm.calls) == 2, "davom ettirish aynan bir marta"
+    assert DS.SYNTH_CONTINUE_NUDGE in llm.calls[1][-1].content
+    assert answer.startswith("Kelishuv bor #c1m101, ammo")
+    assert "davomi: juma kuni." in answer
+    # Qaytgan natija — **oxirgi** chaqiruv, ya'ni "hali ham kesilganmi" javobi.
+    assert res is not None and DS.is_length_finish(res.finish_reason) is False
+
+
+@pytest.mark.asyncio
+async def test_synthesize_reports_a_still_truncated_answer() -> None:
+    llm = _TruncatingLLM(second_finish="MAX_TOKENS")
+    meter = DS._Meter(llm)  # type: ignore[arg-type]
+    _answer, _kept, res = await DS.synthesize(
+        meter, "savol?", DS.to_evidence([_hit(1)], []), [], locale="uz", deep=True
+    )
+    assert len(llm.calls) == 2  # ikkinchi marta cho'zilmaydi
+    assert res is not None and DS.is_length_finish(res.finish_reason) is True
+
+
+def test_synth_token_budget_leaves_room_for_thinking() -> None:
+    """Jonli regressiya: 4000 byudjetda `tokens_out=2677` + MAX_TOKENS."""
+    assert DS.SYNTH_MAX_TOKENS == 8_000
+
+
 def test_taint_guard_allows_prior_answer_only_inside_its_envelope() -> None:
     guard = DS._Taint()
     guard.add_turns(_history())
     # konvertda — mayli (konvertni kod yozadi, ichi neutralize'dan o'tgan)
-    guard.assert_clean("plan", DS.render_history(_history()))
-    # konvertsiz — regressiya, xato
-    with pytest.raises(DS.DeepSearchError) as exc:
-        guard.assert_clean("plan", "savol\nprior: " + PRIOR_ANSWER)
-    assert exc.value.code == "taint"
+    assert guard.prior_leak(DS.render_history(_history())) is False
+    # konvertsiz — regressiya, lekin **xato emas**: signal
+    assert guard.prior_leak("savol\nprior: " + PRIOR_ANSWER) is True
+    # ...va u hech qachon istisno ko'tarmaydi (yolg'on pozitiv suhbatni o'ldirardi)
+    guard.assert_clean("plan", "savol\nprior: " + PRIOR_ANSWER)
+
+
+def test_taint_ignores_a_prior_answer_that_echoes_the_question() -> None:
+    """Jonli regressiya (suhbat 157): har turn'da 500 `chat.err.taint`.
+
+    Javob savolni takrorlab boshlagan, o'sha bo'lak esa `render_history` da
+    user satri va `plan: {"standalone_question": …}` bo'lib konvertdan
+    **tashqarida** turadi — qo'riqchi har safar qizarardi.
+    """
+    question = "Nurbek bilan to'lov haqida nima kelishgandik va qachon o'tkazamiz?"
+    echo = question + " — juma kuni, 3 000 000 so'm #c1m101."
+    history = [
+        DS.Turn(role="user", text=question),
+        DS.Turn(
+            role="assistant",
+            text=echo,
+            mode="deep",
+            plan={"standalone_question": question, "subqueries": ["to'lov"], "chats": [1]},
+            citations=1,
+        ),
+    ]
+    guard = DS._Taint()
+    guard.add_turns(history, question=question)
+    prompt = DS.build_plan_prompt(question, ['id=1 channel "Ish chat"'], now=NOW, history=history)
+    assert guard.prior_leak(prompt) is False
+    guard.assert_clean("plan", prompt)  # istisno yo'q
+
+
+@pytest.mark.asyncio
+async def test_plan_query_drops_history_instead_of_failing_on_a_prior_leak(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Oqish topilsa yugurish davom etadi — tarixsiz, xatosiz."""
+    history = _history()
+
+    def leaky(question: str, chat_lines: Any, *, now: Any, history: Any = ()) -> str:
+        # Konvertsiz oldingi javob — aynan qo'riqchi qidiradigan regressiya.
+        return (f"prior: {PRIOR_ANSWER}\n" if history else "") + f"<question>{question}</question>"
+
+    monkeypatch.setattr(DS, "build_plan_prompt", leaky)
+    llm = FakeLLM()
+    plan = await DS.plan_query(
+        DS._Meter(llm),  # type: ignore[arg-type]
+        DS._Taint(),
+        "chuqurroq qidir",
+        chat_lines=[],
+        known_chats=[1],
+        now=NOW,
+        history=history,
+    )
+    assert plan.standalone_question  # yugurish yiqilmadi
+    assert PRIOR_ANSWER not in llm.user_turn(DEEP_PLAN_PROMPT)
 
 
 def test_taint_guard_blocks_raw_evidence_even_inside_a_prior_envelope() -> None:
@@ -1817,7 +1938,7 @@ def test_deep_prompts_describe_the_follow_up_contract() -> None:
 
     # Versiya scale prompt'lari (korpus kaskadi) va javob shakli ko'rsatmasi
     # (GFM jadval / ```chart / callout / :::details) qo'shilganda ko'tarildi.
-    assert DEEP_PROMPT_VERSION == "2026-09-18.2"
+    assert DEEP_PROMPT_VERSION == "2026-09-18.3"
     for field_name in ("standalone_question", "intent_follow_up", "needs_retrieval"):
         assert field_name in DEEP_PLAN_PROMPT
     for label in DS.FOLLOW_UPS:
@@ -1828,8 +1949,57 @@ def test_deep_prompts_describe_the_follow_up_contract() -> None:
     assert "never copy an id you cannot see" in DEEP_SYNTH_PROMPT
 
 
+def test_synth_prompt_forbids_corpus_wide_absence_on_thin_evidence() -> None:
+    """Jonli regressiya: 1-20 dalil bilan javob "faqat…/hech qayerda…" derdi.
+
+    Kam dalil "kam narsa bor" degani emas — filtr kam qoldirgan, xolos.
+    """
+    assert "Never assert a corpus-wide absence" in DEEP_SYNTH_PROMPT
+    for phrase in ("faqat", "hech qayerda", "только", "nowhere"):
+        assert phrase in DEEP_SYNTH_PROMPT
+    assert "fewer than 10 messages" in DEEP_SYNTH_PROMPT
+    # Prompt bayt darajasida barqaror: o'zgaruvchan qism yo'q (kesh prefiksi).
+    assert "2026-" not in DEEP_SYNTH_PROMPT
+
+
 def test_agent_prompt_explains_follow_ups() -> None:
     from app.services import prompts as P
 
     assert "## Follow-ups" in P.AGENT_SYSTEM_PROMPT
     assert "2026" not in P.AGENT_SYSTEM_PROMPT
+
+
+@pytest.mark.asyncio
+async def test_run_records_the_finish_reason_and_truncation(
+    monkeypatch: pytest.MonkeyPatch, wired: dict[str, Any]
+) -> None:
+    """Kesilgan javob jimgina o'tib ketmasin — kontekstda belgi qoladi."""
+    use_multi(monkeypatch, lambda q: [_hit(1)])
+
+    async def cut_synth(*a: Any, **kw: Any) -> Any:
+        res = ChatResult(
+            text="yarim jumla",
+            tool_calls=[],
+            model="m",
+            provider="p",
+            usage=Usage(tokens_in=1, tokens_out=1),
+            finish_reason="MAX_TOKENS",
+        )
+        return "Kelishuv bor #c1m101, ammo", DS.to_evidence([_hit(1)], []), res
+
+    monkeypatch.setattr(DS, "synthesize", cut_synth)
+    await DS.run_deep_search(factory, 1, 10, "to'lov?", locale="uz", llm=FakeLLM())  # type: ignore[arg-type]
+    meta = wired["persisted"]["context_meta"]
+    assert meta["finish_reason"] == "MAX_TOKENS"
+    assert meta["truncated_answer"] is True
+    assert meta["coverage"]["truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_run_marks_a_complete_answer_as_not_truncated(
+    monkeypatch: pytest.MonkeyPatch, wired: dict[str, Any]
+) -> None:
+    use_multi(monkeypatch, lambda q: [_hit(1)])
+    await DS.run_deep_search(factory, 1, 10, "to'lov?", locale="uz", llm=FakeLLM())  # type: ignore[arg-type]
+    meta = wired["persisted"]["context_meta"]
+    assert meta["truncated_answer"] is False

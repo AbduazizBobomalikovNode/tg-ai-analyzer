@@ -180,3 +180,15 @@ def check_deep_rate(user_id: int) -> bool:
     if get_settings().deep_rate_per_minute <= 0:
         return False
     return deep_rate.check(str(user_id))
+
+
+def refund_deep_rate(user_id: int) -> None:
+    """Bajarilmagan deep so'rovining shift slotini qaytaradi.
+
+    Tasdiqsiz `exhaustive` — javob emas, **baho**: reja quriladi va yugurish
+    to'xtaydi. Uni kvotaga yozish foydalanuvchini o'zi tanlamagan ish uchun
+    jazolardi (uch marta baho ko'rsa, tasdiqlashga kvota qolmasdi).
+    """
+    if get_settings().deep_rate_per_minute <= 0:
+        return
+    deep_rate.refund(str(user_id))

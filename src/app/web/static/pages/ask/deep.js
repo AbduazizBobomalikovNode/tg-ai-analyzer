@@ -337,9 +337,14 @@ export function reduceEvent(model, kind, d = {}, at = 0) {
         buckets: numOr(d.buckets),
         est_messages: numOr(d.est_messages),
         est_cost_usd: d.est_cost_usd == null ? null : Number(d.est_cost_usd),
+        est_total_usd: d.est_total_usd == null ? null : Number(d.est_total_usd),
         ceiling_usd: d.ceiling_usd == null ? null : Number(d.ceiling_usd),
+        weeks: numOr(d.weeks),
+        range: d.range || null,
       };
       f.bucketsPlanned = model.estimate.buckets || f.bucketsPlanned;
+      f.weeks = model.estimate.weeks || f.weeks;
+      model.range = d.range || model.range || null;
       advance("estimate", "buckets");
       break;
 
@@ -599,8 +604,22 @@ function coveragePanel(cov, costUsd) {
       analyzed: num(cov.messages_used ?? cov.evidence ?? cov.kept ?? 0),
     })));
   }
-  if (cov.stopped_by) {
-    const why = t(`web.ask.stopped_${cov.stopped_by}`);
+  const pullStop = cov.pull_stopped_by || null;
+  const filterStop = cov.filter_stopped_by || null;
+  if (pullStop && filterStop && pullStop !== filterStop) {
+    // Ikki bosqich turli sabab bilan to'xtagan — ikkalasi ham ko'rsatiladi,
+    // aks holda foydalanuvchi "nega saralash tugadi-yu tortish tugamadi"
+    // savolini javobsiz qoladi.
+    rows.appendChild(el("div.cov-stopped", null, [
+      icon("info"),
+      el("span", null, [
+        `${t("web.ask.cov_stopped_pull")}: ${t(`web.ask.stopped_${pullStop}`)}`,
+        " · ",
+        `${t("web.ask.cov_stopped_filter")}: ${t(`web.ask.stopped_${filterStop}`)}`,
+      ].join("")),
+    ]));
+  } else if (pullStop || filterStop || cov.stopped_by) {
+    const why = t(`web.ask.stopped_${pullStop || filterStop || cov.stopped_by}`);
     rows.appendChild(el("div.cov-stopped", null, [
       icon("info"),
       el("span", null, `${t("web.ask.cov_stopped")}: ${why}`),
@@ -694,14 +713,36 @@ function estimateCard() {
   ]);
 }
 
-/** Baho satri: `≈ 14 200 xabar · 186 bucket · ≈ $0.07 (shift $0.10)`. */
+/**
+ * Baho satri: `≈ 14 200 xabar · 186 bo'lak · 4 hafta (1 yan → 1 sen) ·
+ * skan ≈ $0.07, jami ≈ $0.30 (shift $0.50)`.
+ */
 function estimateLine(est) {
+  const r = est.range || {};
   return t("web.ask.est_line", {
     msgs: num(est.est_messages),
     buckets: num(est.buckets),
-    cost: usd(est.est_cost_usd),
+    weeks: num(est.weeks),
+    from: r.from ? fmtDate(r.from) : "—",
+    to: r.to ? fmtDate(r.to) : "—",
+    scanCost: usd(est.est_cost_usd),
+    totalCost: usd(est.est_total_usd),
     ceiling: usd(est.ceiling_usd),
   });
+}
+
+/**
+ * Tor oyna ogohlantirishi: `exhaustive` faqat 1-2 hafta rejalashtirsa
+ * foydalanuvchi buni tasdiqlashdan oldin ko'rishi kerak — aks holda
+ * "nega javob faqat oxirgi haftani qamrab oldi" degan savol qoladi.
+ */
+function estimateHint(est) {
+  if (!est || est.mode !== "exhaustive") return null;
+  if (!(est.weeks > 0 && est.weeks <= 2)) return null;
+  return el("p.est-hint", { role: "note" }, [
+    icon("alert-triangle"),
+    el("span", null, t("web.ask.est_weeks_hint", { weeks: num(est.weeks) })),
+  ]);
 }
 
 /* ── bosqich tafsiloti ────────────────────────────────────────────── */
@@ -865,6 +906,9 @@ export function createDeepPanel(answerEl, opts = {}) {
     const card = estimateCard();
     const line = card.querySelector("[data-est-line]");
     if (line) line.textContent = estimateLine(model.estimate);
+    const hint = estimateHint(model.estimate);
+    if (hint && line) line.after(hint);
+    else if (hint) card.appendChild(hint);
     const box = card.querySelector("[data-est-confirm]");
     if (box && handlers) {
       box.hidden = false;

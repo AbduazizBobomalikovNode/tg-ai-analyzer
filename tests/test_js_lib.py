@@ -507,7 +507,10 @@ _SCALE_EVENTS: list[dict[str, object]] = [
             "buckets": 186,
             "est_messages": 14200,
             "est_cost_usd": 0.07,
+            "est_total_usd": 0.09,
             "ceiling_usd": 0.1,
+            "weeks": 30,
+            "range": {"from": "2026-01-01", "to": "2026-09-01"},
         },
     },
     {
@@ -572,6 +575,8 @@ _SCALE_EVENTS: list[dict[str, object]] = [
             "filtered": 2000,
             "kept": 640,
             "stopped_by": "saturation",
+            "pull_stopped_by": "wall",
+            "filter_stopped_by": "saturation",
             "scan_cost_usd": 0.02,
         },
     },
@@ -600,6 +605,7 @@ process.stdout.write(JSON.stringify({
   standalone: m.plan && m.plan.standalone_question,
   intent: m.plan && m.plan.intent_follow_up,
   estimate: m.estimate,
+  coverage: m.coverage,
 }));
 """
     out = _ask_module("deep.js", script, _SCALE_EVENTS)
@@ -634,6 +640,18 @@ process.stdout.write(JSON.stringify({
     assert out["standalone"] == "To'lov qachon kelishildi?"
     assert out["intent"] == "deeper"
     assert out["estimate"]["est_messages"] == 14200
+    # `estimate` endi hafta soni, sana oralig'i va jami narxni ham olib keladi
+    # (shartnoma: `weeks`, `range:{from,to}`, `est_total_usd`) — baho satri va
+    # tor-oyna ogohlantirishi shulardan chiziladi.
+    assert out["estimate"]["weeks"] == 30
+    assert out["estimate"]["range"] == {"from": "2026-01-01", "to": "2026-09-01"}
+    assert out["estimate"]["est_total_usd"] == 0.09
+
+    # Qamrov endi tortish va saralashning **alohida** to'xtash sababini olib
+    # keladi (`pull_stopped_by`/`filter_stopped_by`) — bu ikkisi farq qilganda
+    # panel ikkalasini ham ko'rsatadi.
+    assert out["coverage"]["pull_stopped_by"] == "wall"
+    assert out["coverage"]["filter_stopped_by"] == "saturation"
 
     # Davomiylik: bosqich keyingisi kelganda yopiladi — `pull` 900→3500,
     # `filter` 3500→5000 (`select` kelganda).

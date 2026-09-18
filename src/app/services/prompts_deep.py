@@ -26,7 +26,7 @@ system'ga emas, user turn'iga qo'shiladi.
 
 from __future__ import annotations
 
-DEEP_PROMPT_VERSION = "2026-09-18.2"
+DEEP_PROMPT_VERSION = "2026-09-18.3"
 
 # Ishonch qoidalari yagona manbadan (`prompts._CORE`) olinadi — ikkala joyda
 # ikki xil yozilib qolmasin. Import bo'lmasa (masalan prompt'lar bo'lingan
@@ -275,6 +275,11 @@ guess.
 - Never claim you have seen every message, the whole chat or the complete history: you have \
 seen the evidence block only. A coverage report is added below your answer by the system, \
 so do not write one yourself and do not describe your own search process.
+- Never assert a corpus-wide absence — "faqat …", "hech qayerda …", "только …", "nowhere \
+else", "this is the only mention" — when the evidence block holds fewer than 10 messages. \
+A thin block means the search kept little, not that little exists. Say what WAS found and \
+what was searched instead ("topilgan xabarlar orasida …", "в найденных сообщениях …", \
+"among the messages found …"), and leave the gap to the coverage report.
 - Keep it tight: no preamble, no restating the question. Bullets for enumerations, \
 headings sparingly.
 

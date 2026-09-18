@@ -119,8 +119,13 @@ shu so'zlarni qidirardi.
 - **Taint qoidasi ikki xil.** User matni — o'zining matni, ochiq ketadi.
   Oldingi **javob** begona xabarlardan sintez qilingan → faqat
   `<untrusted_data kind="prior_answer">` konvertida (`render_history`), ichi
-  `neutralize` dan o'tgan. `_Taint.assert_clean` shu konvertni olib tashlab
-  qoldig'ini tekshiradi: javob konvertdan chiqib ketsa — `DeepSearchError`.
+  `neutralize` dan o'tgan. Tekshiruv **ikki xil og'irlikda**: xabar matni
+  planner promptida topilsa `assert_clean` → `DeepSearchError` (qattiq xato);
+  oldingi javob konvertdan chiqib ketsa esa `prior_leak` → `True`, yugurish
+  **tarixsiz davom etadi** (`deep.taint_prior_skipped`). Sabab: 24 belgilik
+  bo'lak savolni takrorlagan javobda har turn'da yolg'on pozitiv berardi va
+  suhbat doimiy 500 bilan o'lardi. Endi chegara 48 belgi, `plan:` metasi va
+  user matni qoldiqdan olib tashlanadi.
   Xabar matni esa baribir **hech qayerda** bo'lmaydi (konvert ichida ham).
   Oldingi rejaning `subqueries`/`entities`/`chats` i — bizning planner
   yasagan tuzilma, oddiy JSON bo'lib beriladi.
@@ -171,11 +176,12 @@ qamrov va sitata validatsiyasi — o'sha (`deep_search.py`).
     plan_buckets (chat x ISO-hafta, tugun vektorlari bo'yicha;
                   deep <=200, exhaustive <=400 — o'lchovdan, quyiga qarang)
       -> pull_candidates (bucket ichida 4 kanalli RRF, k=30, parallel
-         sessiyalar, elbow kesish [200, 3000])
+         sessiyalar, elbow kesish [500, 3000], <=75% tashlanadi)
       -> dedup_fast (sha1 + **banded** simhash, O(n))
       -> filter_batched (ROUTE/Flash-Lite, 50 satrlik partiya, 0..3 ball)
       -> select_evidence (ball + chat/hafta kvotasi, <=1000)
-      -> map (bir jinsli 80 xabarlik bo'lak) -> reduce -> da'volar dayjesti
+      -> map (bir jinsli, bitta chat, 80 xabarlik bo'lak; <=15 dalilda
+         umuman o'tkazib yuboriladi) -> reduce -> da'volar dayjesti
 
 - **Dedup hovuzda O(n) bo'lishi shart.** `cluster.dedup_simhash` har imzoni
   saqlanganlarning hammasi bilan solishtiradi; 20k nomzodda bu o'ladi.
@@ -189,21 +195,37 @@ qamrov va sitata validatsiyasi — o'sha (`deep_search.py`).
 - **Narx qopqog'i kodda**: `COST_CEILING = {fast .01, deep .10, exhaustive
   .50}` filtr va map orasida tekshiriladi; oshsa bosqich to'xtaydi va
   `coverage.stopped_by="ceiling"`, `truncated=True` chiqadi. To'xtash sabablari:
-  `yield | ceiling | saturation | wall | complete`.
-- **`estimate()` bitta skan tokenidan oldin** hisoblanadi (bucket sanog'i × k
-  × `llm/pricing.py`). `exhaustive` API'da `confirm: true` talab qiladi —
-  aks holda `estimate` + `done {needs_confirm:true}` qaytadi va yugurish
-  to'xtaydi.
+  `yield | ceiling | saturation | wall | complete | estimate_only`.
+- **To'xtash sababi bosqich bo'yicha yoziladi** (`pull_stopped_by` /
+  `filter_stopped_by`, migratsiya 0021), umumiysi `combine_stops` bilan
+  hisoblanadi: wall/ceiling — yield/complete dan ustun. Ilgari `filter`
+  hovuzni tugatib "complete" deb yozar va pull qo'ygan "wall" ni **yuvardi**.
+- **`estimate()` bitta skan tokenidan oldin** hisoblanadi. Nomzod sanog'i
+  kalibrlangan: `min(FILTER_MAX, max(ELBOW_MIN, bucket x k x EST_PULL_YIELD))`,
+  keep-rate `EST_KEEP_RATE=0.08` — xom `bucket x k` har doim qopqoqqa to'yinar
+  va baho **har doim bir xil** chiqardi. `est_cost_usd` = skan (qopqoq shuni
+  o'lchaydi), `est_total_usd` = skan + sintez. `exhaustive` API'da
+  `confirm: true` talab qiladi — aks holda `estimate` + `done
+  {needs_confirm:true}` qaytadi, yugurish to'xtaydi, deep shift sloti
+  **qaytariladi** (`limits.refund_deep_rate`) va `scan_runs` ga
+  `stopped_by="estimate_only"` qatori yoziladi.
+- **Oynasiz `exhaustive` butun sinxronlangan oraliqni rejalashtiradi**: tugun
+  bucket'lari + **hamma** nishon chat uchun `(chat, oy)` gridi. Tugunlar faqat
+  oxirgi haftalarda bo'lsa reja 5-7 bucket / 1 hafta bilan chegaralanardi.
 - **Kaskadda ikkinchi raund yo'q** (`reflect` chaqirilmaydi): bucket fazosi
   allaqachon aylanib chiqilgan, "boshqa so'z bilan qidir" u yerda qamrov
   emas, faqat narx qo'shadi.
 - Kesh `relevance_cache` (migratsiya 0020), kalit
   `md5(uz_fold(standalone_question))`; audit `scan_runs` — har yugurish uchun
   bitta qator (`buckets_planned/scanned`, `filtered`, `kept`, `stopped_by`).
+  `scan_runs.candidates` — **tirsakdan oldingi** hovuz (`stats.pulled`), ya'ni
+  "nechta nomzod ko'rildi" degan savolning halol javobi.
 - **`BUCKET_MAX_DEEP=200` o'lchovdan.** 2.66M xabarli jonli korpusda
   (faqat o'qish, 3 savol) `pull_candidates`: cap=100 p50 40.1 s / p95 41.3 s ·
   cap=200 p50 34.9 s / p95 40.5 s · cap=400 p50 47.0 s / **p95 75.2 s**.
-  `deep` da pull byudjeti ≈53 s, ya'ni 400 p95 da javobni jimgina kesardi.
+  `deep` da pull byudjeti o'lchov paytida ≈53 s edi (`PULL_RESERVE_S=45`),
+  hozir ≈70 s (`PULL_RESERVE_S=30` — pull'dan keyingi ish o'lchovda 30-40 s),
+  ya'ni 400 p95 da javobni jimgina kesardi.
   `plan_buckets` p50 ≈1.1 s (cap'dan **deyarli mustaqil**). Narx bucket
   soniga chiziqli emas: katta chatlarning bir nechta oyi vaqtni yeydi.
 - Pull byudjeti tugasa qolgan bucket'lar qaralmaydi va bu
@@ -278,6 +300,13 @@ yugurtiring, bitta yugurish hech narsani isbotlamaydi).
   "adjust once" buni to'xtatmadi.
 - **`seen_calls`** — aynan bir xil `(tool, args)` ikkinchi marta bajarilmaydi;
   natija o'zgarmaydi, DB/MTProto ishi va token esa behuda ketadi.
+- **Suhbat keshi (`services/tool_cache.py`)** — `seen_calls` bitta yugurish
+  ichida ishlaydi, bu esa **turn'lar orasida**: kalit `(conversation_id, tool,
+  buklangan args)`, TTL 10 daqiqa, Redis (yo'q bo'lsa kesh ham yo'q). Faqat
+  o'qish tool'lari va faqat `ok` natija. Keshdan kelgan matn `(cached)` bilan
+  belgilanadi va byudjetga **baribir** sanaladi (aks holda cheksiz sikl).
+  Kalit suhbatga bog'langan: tool natijasi Telegram kontenti, u suhbatdan
+  chiqmasin.
 - **`AGENT_MAX_EXECUTED_CALLS` (6) va `AGENT_MAX_COST_USD` ($0.15)** — yugurish
   bo'yicha qopqoqlar (`conv-20260917-144833`: turnda 6-11 bajarilgan chaqiruv,
   $0.11-$0.40). Yetilganda tool'lar o'chadi va "bor narsa bilan javob ber"
@@ -626,6 +655,16 @@ fayl tizimini LLM'ga ochish. `capabilities()` da TOOLS yo'q — rost.
   router avtomat Gemini'ga tushiradi. `GEMINI_API_KEY` har doim kerak.
 - Claude Opus 5 / Sonnet 5 / Opus 4.7+ da `temperature` **rad etiladi** —
   adapter uni yubormaydi (`_NO_SAMPLING_PREFIXES`). Haiku 4.5 da qoladi.
+- **Gemini'da fikrlash tokenlari `max_tokens` byudjetidan yeyiladi.** Jonli
+  yugurishda `gemini-3.1-pro-preview` sintezda `tokens_out=2677` bilan
+  `MAX_TOKENS` qaytardi (byudjet 4000) va javob jumla o'rtasida kesildi.
+  Adapter endi byudjetni aniq beradi (`gemini.thinking_config`,
+  `GEMINI_THINKING_BUDGET`, default 1024): `gemini-3*` → `thinking_level`,
+  `gemini-2.5*` → `thinking_budget`, ikkalasida `include_thoughts=False`.
+  0 = sozlamani yubormaslik. Deep sintez byudjeti `SYNTH_MAX_TOKENS=8000`
+  va `finish_reason` length bo'lsa **bitta** davom ettirish chaqirig'i
+  qilinadi; keyin ham kesilgan bo'lsa `context.truncated_answer=True`.
+  `finish_reason` ikkala yo'lda ham (`agent` va `deep`) kontekstga yoziladi.
 - Claude'da alohida "json mode" yo'q — `json_mode=True` system ko'rsatma +
   fence tozalash orqali. `stop_reason=refusal` xato emas: bo'sh matn +
   `finish_reason="refusal"`.

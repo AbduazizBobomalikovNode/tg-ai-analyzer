@@ -84,6 +84,7 @@ from app.services import nodes as N
 from app.services import search as S
 from app.services import untrusted as U
 from app.services.prompts_deep import (
+    DEEP_SYNTH_PROMPT,
     SCALE_FILTER_PROMPT,
     SCALE_MAP_PROMPT,
     SCALE_REDUCE_PROMPT,
@@ -107,7 +108,8 @@ BUCKET_MAX = 400  # chat x hafta bo'laklarining qattiq qopqog'i (`exhaustive`)
 #:     cap=200  p50 34.9 s   p95 40.5 s
 #:     cap=400  p50 47.0 s   p95 75.2 s     <- pull byudjetidan chiqadi
 #:
-#: `deep` da pull byudjeti ≈53 s (120 s devor minus sintez zaxirasi), ya'ni
+#: `deep` da pull byudjeti ≈70 s (120 s devor minus `FAN_OUT_RESERVE_S` va
+#: `PULL_RESERVE_S`; o'lchov paytida 53 s edi — zaxira 45 s edi), ya'ni
 #: 400 ta bucket p95 da byudjetni yeb, javobni jimgina kesardi. 200 esa
 #: p95 da ham sig'adi. `exhaustive` ning devori 600 s — u to'liq 400 ni
 #: oladi. Qiziq tafsilot: narx bucket **soniga** chiziqli emas —
@@ -117,6 +119,11 @@ BUCKET_MAX_DEEP = 200
 BUCKET_NODE_LEVELS = (2, 3)  # kun va hafta tugunlari (epizod juda mayda)
 BUCKET_NODE_FETCH = 3 * BUCKET_MAX  # har vektor uchun olinadigan tugun soni
 BUCKET_FALLBACK_CHATS = 40  # tugunsiz chatlar uchun (chat, oy) zaxira yo'li
+#: `exhaustive` + oynasiz savol: zaxira grid **hamma** nishon chat uchun
+#: quriladi (tuguni borlari ham). Jonli yugurishda tugunlar faqat oxirgi
+#: haftalarda bor edi, ya'ni reja 5-7 bucket / 1 hafta bilan chegaralanardi —
+#: "burchakdan burchakka" degan rejim uchun bu yolg'on.
+BUCKET_FALLBACK_CHATS_FULL = 200
 PLAN_CHAT_BONUS = 0.10  # reja aniq nomlagan chat — ballga qo'shimcha
 FALLBACK_SCORE = 0.35  # (chat, oy) bucket'ining bazaviy bali
 
@@ -124,9 +131,22 @@ FALLBACK_SCORE = 0.35  # (chat, oy) bucket'ining bazaviy bali
 PER_BUCKET_K = 30
 PULL_CONCURRENCY = 6  # parallel sessiyalar (asyncpg: bitta sessiya = bitta task)
 POOL_MAX = 20_000
-ELBOW_MIN = 200  # elbow kesish shundan pastga tushmaydi
+#: Elbow kesish shundan pastga tushmaydi. **200 → 500** (jonli o'lchov): ikkita
+#: real yugurishda tirsak 2058→239 va 4170→278 ga kesgan, dalil esa 1-20 ta
+#: chiqqan — `FILTER_MAX` (2000) qopqog'i hech qachon ishlamagan va "hech
+#: qayerda yo'q" degan javob aslida hovuzning 6% idan kelgan.
+ELBOW_MIN = 500
 ELBOW_MAX = 3_000  # va shundan yuqoriga ko'tarilmaydi (`deep`)
-PULL_RESERVE_S = 45.0  # filtr/map/sintez uchun devordan qoldiriladigan vaqt
+#: Tirsak hovuzning ko'pi bilan 75% ini tashlaydi. RRF ballari silliq
+#: kamayadi, ya'ni "eng katta sakrash" ko'pincha shovqin — qopqoqsiz u
+#: hovuzning 90% ini yeb qo'yadi. Haqiqiy shift `FILTER_MAX`.
+ELBOW_KEEP_MIN_FRAC = 0.25
+#: Filtr/map/sintez uchun devordan qoldiriladigan vaqt. **45 → 30 s**: jonli
+#: yugurishlarda pull'dan keyingi ish (dedup + filtr to'lqinlari + tanlov +
+#: map/reduce + sintez) eng yomon holatda 30-40 s oldi, ya'ni 45 s zaxira
+#: pull byudjetidan 15 s ni behuda olib qo'yardi. Derivatsiya o'sha:
+#: `pull_budget = qolgan vaqt - zaxira`, pastdan `PULL_MIN_S` bilan.
+PULL_RESERVE_S = 30.0
 PULL_MIN_S = 5.0
 
 #: (c) dedup — O(n)
@@ -158,6 +178,15 @@ PER_WEEK_QUOTA = 3  # har haftadan kamida shuncha (bor bo'lsa)
 
 #: (f) map / reduce
 MAP_CHUNK_MSGS = 80
+#: Bo'lakning **pastki** chegarasi: 10 qatorli dalil 10 ta map chaqirig'iga
+#: aylanib ketardi (har (chat, hafta) juftligi o'z bo'lagi edi), ya'ni
+#: map narxi dalil soniga emas, uning **tarqoqligiga** bog'liq edi. Endi
+#: qo'shni kichik bo'laklar **bitta chat** ichida birlashtiriladi.
+MAP_CHUNK_MIN = 5
+#: Dalil shundan kam bo'lsa map/reduce umuman yugurmaydi: da'volarni ajratish
+#: uchun 15 qator sintezning o'ziga baribir to'liq sig'adi
+#: (`SYNTH_EVIDENCE_LINES` = 150), ya'ni map faqat ikkinchi marta to'laydi.
+MAP_SKIP_TOTAL = 15
 MAP_MAX_CHUNKS = 16
 MAP_PARALLEL = 4
 MAP_LINE_CHARS = 300
@@ -182,9 +211,45 @@ COST_CEILING: dict[str, float] = {"fast": 0.01, "deep": 0.10, "exhaustive": 0.50
 EXHAUSTIVE_WALL_S = 600.0
 
 #: `coverage.stopped_by` qiymatlari — UI shu ro'yxatga qarab matn tanlaydi.
-STOP_REASONS = ("complete", "yield", "ceiling", "saturation", "wall")
+STOP_REASONS = ("complete", "yield", "ceiling", "saturation", "wall", "estimate_only")
+
+#: To'xtash sabablarining **ustunligi**. Bosqichlar o'z sababini alohida
+#: yozadi (`pull_stopped_by` / `filter_stopped_by`), umumiy sabab esa
+#: shulardan eng "og'iri". Nega kerak: `filter_batched` hovuzni tugatib
+#: `complete` deb yozardi va pull byudjeti qo'ygan `wall` ni **bekor
+#: qilardi** — qamrovda "reja to'liq skanlandi" chiqardi, holbuki bucket'larning
+#: yarmi umuman qaralmagan edi.
+STOP_RANK: dict[str, int] = {
+    "complete": 0,
+    "yield": 1,
+    "saturation": 2,
+    "wall": 3,
+    "ceiling": 4,
+    "estimate_only": 5,
+}
+
+
+def combine_stops(*reasons: str) -> str:
+    """Bir necha bosqich sababidan eng ustunini tanlaydi (`STOP_RANK`)."""
+    best = "complete"
+    for reason in reasons:
+        if reason and STOP_RANK.get(reason, 0) > STOP_RANK.get(best, 0):
+            best = reason
+    return best
+
 
 EVENT_MIN_INTERVAL_S = 1.0  # `pull`/`filter` hodisalari shundan tez-tez kelmaydi
+
+#: (h) baho kalibratsiyasi — jonli yugurishlardan.
+#: Baho ilgari **har doim** `FILTER_MAX` ga to'yinardi (`est_messages` =
+#: bucket x k), ya'ni 5 ta bucket ham, 200 ta ham bir xil 0.1124 ni ko'rsatardi
+#: va foydalanuvchi "nima to'layapman" degan savolga javob olmasdi.
+#: `EST_PULL_YIELD` — bucket x k dan dedup va tirsakdan keyin hovuzda
+#: qoladigan ulush; `EST_KEEP_RATE` — filtrdan o'tish ulushi (o'lchangan
+#: 0.05-0.11 oralig'ining o'rtasi). Baho baribir yuqoridan: pastki chegara
+#: `ELBOW_MIN`, yuqorigisi `FILTER_MAX`.
+EST_PULL_YIELD = 0.35
+EST_KEEP_RATE = 0.08
 
 
 def elbow_hi_for(mode: str) -> int:
@@ -249,8 +314,15 @@ class Estimate:
     mode: str
     buckets: int
     est_messages: int
-    est_cost_usd: float
+    est_cost_usd: float  # **skan** narxi — aynan `COST_CEILING` boshqaradigan qism
     ceiling_usd: float
+    #: Skan + sintez. Qopqoqqa kirmaydi (sintez rejimga bog'liq emas), lekin
+    #: foydalanuvchi to'laydigan raqam shu — UI ikkalasini ko'rsatadi.
+    est_total_usd: float = 0.0
+    weeks: int = 0  # reja qamragan alohida (ISO-hafta | oy) yorliqlari
+    range_from: datetime | None = None
+    range_to: datetime | None = None
+    breakdown: dict[str, float] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -258,7 +330,13 @@ class Estimate:
             "buckets": self.buckets,
             "est_messages": self.est_messages,
             "est_cost_usd": round(self.est_cost_usd, 4),
+            "est_total_usd": round(self.est_total_usd, 4),
             "ceiling_usd": self.ceiling_usd,
+            "weeks": self.weeks,
+            "range": {
+                "from": self.range_from.isoformat() if self.range_from else None,
+                "to": self.range_to.isoformat() if self.range_to else None,
+            },
         }
 
 
@@ -284,6 +362,9 @@ class ScanStats:
 
     buckets_planned: int = 0
     buckets_scanned: int = 0
+    #: Tirsakdan **oldingi** birlashtirilgan hovuz — "nechta nomzod ko'rildi"
+    #: degan savolning halol javobi (`scan_runs.candidates` shundan yoziladi).
+    pulled: int = 0
     candidates: int = 0  # dedupdan keyingi hovuz
     filtered: int = 0  # modelga (yoki keshga) ko'rsatilgani
     kept: int = 0  # `FILTER_KEEP_MIN` dan o'tgani
@@ -293,15 +374,31 @@ class ScanStats:
     contradictions: int = 0
     chunks: int = 0
     quota_trimmed: int = 0
+    #: Bosqich sabablari alohida saqlanadi — keyingi bosqich oldingisini
+    #: `complete` bilan **bekor qila olmasin** (`combine_stops`).
+    pull_stopped_by: str = ""
+    filter_stopped_by: str = ""
     stopped_by: str = "complete"
     truncated: bool = False
     scan_cost_usd: float = 0.0
     est_cost_usd: float = 0.0
+    est_total_usd: float = 0.0
+
+    def note_stop(self, stage: str, reason: str) -> None:
+        """Bosqich sababini yozadi va umumiysini **qayta hisoblaydi**."""
+        if not reason:
+            return
+        if stage == "pull":
+            self.pull_stopped_by = combine_stops(self.pull_stopped_by, reason)
+        elif stage == "filter":
+            self.filter_stopped_by = combine_stops(self.filter_stopped_by, reason)
+        self.stopped_by = combine_stops(self.pull_stopped_by, self.filter_stopped_by, reason)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "buckets_planned": self.buckets_planned,
             "buckets_scanned": self.buckets_scanned,
+            "pulled": self.pulled,
             "candidates": self.candidates,
             "filtered": self.filtered,
             "kept": self.kept,
@@ -311,6 +408,8 @@ class ScanStats:
             "contradictions": self.contradictions,
             "chunks": self.chunks,
             "quota_trimmed": self.quota_trimmed,
+            "pull_stopped_by": self.pull_stopped_by,
+            "filter_stopped_by": self.filter_stopped_by,
             "stopped_by": self.stopped_by,
             "truncated": self.truncated,
             "scan_cost_usd": round(self.scan_cost_usd, 6),
@@ -457,6 +556,7 @@ async def plan_buckets(
     vectors: Sequence[Sequence[float]],
     chat_titles: dict[int, str] | None = None,
     limit: int = BUCKET_MAX,
+    mode: str = "deep",
 ) -> list[Bucket]:
     """Korpusni chat x ISO-hafta bo'laklariga bo'ladi va savolga yaqinligi bo'yicha tartiblaydi.
 
@@ -471,6 +571,14 @@ async def plan_buckets(
     zaxira yo'l — `messages` bo'yicha `(chat, oy)` sanoq bucket'lari. Ular
     bazaviy ball oladi, ya'ni mos topilgan hafta tugunlaridan pastda turadi,
     lekin **yo'qolmaydi**.
+
+    `mode="exhaustive"` va oynasiz (`plan.since is None`) savolda zaxira grid
+    **hamma** nishon chat uchun quriladi — tuguni borlari uchun ham — va
+    sinxronlangan butun oraliqni (`min(published_at)` … hozir) qoplaydi.
+    Nega: jonli yugurishda tugunlar faqat oxirgi haftalarda bor edi, ya'ni
+    "burchakdan burchakka" degan rejim 5-7 bucket / 1 hafta bilan
+    chegaralanardi. Grid tugun bucket'lari bilan **birlashtiriladi** (ular
+    ustun: bir xil kalitda tugun bali saqlanadi).
 
     Returns:
         `score` bo'yicha kamayish tartibidagi ≤`limit` ta `Bucket`.
@@ -528,14 +636,15 @@ async def plan_buckets(
                 found.score = max(found.score, score)
                 found.est_messages = max(found.est_messages, int(msg_count or 0))
 
-    covered = {cid for cid, _ in by_key}
+    full_grid = mode == "exhaustive" and plan.since is None
+    covered = set() if full_grid else {cid for cid, _ in by_key}
     fallback = await _month_buckets(
         session,
         account_id,
         plan=plan,
         exclude=covered,
         titles=titles,
-        limit=BUCKET_FALLBACK_CHATS,
+        limit=BUCKET_FALLBACK_CHATS_FULL if full_grid else BUCKET_FALLBACK_CHATS,
     )
     for bucket in fallback:
         by_key.setdefault((bucket.chat_id, bucket.label), bucket)
@@ -550,6 +659,8 @@ async def plan_buckets(
     log.debug(
         "scale.buckets",
         account_id=account_id,
+        mode=mode,
+        full_grid=full_grid,
         node=sum(1 for b in out if b.source == "node"),
         month=sum(1 for b in out if b.source == "month"),
         kept=min(len(out), limit),
@@ -697,19 +808,33 @@ async def pull_bucket(session: AsyncSession, bucket: Bucket, spec: PullSpec) -> 
     return fused[: spec.k]
 
 
-def elbow_cut(scores: Sequence[float], *, lo: int = ELBOW_MIN, hi: int = ELBOW_MAX) -> int:
+def elbow_cut(
+    scores: Sequence[float],
+    *,
+    lo: int = ELBOW_MIN,
+    hi: int = ELBOW_MAX,
+    keep_min_frac: float = ELBOW_KEEP_MIN_FRAC,
+) -> int:
     """Kamayuvchi ballar qatoridagi eng katta sakrash — `[lo, hi]` oralig'ida.
 
     Nega qopqoq bilan: RRF ballari silliq kamayadi, ya'ni "tabiiy" tirsak
     ba'zan 5-chi, ba'zan 8000-chi o'rinda bo'ladi. Pastki chegara javobni
     ochlikdan saqlaydi, yuqorigisi — filtr narxidan.
+
+    `keep_min_frac` — tirsak hovuzning ko'pi bilan `1 - frac` qismini
+    tashlaydi. Jonli o'lchovda tirsak 2058 nomzoddan 239 tasini qoldirgan
+    (88% tashlangan) va dalil 1-20 ta chiqqan: "sakrash" u yerda shovqin edi.
+    Haqiqiy shift — `FILTER_MAX`, tirsak esa faqat quyruqni kesadi.
     """
     n = len(scores)
     if n <= lo:
         return n
+    floor_at = max(lo, math.ceil(n * max(0.0, min(1.0, keep_min_frac))))
     top = min(hi, n)
+    if floor_at >= top:
+        return top
     best_at, best_drop = top, -1.0
-    for i in range(lo, top):
+    for i in range(floor_at, top):
         drop = float(scores[i - 1]) - float(scores[i])
         if drop > best_drop:
             best_drop, best_at = drop, i
@@ -726,6 +851,7 @@ async def pull_candidates(
     concurrency: int = PULL_CONCURRENCY,
     pool_max: int = POOL_MAX,
     elbow_hi: int = ELBOW_MAX,
+    stats: ScanStats | None = None,
 ) -> tuple[list[S.Hit], dict[int, str], int]:
     """Bucket'larni parallel aylanib chiqadi → birlashtirilgan hovuz + elbow kesish.
 
@@ -792,6 +918,10 @@ async def pull_candidates(
     fused = S.rrf(*lists)[:pool_max] if lists else []
     cut = elbow_cut([h.score for h in fused], hi=elbow_hi)
     out = fused[:cut]
+    if stats is not None:
+        # Tirsakdan **oldingi** hovuz: qamrov hisobotida "nechta nomzod
+        # ko'rildi" degan raqam shu bo'lishi kerak, kesilganidan keyingisi emas.
+        stats.pulled = len(fused)
     if events is not None:
         await DS._emit(
             events,
@@ -805,11 +935,23 @@ async def pull_candidates(
         "scale.pull",
         buckets=len(buckets),
         scanned=scanned,
-        fused=len(fused),
+        pool=len(fused),
+        elbow=cut,
         kept=len(out),
+        elbow_hi=elbow_hi,
         elapsed_s=round(time.monotonic() - started, 1),
     )
     return out, bucket_of, scanned
+
+
+def pull_budget_for(left_s: float, *, reserve_s: float = PULL_RESERVE_S) -> float:
+    """Pull bosqichiga ajratiladigan vaqt — derivatsiya bitta joyda.
+
+    `qolgan vaqt - zaxira`, pastdan `PULL_MIN_S` bilan. Zaxira pull'dan
+    keyingi butun ishni (dedup, filtr to'lqinlari, tanlov, map/reduce,
+    sintez) qoplashi kerak; jonli o'lchovda u eng yomon holatda 30-40 s.
+    """
+    return max(PULL_MIN_S, left_s - reserve_s)
 
 
 # ─── (c) dedup — O(n) ────────────────────────────────────────────────────────
@@ -1029,7 +1171,7 @@ async def filter_batched(
     st = stats or ScanStats()
     limited = list(pool)[: FILTER_MAX.get(mode, FILTER_MAX["deep"])]
     if not limited:
-        st.stopped_by = "complete"
+        st.note_stop("filter", "complete")
         return []
 
     q_hash = question_hash(question)
@@ -1124,9 +1266,9 @@ async def filter_batched(
     if not stopped and processed < len(todo):
         stopped = budget.stop_reason() or "wall"
     # Oldingi bosqich (pull) allaqachon to'xtash sababini yozgan bo'lishi
-    # mumkin — uni "complete" bilan **bekor qilmaymiz**.
-    if stopped:
-        st.stopped_by = stopped
+    # mumkin — uni "complete" bilan **bekor qilmaymiz** (`combine_stops`:
+    # wall/ceiling yield/complete dan ustun turadi).
+    st.note_stop("filter", stopped or "complete")
     st.truncated = st.truncated or bool(stopped) or len(pool) > len(limited)
     st.filtered = processed + st.cache_hits
     st.scan_cost_usd = round(budget.spent, 6)
@@ -1147,6 +1289,8 @@ async def filter_batched(
         cached=st.cache_hits,
         processed=processed,
         kept=len(out),
+        pull_stopped_by=st.pull_stopped_by,
+        filter_stopped_by=st.filter_stopped_by,
         stopped_by=st.stopped_by,
         cost_usd=st.scan_cost_usd,
     )
@@ -1222,26 +1366,47 @@ def map_chunks(
     *,
     chunk_size: int = MAP_CHUNK_MSGS,
     max_chunks: int = MAP_MAX_CHUNKS,
+    chunk_min: int = MAP_CHUNK_MIN,
+    skip_below: int = MAP_SKIP_TOTAL,
 ) -> list[list[S.Hit]]:
-    """Bo'laklar **bir jinsli**: har biri bitta chat x bitta hafta.
+    """Bo'laklar **bir jinsli**: har biri bitta chat (vaqt bo'yicha tartiblangan).
 
-    Nega: map prompti "shu suhbatda nima deyildi" degan savolga javob
-    beradi. Aralash bo'lakda model ikki chatning ikki mavzusini bitta
+    Nega bitta chat: map prompti "shu suhbatda nima deyildi" degan savolga
+    javob beradi. Aralash bo'lakda model ikki chatning ikki mavzusini bitta
     da'voga qo'shib yuborardi va sitata tekshiruvi buni tuta olmasdi —
     id'lar ikkalasidan ham haqiqiy.
+
+    Nega haftalar birlashadi: bo'lish avval `(chat, hafta)` juftligi bo'yicha
+    edi, ya'ni 10 qatorli tarqoq dalil **10 ta** map chaqirig'iga aylanardi
+    (jonli yugurishdan). Endi qo'shni kichik bo'laklar bir chat ichida
+    `chunk_min` gacha birlashtiriladi; `skip_below` dan kam dalilda map
+    umuman yugurmaydi — u qatorlar sintezga baribir to'liq tushadi.
     """
+    if len(evidence) <= max(0, skip_below):
+        return []
     groups: dict[tuple[int, str], list[S.Hit]] = {}
     order: dict[tuple[int, str], int] = {}
     for i, hit in enumerate(evidence):
         key = (hit.chat_id, week_key(hit))
         groups.setdefault(key, []).append(hit)
         order.setdefault(key, i)
-    out: list[list[S.Hit]] = []
+    raw: list[tuple[int, list[S.Hit]]] = []
     for key in sorted(groups, key=lambda k: order[k]):
         rows = sorted(groups[key], key=lambda h: h.date or datetime.min.replace(tzinfo=UTC))
         for i in range(0, len(rows), chunk_size):
-            out.append(rows[i : i + chunk_size])
-    return out[:max_chunks]
+            raw.append((key[0], rows[i : i + chunk_size]))
+    merged: list[tuple[int, list[S.Hit]]] = []
+    for chat_id, rows in raw:
+        if (
+            merged
+            and merged[-1][0] == chat_id
+            and len(merged[-1][1]) < chunk_min
+            and len(merged[-1][1]) + len(rows) <= chunk_size
+        ):
+            merged[-1][1].extend(rows)
+            continue
+        merged.append((chat_id, list(rows)))
+    return [rows for _chat_id, rows in merged][:max_chunks]
 
 
 def build_map_envelope(question: str, chunk: Sequence[S.Hit]) -> tuple[str, set[str]]:
@@ -1353,7 +1518,7 @@ async def map_claims(
     for wave_at in range(0, total, MAP_PARALLEL):
         reason = budget.stop_reason()
         if reason:
-            st.stopped_by = reason
+            st.note_stop("map", reason)
             st.truncated = True
             log.info("scale.map_stopped", reason=reason, done=wave_at, total=total)
             break
@@ -1530,22 +1695,36 @@ def estimate(
     bermaguncha bitta token ham sarflanmaydi.
 
     `est_cost_usd` — **skan** narxi (filtr + map + reduce), ya'ni aynan
-    `COST_CEILING` boshqaradigan qism. Sintez bu yerda sanalmaydi: u har
-    rejimda bir xil va u rejim tanlovining o'zgaruvchi qismi emas —
-    `est_cost_usd` va `ceiling_usd` bir hodisada yonma-yon turadi, shuning
-    uchun ular **solishtiriladigan** bo'lishi kerak.
+    `COST_CEILING` boshqaradigan qism; `est_total_usd` esa sintez bilan
+    birga — foydalanuvchi to'laydigan raqam. Ikkalasi alohida, chunki
+    `est_cost_usd` va `ceiling_usd` bir hodisada yonma-yon turadi, ya'ni
+    ular **solishtiriladigan** bo'lishi kerak.
 
-    Baho **ataylab yuqoridan**: hovuz elbow chegarasigacha to'lgan,
-    keep-rate 15%, map bo'laklari to'la deb hisoblanadi. Kam baholash
-    qopqoqni ma'nosiz qilardi.
+    Nomzod sanog'i **kalibrlangan**, `bucket x k` emas: xom ko'paytma
+    har doim `FILTER_MAX` ga to'yinardi va baho 5 ta bucket'da ham, 200
+    tada ham bir xil chiqardi (jonli yugurishlarda doim 0.1124). Endi
+    `bucket x k x EST_PULL_YIELD`, pastdan `ELBOW_MIN`, yuqoridan
+    `FILTER_MAX` — ya'ni baho bucket soniga qarab **o'sadi** va qopqoqdan
+    oshmaydi. Keep-rate ham o'lchovdan (`EST_KEEP_RATE`).
     """
-    p = prices or {
-        "filter": _price_for(Task.ROUTE),
-        "map": _price_for(Task.ROUTE),
-        "reduce": _price_for(Task.SEARCH),
-    }
-    raw = sum(min(per_bucket_k, max(0, b.est_messages) or per_bucket_k) for b in buckets)
-    est_messages = min(raw, elbow_hi_for(mode), FILTER_MAX.get(mode, FILTER_MAX["deep"]))
+    p = dict(
+        prices
+        or {
+            "filter": _price_for(Task.ROUTE),
+            "map": _price_for(Task.ROUTE),
+            "reduce": _price_for(Task.SEARCH),
+        }
+    )
+    p.setdefault("synth", _price_for(Task.DEEP))
+    planned = len(buckets)
+    expected = int(planned * per_bucket_k * EST_PULL_YIELD)
+    est_messages = min(
+        FILTER_MAX.get(mode, FILTER_MAX["deep"]),
+        elbow_hi_for(mode),
+        max(ELBOW_MIN, expected),
+    )
+    if not planned:
+        est_messages = 0
 
     n_batches = math.ceil(est_messages / FILTER_BATCH) if est_messages else 0
     # Bir satr ≈ 150 belgi matn + ~45 belgi sarlavha; rubrika har partiyada.
@@ -1555,8 +1734,8 @@ def estimate(
     )
     filter_out = n_batches * 120
 
-    kept = min(SOFT_MAX_EVIDENCE, int(est_messages * 0.15))
-    chunks = min(MAP_MAX_CHUNKS, math.ceil(kept / MAP_CHUNK_MSGS) if kept else 0)
+    kept = min(SOFT_MAX_EVIDENCE, int(est_messages * EST_KEEP_RATE))
+    chunks = 0 if kept <= MAP_SKIP_TOTAL else min(MAP_MAX_CHUNKS, math.ceil(kept / MAP_CHUNK_MSGS))
     map_in = chunks * (
         int(len(SCALE_MAP_PROMPT) / S.CHARS_PER_TOKEN)
         + int(MAP_CHUNK_MSGS * (MAP_LINE_CHARS + 45) / S.CHARS_PER_TOKEN)
@@ -1564,24 +1743,41 @@ def estimate(
     map_out = chunks * MAP_MAX_TOKENS
 
     claims_in = chunks * MAP_MAX_CLAIMS
-    reduce_in = int(len(SCALE_REDUCE_PROMPT) / S.CHARS_PER_TOKEN) + claims_in * 60
-    reduce_out = REDUCE_MAX_TOKENS
+    reduce_rubric = int(len(SCALE_REDUCE_PROMPT) / S.CHARS_PER_TOKEN)
+    reduce_in = (reduce_rubric + claims_in * 60) if chunks else 0
+    reduce_out = REDUCE_MAX_TOKENS if chunks else 0
+
+    # Sintez — bitta `Task.DEEP` chaqiruvi: rubrika + da'volar dayjesti +
+    # `SYNTH_EVIDENCE_LINES` ta dalil satri, chiqishi `SYNTH_MAX_TOKENS`.
+    synth_in = (
+        int(len(DEEP_SYNTH_PROMPT) / S.CHARS_PER_TOKEN)
+        + int(SYNTH_EVIDENCE_LINES * (MAP_LINE_CHARS + 45) / S.CHARS_PER_TOKEN)
+        + (REDUCE_DIGEST_TOKENS if chunks else 0)
+    )
+    synth_out = DS.SYNTH_MAX_TOKENS
 
     def cost(stage: str, tin: int, tout: int) -> float:
         price_in, price_out = p[stage]
         return (tin * price_in + tout * price_out) / 1_000_000
 
-    total = (
-        cost("filter", filter_in, filter_out)
-        + cost("map", map_in, map_out)
-        + cost("reduce", reduce_in, reduce_out)
-    )
+    breakdown = {
+        "filter": round(cost("filter", filter_in, filter_out), 6),
+        "map": round(cost("map", map_in, map_out), 6),
+        "reduce": round(cost("reduce", reduce_in, reduce_out), 6),
+        "synth": round(cost("synth", synth_in, synth_out), 6),
+    }
+    scan = breakdown["filter"] + breakdown["map"] + breakdown["reduce"]
     return Estimate(
         mode=mode,
-        buckets=len(buckets),
+        buckets=planned,
         est_messages=est_messages,
-        est_cost_usd=round(total, 6),
+        est_cost_usd=round(scan, 6),
+        est_total_usd=round(scan + breakdown["synth"], 6),
         ceiling_usd=COST_CEILING.get(mode, COST_CEILING["deep"]),
+        weeks=len({b.label for b in buckets}),
+        range_from=min((b.since for b in buckets), default=None),
+        range_to=max((b.until for b in buckets), default=None),
+        breakdown=breakdown,
     )
 
 
@@ -1642,6 +1838,7 @@ async def run_scale(
             vectors=vectors,
             chat_titles=chat_titles,
             limit=bucket_max_for(mode),
+            mode=mode,
         )
     outcome.buckets = buckets
     stats.buckets_planned = len(buckets)
@@ -1649,9 +1846,10 @@ async def run_scale(
     est = estimate(buckets, mode=mode)
     outcome.estimate = est
     stats.est_cost_usd = est.est_cost_usd
+    stats.est_total_usd = est.est_total_usd
     await DS._emit(events, "estimate", **est.to_dict())
     if not buckets:
-        stats.stopped_by = "complete"
+        stats.note_stop("filter", "complete")
         return outcome
 
     await DS._emit(
@@ -1666,7 +1864,10 @@ async def run_scale(
         },
     )
     if mode == "exhaustive" and not confirm:
-        stats.stopped_by = "complete"
+        # Faqat baho — hech bir skan tokeni sarflanmadi. Buni "reja to'liq
+        # skanlandi" deb yozish yolg'on bo'lardi: `scan_runs` da ham, qamrovda
+        # ham alohida sabab turadi.
+        stats.stopped_by = "estimate_only"
         return outcome
 
     # ── (b) tortish ─────────────────────────────────────────────────────────
@@ -1676,7 +1877,7 @@ async def run_scale(
         subqueries=plan.subqueries,
         qvec=vectors[0] if vectors else None,
     )
-    pull_budget = max(PULL_MIN_S, budget.left_s() - PULL_RESERVE_S)
+    pull_budget = pull_budget_for(budget.left_s())
     pool, bucket_of, scanned = await pull_candidates(
         session_factory,
         buckets=buckets,
@@ -1684,15 +1885,16 @@ async def run_scale(
         events=events,
         budget_s=pull_budget,
         elbow_hi=elbow_hi_for(mode),
+        stats=stats,
     )
     stats.buckets_scanned = scanned
     if scanned < len(buckets):
         # Pull byudjeti tugadi — qolgan bucket'lar **umuman** qaralmadi.
         # Buni jim o'tkazish "hammasini ko'rdim" degan yolg'on bo'lardi.
-        stats.stopped_by = "wall"
+        stats.note_stop("pull", "wall")
         stats.truncated = True
     if not pool:
-        stats.stopped_by = budget.stop_reason() or "complete"
+        stats.note_stop("filter", budget.stop_reason() or "complete")
         return outcome
 
     # ── gidratatsiya + (c) dedup ────────────────────────────────────────────
@@ -1701,6 +1903,7 @@ async def run_scale(
     taint.add_hits(pool)  # begona matn quvurga kirdi — reja/refleksiya uchun qopqoq
     pool = dedup_fast(pool)
     stats.candidates = len(pool)
+    stats.pulled = max(stats.pulled, len(pool))
     outcome.pool = pool
 
     # ── (d) filtr ───────────────────────────────────────────────────────────
@@ -1773,7 +1976,7 @@ async def run_scale(
     outcome.contradictions = contra
     outcome.timeline = timeline
     if budget.stop_reason():
-        stats.stopped_by = budget.stop_reason()
+        stats.note_stop("map", budget.stop_reason())
         stats.truncated = True
     stats.scan_cost_usd = round(budget.spent, 6)
     log.info(
@@ -1781,10 +1984,13 @@ async def run_scale(
         mode=mode,
         buckets=stats.buckets_planned,
         scanned=stats.buckets_scanned,
+        pulled=stats.pulled,
         candidates=stats.candidates,
         kept=stats.kept,
         evidence=stats.evidence,
         claims=stats.claims,
+        pull_stopped_by=stats.pull_stopped_by,
+        filter_stopped_by=stats.filter_stopped_by,
         stopped_by=stats.stopped_by,
         cost_usd=stats.scan_cost_usd,
         elapsed_s=round(time.monotonic() - started, 1),
@@ -1796,18 +2002,26 @@ __all__ = [
     "BUCKET_MAX",
     "BUCKET_MAX_DEEP",
     "COST_CEILING",
+    "ELBOW_KEEP_MIN_FRAC",
+    "ELBOW_MIN",
+    "EST_KEEP_RATE",
+    "EST_PULL_YIELD",
     "EXHAUSTIVE_WALL_S",
     "FILTER_BATCH",
     "FILTER_KEEP_MIN",
     "FILTER_MAX",
+    "MAP_CHUNK_MIN",
     "MAP_CHUNK_MSGS",
     "MAP_MAX_CHUNKS",
+    "MAP_SKIP_TOTAL",
     "MODES",
     "PER_BUCKET_K",
     "POOL_MAX",
     "PULL_CONCURRENCY",
+    "PULL_RESERVE_S",
     "SCALE_MODES",
     "SOFT_MAX_EVIDENCE",
+    "STOP_RANK",
     "STOP_REASONS",
     "Bucket",
     "Claim",
@@ -1824,6 +2038,7 @@ __all__ = [
     "build_reduce_envelope",
     "cache_lookup",
     "cache_store",
+    "combine_stops",
     "dedup_banded",
     "dedup_fast",
     "elbow_cut",
@@ -1838,6 +2053,7 @@ __all__ = [
     "parse_keep",
     "plan_buckets",
     "pull_bucket",
+    "pull_budget_for",
     "pull_candidates",
     "question_hash",
     "reduce_claims",

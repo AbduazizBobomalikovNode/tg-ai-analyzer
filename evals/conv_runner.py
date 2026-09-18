@@ -478,6 +478,16 @@ class Api:
             json=body,
             headers={"Accept-Language": locale},
         )
+        if r.status_code == 429 and "rate_limited" in r.text:
+            # Parallel yugurayotgan boshqa mijoz `CHAT_RATE_PER_MINUTE` ni yeydi.
+            # Bu o'lchanayotgan xatolik emas — shift. Bir marta kutib qayta urinamiz
+            # (byudjet xatosi `chat.err.budget` esa qayta urinilmaydi: u o'tmaydi).
+            await asyncio.sleep(30.0)
+            r = await self.client.post(
+                f"/api/conversations/{conv_id}/messages",
+                json=body,
+                headers={"Accept-Language": locale},
+            )
         if r.status_code >= 400:
             return {"_http_error": r.status_code, "_body": r.text[:400]}
         out: dict[str, Any] = r.json()
@@ -489,10 +499,29 @@ class Api:
             json={"conversation_id": conv_id, "question": text, "deep": True},
             headers={"Accept-Language": locale},
         )
+        if r.status_code == 429 and "rate_limited" in r.text:
+            await asyncio.sleep(30.0)
+            r = await self.client.post(
+                "/api/deep",
+                json={"conversation_id": conv_id, "question": text, "deep": True},
+                headers={"Accept-Language": locale},
+            )
         if r.status_code >= 400:
             return {"_http_error": r.status_code, "_body": r.text[:400]}
         out: dict[str, Any] = r.json()
         return out
+
+
+def conversation_missing(raw: dict[str, Any]) -> bool:
+    """Javob "suhbat topilmadi" xatosimi (404 + `chat.err.not_found`)?
+
+    Ikkala shart ham kerak: 404 boshqa narsaga ham tegishli bo'lishi mumkin
+    (masalan `account.not_found`), va aynan o'sha holatda suhbatni qayta
+    yaratish yordam bermaydi.
+    """
+    if raw.get("_http_error") != 404:
+        return False
+    return "chat.err.not_found" in str(raw.get("_body") or "")
 
 
 def _normalize_deep(raw: dict[str, Any]) -> dict[str, Any]:
@@ -532,12 +561,24 @@ async def run_scenario(
     turns_out: list[dict[str, Any]] = []
     total_cost = 0.0
 
+    async def ask(turn_mode: str, text: str) -> dict[str, Any]:
+        if turn_mode == "deep":
+            return await api.send_deep(conv_id, text, sc.locale)
+        return await api.send_auto(conv_id, text, chat, sc.locale)
+
     for idx, turn in enumerate(sc.turns, 1):
         t0 = time.monotonic()
-        if turn.mode == "deep":
-            raw = await api.send_deep(conv_id, turn.user, sc.locale)
-        else:
-            raw = await api.send_auto(conv_id, turn.user, chat, sc.locale)
+        raw = await ask(turn.mode, turn.user)
+
+        if conversation_missing(raw):
+            # Suhbat yugurish davomida o'chirilgan (parallel tozalash, qo'lda
+            # o'chirish). Bu o'lchanayotgan xatolik emas — senariyni yarmida
+            # tashlab ketmaymiz: yangi suhbat ochib **bitta** marta qaytaramiz.
+            # Tarix yo'qoladi, shuning uchun bu qayta urinish faqat shu turn
+            # uchun: keyingi turn'lar yangi suhbatda davom etadi.
+            conv_id = await api.new_conversation(f"[eval] {sc.id} {sc.title}")
+            print(f"  ! {sc.id} turn {idx}: conversation recreated ({conv_id})", flush=True)
+            raw = await ask(turn.mode, turn.user)
 
         if "_http_error" in raw:
             turns_out.append(

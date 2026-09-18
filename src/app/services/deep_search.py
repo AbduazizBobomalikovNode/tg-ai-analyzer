@@ -110,7 +110,19 @@ MARGINAL_YIELD = 0.10  # 2-raund shundan kam yangi klaster bersa — natijasi ta
 FAN_OUT_RESERVE_S = 20.0  # sintez + qamrov uchun qattiq devordan qoldiriladi
 FAN_OUT_MIN_S = 5.0
 HYDE_MAX_WORDS = 12
-SYNTH_MAX_TOKENS = 4_000
+#: Sintez chiqishi. **4000 → 8000**: jonli yugurishda `gemini-3.1-pro-preview`
+#: `tokens_out=2677` bilan `finish_reason="MAX_TOKENS"` qaytardi va javob
+#: jumla o'rtasida kesildi — fikrlash (thinking) tokenlari ham shu byudjetdan
+#: yeyiladi, ya'ni ko'rinadigan matnga 4000 ning yarmi ham qolmasdi.
+#: Fikrlash byudjeti endi adapterda cheklangan (`llm/gemini.py`), lekin
+#: qopqoq baribir kengaytirildi: kesilgan javob — eng qimmat nosozlik.
+SYNTH_MAX_TOKENS = 8_000
+#: `finish_reason` ning "chiqish byudjeti tugadi" degan shakllari (provider'lar
+#: har xil yozadi: OpenAI-mos `length`, Gemini `MAX_TOKENS`).
+LENGTH_FINISH_REASONS = frozenset({"length", "max_tokens", "finishreason.max_tokens"})
+#: Kesilgan javobni **bir marta** davom ettirish turn'i. Ikki marta emas:
+#: ikkinchi kesilish real byudjet muammosi, uni cheksiz cho'zish narx.
+SYNTH_CONTINUE_NUDGE = "Davom eting — oxirgi tugallanmagan jumladan boshlab, takrorlamang."
 PLAN_MAX_TOKENS = 700
 REFLECT_MAX_TOKENS = 300
 HYDE_MAX_TOKENS = 200
@@ -193,6 +205,16 @@ DISCOVER_RE = re.compile(
 # `#c1m42x` konvertdan o'tib, bu yerda `c1m42` bo'lib ajralib qolardi.
 _CITE_RE = U.CITE_TOKEN_RE
 _TAINT_MIN_CHARS = 24  # qo'riqchi shundan qisqa matnni tekshirmaydi (tasodifiy mos kelish)
+#: Oldingi **javob** uchun alohida, uzunroq chegara. 24 belgi juda qisqa edi:
+#: javob ko'pincha savolni takrorlab boshlaydi ("Nurbek bilan to'lov haqida…"),
+#: o'sha bo'lak esa `render_history` da user satri va `plan:` metasi sifatida
+#: konvertdan **tashqarida** ham turadi — natijada har keyingi turn
+#: `DeepSearchError("taint")` bilan yiqilardi (jonli: suhbat 157, doimiy 500).
+_TAINT_PRIOR_MIN_CHARS = 48
+#: `render_history` yozadigan reja metasi — bizning planner tuzilmamiz
+#: (`standalone_question` shu yerda), begona matn emas. Qo'riqchi uni
+#: tekshiriladigan qoldiqdan olib tashlaydi.
+_PLAN_META_RE = re.compile(r"^[ \t]*plan: \{.*\}[ \t]*$", re.M)
 
 #: **Karantin tomonidagi** bosqichlar: ular begona xabar matnini ko'radi va
 #: shu ataylab qilingan. Dual-LLM chegarasi "hech kim ko'rmasin" degani emas —
@@ -375,7 +397,11 @@ class Coverage:
     buckets_planned: int = 0
     filtered: int = 0
     kept: int = 0
-    stopped_by: str = ""  # yield | ceiling | saturation | wall | complete
+    stopped_by: str = ""  # yield | ceiling | saturation | wall | complete | estimate_only
+    # Bosqich sabablari alohida: `filter` hovuzni tugatib "complete" deganda
+    # ham `pull` qo'ygan "wall" ko'rinib tursin (`scale_search.combine_stops`).
+    pull_stopped_by: str = ""
+    filter_stopped_by: str = ""
     scan_cost_usd: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
@@ -385,6 +411,8 @@ class Coverage:
             "filtered": self.filtered,
             "kept": self.kept,
             "stopped_by": self.stopped_by,
+            "pull_stopped_by": self.pull_stopped_by,
+            "filter_stopped_by": self.filter_stopped_by,
             "scan_cost_usd": round(self.scan_cost_usd, 6),
             "chats_searched": self.chats_searched,
             "chats_total": self.chats_total,
@@ -474,15 +502,19 @@ class _Taint:
     reja promptiga qo'shib yuborsa test darhol qizaradi.
     """
 
-    __slots__ = ("_prior", "_texts")
+    __slots__ = ("_prior", "_texts", "_user")
 
     def __init__(self) -> None:
         self._texts: set[str] = set()
         # Oldingi javob bo'laklari — ular konvert **ichida** bo'lishiga ruxsat
-        # bor, tashqarisida yo'q (`assert_clean` konvertlarni olib tashlab
+        # bor, tashqarisida yo'q (`prior_leak` konvertlarni olib tashlab
         # tekshiradi). Ya'ni "konvertdan chiqib ketgan" javob matni ham
         # regressiya sifatida ushlanadi.
         self._prior: set[str] = set()
+        # Foydalanuvchining **o'z** matni: savol va oldingi user turn'lari.
+        # U promptga ochiq ketadi, ya'ni javobning shu matnni takrorlagan
+        # bo'lagi qo'riqchi uchun dalil emas.
+        self._user: set[str] = set()
 
     def add(self, evidence: Sequence[DeepEvidence]) -> None:
         for e in evidence:
@@ -506,16 +538,38 @@ class _Taint:
             if len(body) >= _TAINT_MIN_CHARS:
                 self._texts.add(body[:_TAINT_MIN_CHARS])
 
-    def add_turns(self, turns: Sequence[Turn]) -> None:
-        """Oldingi javob bo'laklari — "konvert ichida bo'lsa mayli" ro'yxati."""
+    def add_turns(self, turns: Sequence[Turn], *, question: str = "") -> None:
+        """Oldingi javob bo'laklari — "konvert ichida bo'lsa mayli" ro'yxati.
+
+        Javobning savolni **takrorlagan** boshlanishi ro'yxatga tushmaydi:
+        o'sha matn foydalanuvchining o'zining so'zi va u promptga ochiq
+        ketadi (user satri, `plan: {"standalone_question": …}`). Ilgari
+        24 belgilik bo'lak aynan shu tufayli har turn'da yolg'on pozitiv
+        berardi.
+        """
+        for source in (question, *(t.text for t in turns if t.role == "user")):
+            body = U.neutralize((source or "").strip())
+            if body:
+                self._user.add(body)
         for t in turns:
             if t.role != "assistant":
                 continue
-            body = (t.text or "").strip()
-            if len(body) >= _TAINT_MIN_CHARS:
-                self._prior.add(body[:_TAINT_MIN_CHARS])
+            body = U.neutralize((t.text or "").strip())
+            if len(body) < _TAINT_PRIOR_MIN_CHARS:
+                continue
+            head = body[:_TAINT_PRIOR_MIN_CHARS]
+            if any(head in user_text for user_text in self._user):
+                continue  # javob savolni takrorlayapti — bu begona matn emas
+            self._prior.add(head)
 
     def assert_clean(self, stage: str, prompt: str) -> None:
+        """Begona **xabar** matni promptga tushganmi — tushgan bo'lsa xato.
+
+        Oldingi javob bu yerda tekshirilmaydi: u qattiq xato emas, chunki
+        yolg'on pozitivning narxi butun suhbatning o'lishi edi (500, har
+        turn'da). Uni `prior_leak` qaytaradi va chaqiruvchi tarixni tashlab
+        davom etadi.
+        """
         if stage in QUARANTINED_STAGES:
             # Bu bosqich ataylab begona matn ko'radi (`QUARANTINED_STAGES`).
             # Chaqiruv baribir shu yerdan o'tadi: bosqich nomi ro'yxatdan
@@ -525,16 +579,23 @@ class _Taint:
         for body in self._texts:
             if body in prompt:
                 raise DeepSearchError("taint", f"{stage}: untrusted message text in prompt")
+
+    def prior_leak(self, prompt: str) -> bool:
+        """Oldingi javob konvertdan chiqib ketganmi — **xato emas**, signal.
+
+        Konvert **konstruksiya bo'yicha** xavfsiz: teglarni kod yozadi, ichi
+        `neutralize` dan o'tgan. Shuning uchun tekshiruv konvertdan
+        tashqaridagi matn ustidan boradi. Qoldiqdan avval ikki narsa olib
+        tashlanadi: `plan:` metasi (bizning planner tuzilmamiz, ichida
+        `standalone_question` bor) va foydalanuvchining o'z matni.
+        """
         if not self._prior:
-            return
-        # Konvert **konstruksiya bo'yicha** xavfsiz: teglarni kod yozadi, ichi
-        # `neutralize` dan o'tgan. Shuning uchun tekshiruv konvertdan
-        # tashqaridagi matn ustidan boradi — javob bo'lagi konvertsiz
-        # qo'shilib qolsa test darhol qizaradi.
-        outside = _PRIOR_ENVELOPE_RE.sub(" ", prompt)
-        for body in self._prior:
-            if body in outside:
-                raise DeepSearchError("taint", f"{stage}: prior answer outside its envelope")
+            return False
+        outside = _PLAN_META_RE.sub(" ", _PRIOR_ENVELOPE_RE.sub(" ", prompt))
+        for user_text in self._user:
+            if user_text:
+                outside = outside.replace(user_text, " ")
+        return any(body in outside for body in self._prior)
 
 
 # ─── token/xarajat hisoblagich ───────────────────────────────────────────────
@@ -619,6 +680,14 @@ async def _emit(events: EventSink | None, kind: str, **data: Any) -> None:
         return
     with contextlib.suppress(Exception):  # kuzatuv kanali ishni to'xtatmaydi
         await events(DeepEvent(kind, data))
+
+
+def is_length_finish(finish_reason: str) -> bool:
+    """Javob chiqish byudjetida kesilganmi (`length` / `MAX_TOKENS` / SDK enum'i)."""
+    raw = str(finish_reason or "").strip().lower()
+    if not raw:
+        return False
+    return raw in LENGTH_FINISH_REASONS or raw.rsplit(".", 1)[-1] in LENGTH_FINISH_REASONS
 
 
 def _json_obj(raw: str) -> dict[str, Any]:
@@ -1002,8 +1071,16 @@ async def plan_query(
     now: datetime | None = None,
     history: Sequence[Turn] = (),
 ) -> DeepPlan:
-    taint.add_turns(history)
-    prompt = build_plan_prompt(question, chat_lines, now=now or datetime.now(UTC), history=history)
+    taint.add_turns(history, question=question)
+    when = now or datetime.now(UTC)
+    prompt = build_plan_prompt(question, chat_lines, now=when, history=history)
+    if history and taint.prior_leak(prompt):
+        # Oldingi javob konvertdan chiqib ketgan ko'rinadi. Bu **yugurishni
+        # to'xtatmaydi**: tarixsiz reja ham to'liq ishlaydi, doimiy 500 esa
+        # suhbatni butunlay o'ldirardi (jonli: suhbat 157).
+        log.warning("deep.taint_prior_skipped", turns=len(history))
+        history = ()
+        prompt = build_plan_prompt(question, chat_lines, now=when, history=history)
     taint.assert_clean("plan", prompt)
     try:
         res = await meter.chat(
@@ -1882,6 +1959,11 @@ async def synthesize(
     Dalillar **bitta** `kind="evidence"` konvertida (invariant o'zgarmadi).
     Suhbat tarixi alohida blokda: user matni ochiq, oldingi javob esa
     `kind="prior_answer"` konvertida — u ham begona matndan yasalgan.
+
+    Javob chiqish byudjetida kesilsa (`finish_reason` = length/MAX_TOKENS)
+    **bitta** davom ettirish chaqirig'i qilinadi va matn ulanadi. Qaytgan
+    `ChatResult` — oxirgisi, ya'ni uning `finish_reason` i "hali ham
+    kesilganmi" degan savolga javob beradi (`context_used.truncated_answer`).
     """
     envelope, kept = build_evidence_envelope(evidence, clusters, claims_block=claims_block)
     note = f"(locale: {locale}; now: {(now or datetime.now(UTC)).strftime('%Y-%m-%d %H:%M UTC')})"
@@ -1889,16 +1971,32 @@ async def synthesize(
     head = f"{hist}\n\n" if hist else ""
     tail = f"\nfollow-up: {follow_up}" if follow_up and follow_up != "none" else ""
     user_turn = f"{head}{envelope}\n\nQuestion: {U.neutralize(question)}\n{note}{tail}"
+    task = Task.DEEP if deep else Task.SEARCH
+    messages = [Msg.system(DEEP_SYNTH_PROMPT), Msg.user(user_turn)]
     try:
-        res = await meter.chat(
-            Task.DEEP if deep else Task.SEARCH,
-            [Msg.system(DEEP_SYNTH_PROMPT), Msg.user(user_turn)],
-            max_tokens=SYNTH_MAX_TOKENS,
-        )
+        res = await meter.chat(task, messages, max_tokens=SYNTH_MAX_TOKENS)
     except LLMError as exc:
         log.warning("deep.synth_failed", error=str(exc)[:200])
         raise DeepSearchError("llm", str(exc)[:200]) from exc
-    return res.text.strip(), kept, res
+    answer = res.text.strip()
+    if not is_length_finish(res.finish_reason):
+        return answer, kept, res
+    log.info("deep.synth_continued", tokens_out=res.usage.tokens_out)
+    try:
+        more = await meter.chat(
+            task,
+            [
+                *messages,
+                Msg.assistant(answer, signature=res.signature),
+                Msg.user(SYNTH_CONTINUE_NUDGE),
+            ],
+            max_tokens=SYNTH_MAX_TOKENS,
+        )
+    except LLMError as exc:  # davomi kelmadi — kesilgan javob baribir javob
+        log.warning("deep.synth_continue_failed", error=str(exc)[:200])
+        return answer, kept, res
+    extra = more.text.strip()
+    return (f"{answer}\n{extra}".strip() if extra else answer), kept, more
 
 
 def evidence_refs(evidence: Sequence[DeepEvidence]) -> list[dict[str, int]]:
@@ -1981,6 +2079,8 @@ def build_coverage(
         cov.filtered = int(scan.get("filtered") or 0)
         cov.kept = int(scan.get("kept") or 0)
         cov.stopped_by = str(scan.get("stopped_by") or "")
+        cov.pull_stopped_by = str(scan.get("pull_stopped_by") or "")
+        cov.filter_stopped_by = str(scan.get("filter_stopped_by") or "")
         cov.scan_cost_usd = float(scan.get("scan_cost_usd") or 0.0)
         if scan.get("truncated"):
             cov.truncated = True
@@ -2016,6 +2116,7 @@ _COVERAGE_LABELS: dict[str, dict[str, str]] = {
         "stop_saturation": "to'yindi",
         "stop_wall": "vaqt tugadi",
         "stop_complete": "reja to'liq skanlandi",
+        "stop_estimate_only": "faqat baho — skan boshlanmadi",
     },
     "ru": {
         "title": "Охват",
@@ -2039,6 +2140,7 @@ _COVERAGE_LABELS: dict[str, dict[str, str]] = {
         "stop_saturation": "насыщение",
         "stop_wall": "вышло время",
         "stop_complete": "план просканирован полностью",
+        "stop_estimate_only": "только оценка — скан не запускался",
     },
     "en": {
         "title": "Coverage",
@@ -2062,6 +2164,7 @@ _COVERAGE_LABELS: dict[str, dict[str, str]] = {
         "stop_saturation": "saturated",
         "stop_wall": "out of time",
         "stop_complete": "the plan was scanned in full",
+        "stop_estimate_only": "estimate only — the scan did not start",
     },
 }
 
@@ -2181,7 +2284,11 @@ async def _persist(
                         q_hash=str(scan.get("q_hash") or "")[:32],
                         buckets_planned=int(scan.get("buckets_planned") or 0),
                         buckets_scanned=int(scan.get("buckets_scanned") or 0),
-                        candidates=int(scan.get("candidates") or 0),
+                        # Tirsakdan **oldingi** hovuz: "nechta nomzod
+                        # ko'rildi" degan savolning halol javobi. Kesilgandan
+                        # keyingi son filtr kirishini ko'rsatardi, ya'ni
+                        # auditda skan haqiqatdan kichikroq ko'rinardi.
+                        candidates=int(scan.get("pulled") or scan.get("candidates") or 0),
                         filtered=int(scan.get("filtered") or 0),
                         kept=int(scan.get("kept") or 0),
                         evidence=int(scan.get("evidence") or 0),
@@ -2190,6 +2297,8 @@ async def _persist(
                         cost_usd=float(scan.get("scan_cost_usd") or 0.0),
                         est_cost_usd=float(scan.get("est_cost_usd") or 0.0),
                         stopped_by=str(scan.get("stopped_by") or "complete")[:16],
+                        pull_stopped_by=str(scan.get("pull_stopped_by") or "")[:16],
+                        filter_stopped_by=str(scan.get("filter_stopped_by") or "")[:16],
                         truncated=bool(scan.get("truncated")),
                         elapsed_ms=int(result.latency_ms or 0),
                     )
@@ -2201,6 +2310,47 @@ async def _persist(
         result.run_id = run.id
         result.user_message_id = user_row.id
         result.assistant_message_id = assistant_row.id
+
+
+async def _persist_scan_only(
+    session_factory: SessionFactory,
+    *,
+    account_id: int,
+    conversation_id: int,
+    scan: dict[str, Any],
+    elapsed_ms: int,
+) -> None:
+    """Faqat baho qaytgan yugurish uchun `scan_runs` qatori (javob yo'q).
+
+    Nega kerak: tasdiq so'ralgan `exhaustive` ham reja quradi, embedding
+    qiladi va bucket fazosini hisoblaydi — ya'ni u **bo'lib o'tgan** ish.
+    Auditda uning izi bo'lmasa "nechta baho so'raldi va ularning nechtasi
+    tasdiqlandi" degan savolga javob yo'q. Qator `stopped_by="estimate_only"`
+    bilan belgilanadi: `conversation_messages` ga hech narsa yozilmaydi.
+    """
+    async with session_factory() as session:
+        with contextlib.suppress(Exception):  # o'lchov qatori javobdan muhim emas
+            session.add(
+                ScanRun(
+                    account_id=account_id,
+                    conversation_id=conversation_id,
+                    mode=str(scan.get("mode") or "exhaustive")[:16],
+                    q_hash=str(scan.get("q_hash") or "")[:32],
+                    buckets_planned=int(scan.get("buckets_planned") or 0),
+                    buckets_scanned=0,
+                    candidates=0,
+                    filtered=0,
+                    kept=0,
+                    evidence=0,
+                    claims=0,
+                    cache_hits=0,
+                    cost_usd=0.0,
+                    est_cost_usd=float(scan.get("est_cost_usd") or 0.0),
+                    stopped_by="estimate_only",
+                    truncated=False,
+                    elapsed_ms=int(elapsed_ms or 0),
+                )
+            )
 
 
 async def _persist_usage(
@@ -2595,7 +2745,15 @@ async def _run_pipeline(
                     # sarflanmaydi: baho chiqadi va yugurish shu yerda tugaydi.
                     await _emit(events, "done", needs_confirm=True, estimate=estimate_meta)
                     state["status"] = "needs_confirm"
+                    state["needs_confirm"] = True
                     log.info("deep.needs_confirm", estimate=estimate_meta)
+                    await _persist_scan_only(
+                        session_factory,
+                        account_id=account_id,
+                        conversation_id=conversation_id,
+                        scan=scan_meta,
+                        elapsed_ms=int(elapsed() * 1000),
+                    )
                     return DeepResult(
                         answer="",
                         mode=mode,
@@ -2748,6 +2906,13 @@ async def _run_pipeline(
     state["answer"] = answer  # H2: uzilish javobdan keyin bo'lsa ham matn yo'qolmaydi
     if len(kept) < len(evidence):
         truncated = True
+    # `synthesize` kesilgan javobni bir marta davom ettiradi; `res` — oxirgi
+    # chaqiruv, ya'ni bu bayroq "davomidan keyin **ham** kesilgan" degani.
+    finish_reason = res.finish_reason if res else ""
+    truncated_answer = is_length_finish(finish_reason)
+    if truncated_answer:
+        truncated = True
+        log.warning("deep.answer_truncated", chars=len(answer), finish_reason=finish_reason)
 
     citations, invalid = validate_citations(answer, kept)
     searched_chats = [
@@ -2810,6 +2975,10 @@ async def _run_pipeline(
         "account_id": account_id,
         "messages": len(kept),
         "est_tokens": S.est_tokens(answer),
+        # Nega kontekstda: kesilgan javob jimgina o'tib ketardi — UI ham,
+        # eval ham uni to'liq javob deb sanardi.
+        "finish_reason": finish_reason,
+        "truncated_answer": truncated_answer,
         "rounds": rounds_used,
         "candidates": len(candidates),
         "clusters": result.clusters,

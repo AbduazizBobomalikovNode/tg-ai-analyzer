@@ -319,6 +319,24 @@ export async function ask(text) {
   }
 }
 
+/**
+ * `done.truncated_answer` — model chiqish chegarasiga yetib to'xtagan
+ * (javob semantik jihatdan tugallanmagan, xato emas). Javob ostiga qisqa
+ * ogohlantirish va davom ettirish chipi qo'yiladi — chip savol qatoriga
+ * yozib qo'ymaydi, **darhol** yuboradi, chunki bu javobning davomi, yangi
+ * savol emas.
+ */
+function truncatedNotice(shell) {
+  return el("div.answer-truncated", null, [
+    icon("alert-triangle"),
+    el("span", null, t("web.ask.truncated_answer")),
+    el("button.chip.suggest", {
+      type: "button",
+      onclick: () => ask(t("web.ask.continue_answer")),
+    }, t("web.ask.continue_answer")),
+  ]);
+}
+
 /** `done` dan keyingi umumiy bezak: amal kartalari, futer, sitatalar. */
 function finishBlock(shell, final, { deep = false } = {}) {
   if (final.assistant_message_id) shell.node.dataset.mid = final.assistant_message_id;
@@ -326,6 +344,7 @@ function finishBlock(shell, final, { deep = false } = {}) {
   const ctx = contextLine(final.context);
   if (ctx) shell.extra.insertBefore(ctx, shell.extra.firstChild);
   if (!deep && Array.isArray(final.citations)) linkifyCitations(shell.answer, final.citations);
+  if (final.truncated_answer) shell.node.insertBefore(truncatedNotice(shell), shell.cards);
   const cards = hooks.actionCards?.(final.actions || []);
   if (cards) { clear(shell.cards); shell.cards.appendChild(cards); }
   if (final.actions && final.actions.length) refreshPending();

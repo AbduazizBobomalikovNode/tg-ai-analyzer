@@ -419,3 +419,17 @@ def test_coverage_claim_is_sane() -> None:
     assert RE.coverage_claim_is_sane("Bir nechta xabar topildi, lekin hammasi ko'rilmadi.") is True
     assert RE.coverage_claim_is_sane("Hamma xabarlar ko'rildi va tahlil qilindi.") is False
     assert RE.coverage_claim_is_sane("All messages were reviewed.") is False
+
+
+# ─── conv_runner: o'chirilgan suhbat ─────────────────────────────────────────
+
+
+def test_conversation_missing_detects_only_the_deleted_conversation() -> None:
+    """404 + `chat.err.not_found` — suhbat yo'q; boshqa 404 bunga kirmaydi."""
+    from evals.conv_runner import conversation_missing
+
+    assert conversation_missing({"_http_error": 404, "_body": '{"code":"chat.err.not_found"}'})
+    # Akkaunt topilmadi — suhbatni qayta yaratish yordam bermaydi
+    assert not conversation_missing({"_http_error": 404, "_body": '{"code":"account.not_found"}'})
+    assert not conversation_missing({"_http_error": 429, "_body": "rate_limited"})
+    assert not conversation_missing({"text": "ok"})
