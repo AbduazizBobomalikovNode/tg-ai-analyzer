@@ -29,6 +29,9 @@ scenarios:
           tools_none: [discover_channels, send_message]   # hech biri chaqirilmasin
           max_tool_calls: 4                               # bajarilgan chaqiruvlar shifti
           scope: chat           # chat | account | global | none
+          scope_chat_hint: "aiogram"  # `scope: chat` uchun senariy `chat_hint`
+                                # o'rniga shu bilan solishtiriladi — kontekst
+                                # almashtiruvchi turn'lar uchun (multi-04 t2)
           must_reference_prior: false   # javob oldingi turn mavzusiga suyanishi shart
           must_change_context: false    # bu turn yangi tool/qidiruv qilishi shart
           keywords_any: ["..."]         # javob matnida (case-insensitive) biror biri

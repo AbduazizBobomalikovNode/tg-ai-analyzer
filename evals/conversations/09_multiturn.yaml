@@ -98,6 +98,10 @@ scenarios:
           must_reference_prior: true
           must_change_context: true
           scope: chat
+          # Turn ataylab senariy `chat_hint` idan (Honadoshlar) chiqadi —
+          # qamrov endi aiogram[uz] bilan o'lchanadi, aks holda to'g'ri
+          # almashtirish ham yiqilardi.
+          scope_chat_hint: "aiogram"
           max_cost_usd: 0.08
           judge: "Javob endi aiogram[uz] guruhi haqida, savol esa o'sha savol."
 

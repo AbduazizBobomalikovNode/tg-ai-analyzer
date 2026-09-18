@@ -9,7 +9,10 @@ Qayerda yuguradi
 ----------------
 `api` konteyneri ichida (u yerda ilova, DB va LLM fasadi bor)::
 
-    docker cp evals tgai-api-1:/app/evals
+    # DIQQAT: nuqta shart. `docker cp evals tgai-api-1:/app/evals` katalog
+    # allaqachon mavjud bo'lgani uchun `/app/evals/evals` yasaydi va runner
+    # **image ichidagi eski** nusxani yugurtiradi — o'zgarishlar yetib bormaydi.
+    docker cp evals/. tgai-api-1:/app/evals
     docker compose exec -T api python /app/evals/conv_runner.py \
         --base http://127.0.0.1:8080 --account 2 --cookie-file /tmp/qa_cookie.txt \
         --priority 1 --out /app/data/evalruns
@@ -330,11 +333,16 @@ def check_turn(
         elif scope == "global":
             add("scope", bool(names_exec & GLOBAL_TOOLS), f"tools={sorted(names_exec)}")
         elif scope == "chat":
+            # Kontekst almashtiruvchi turn'lar (multi-04 t2: "endi shu savolni
+            # aiogram[uz] da ko'r") senariy `chat_hint` idan **ataylab** chiqadi
+            # — o'sha hint bilan solishtirish ularni yolg'ondan yiqitardi.
+            # `scope_chat_hint` turn darajasida hint'ni almashtiradi.
+            hint = expect.get("scope_chat_hint") or chat_hint
             ok = bool(executed) and len(refs) <= 1 and chatless == 0
-            if ok and chat_hint and refs:
+            if ok and hint and refs:
                 only = next(iter(refs))
-                ok = chat_hint.lower()[:10] in only or only.isdigit()
-            add("scope", ok, f"refs={sorted(refs)}, chatless={chatless}, hint={chat_hint!r}")
+                ok = str(hint).lower()[:10] in only or only.isdigit()
+            add("scope", ok, f"refs={sorted(refs)}, chatless={chatless}, hint={hint!r}")
         elif scope == "account":
             ok = bool(executed) and (chatless > 0 or len(refs) >= 2)
             add("scope", ok, f"refs={sorted(refs)}, chatless={chatless}")
@@ -587,6 +595,12 @@ async def run_scenario(
                     for c in executed
                 ],
                 "iterations": ctx.get("iterations"),
+                # Yugurish byudjeti: `chat_service` `calls_executed` va
+                # `stop_reason` ni contextga yozadi (`answered` | `call_budget` |
+                # `cost_budget` | `iterations`). Ular bo'lmasa qopqoqlarning
+                # ishlagan-ishlamagani hisobotdan ko'rinmaydi.
+                "calls_executed": ctx.get("calls_executed"),
+                "stop_reason": ctx.get("stop_reason"),
                 "strategy": ctx.get("strategy"),
                 "degraded": ctx.get("degraded") or False,
                 "actions": len(actions),
@@ -661,6 +675,34 @@ def render_md(result: dict[str, Any]) -> str:
             f"{jud}/{judn} | {cost:.4f} |"
         )
     out.append("")
+
+    # ── yugurish byudjeti ────────────────────────────────────────────────────
+    all_turns = [t for r in rows for t in r["turns"] if t.get("mode") != "deep"]
+    if all_turns:
+        stops: dict[str, int] = defaultdict(int)
+        for t in all_turns:
+            stops[str(t.get("stop_reason") or "—")] += 1
+        execs = sorted(
+            int(t.get("calls_executed") or len(t.get("tools_executed") or [])) for t in all_turns
+        )
+        costs = sorted(float(t.get("cost_usd") or 0.0) for t in all_turns)
+
+        def _p(xs: list[Any], q: float) -> Any:
+            return xs[min(len(xs) - 1, int(q * len(xs)))] if xs else 0
+
+        out.append("## Yugurish byudjeti (auto turn'lar)")
+        out.append("")
+        out.append(f"- `stop_reason`: {dict(sorted(stops.items()))}")
+        out.append(
+            f"- bajarilgan chaqiruvlar: median {_p(execs, 0.5)}, p90 {_p(execs, 0.9)}, "
+            f"max {execs[-1]}; >6 bo'lgan turn: {sum(1 for x in execs if x > 6)}"
+        )
+        out.append(
+            f"- narx/turn: median ${_p(costs, 0.5):.4f}, p90 ${_p(costs, 0.9):.4f}, "
+            f"max ${costs[-1]:.4f}; >$0.05 bo'lgan turn: {sum(1 for x in costs if x > 0.05)}"
+        )
+        out.append(f"- degraded turn: {sum(1 for t in all_turns if t.get('degraded'))}")
+        out.append("")
 
     out.append("## Yiqilgan turn'lar")
     out.append("")
