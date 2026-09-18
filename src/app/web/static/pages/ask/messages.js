@@ -126,10 +126,36 @@ export function assistantShell(mid = 0) {
  * bezash isrof, yakunda bir marta yetadi.
  */
 export function renderAnswer(answerEl, source, { enhance: doEnhance = true } = {}) {
+  // Oqim paytida blok har token'da qayta chiziladi — chizilgan mermaid/chart
+  // tugunlari fence hash'i bo'yicha saqlanadi va joyiga qaytariladi, aks holda
+  // diagramma har bo'lakda yo'qolib, qayta chizishni talab qilardi.
+  const kept = new Map();
+  for (const fig of answerEl.querySelectorAll("figure[data-hash]")) {
+    if (fig.dataset.done || fig.dataset.state === "done") kept.set(fig.dataset.hash, fig);
+  }
   answerEl.innerHTML = md(source || "");
+  answerSource.set(answerEl, String(source || ""));
+  if (kept.size) {
+    for (const fig of answerEl.querySelectorAll("figure[data-hash]")) {
+      const old = kept.get(fig.dataset.hash);
+      if (old) fig.replaceWith(old);
+    }
+  }
   const lang = guessLang(source);
   if (lang) answerEl.setAttribute("lang", lang);
   if (doEnhance) enhance(answerEl);
+}
+
+/** Chizilgan javobning markdown manbasi — blok bo'yicha nusxa olish uchun. */
+export const answerSource = new WeakMap();
+
+/** `data-l="a,b"` bo'yicha manba bo'lagi (blok markdown'i). */
+export function blockSource(answerEl, node) {
+  const range = String(node.dataset.l || "").split(",");
+  const src = answerSource.get(answerEl);
+  if (src == null || range.length !== 2) return node.textContent || "";
+  const lines = src.replace(/\r\n?/g, "\n").split("\n");
+  return lines.slice(+range[0], +range[1]).join("\n").trim() || (node.textContent || "");
 }
 
 const COPY_MIN_LINES = 2;
@@ -141,23 +167,45 @@ const COPY_MIN_LINES = 2;
  * chizilganda ikkinchi nusxa tugma paydo bo'lmaydi.
  */
 export function enhance(root) {
-  // kod bloklari — nusxa tugmasi
+  // kod bloklari — nusxa tugmasi + yumshoq o'rash almashtirgichi.
+  // Mermaid/chart manbalari bezatilmaydi: ular tugma bilan chiziladi.
   for (const pre of root.querySelectorAll("pre")) {
-    if (pre.dataset.enh || pre.querySelector(".mermaid-src")) continue;
+    if (pre.dataset.enh) continue;
+    if (pre.classList.contains("md-mermaid-src") || pre.classList.contains("md-chart-src")) continue;
     pre.dataset.enh = "1";
     const code = pre.querySelector("code");
-    if (!code || code.textContent.split("\n").length < COPY_MIN_LINES) continue;
-    pre.appendChild(iconButton("copy", t("web.ask.copy_code"), {
-      cls: "code-copy",
-      onclick: () => copyText(code.textContent, t("web.ask.copied")),
-    }));
+    if (!code) continue;
+    const fig = pre.closest("figure.md-code");
+    const tools = fig?.querySelector(".md-code-tools");
+    const long = code.textContent.split("\n").length >= COPY_MIN_LINES;
+    if (tools) {
+      tools.appendChild(iconButton("wrap-text", t("web.md.wrap"), {
+        cls: "md-code-btn",
+        attrs: { "aria-pressed": "false" },
+        onclick: (e) => {
+          const on = fig.classList.toggle("is-wrapped");
+          e.currentTarget.setAttribute("aria-pressed", String(on));
+        },
+      }));
+      tools.appendChild(iconButton("copy", t("web.ask.copy_code"), {
+        cls: "md-code-btn",
+        onclick: () => copyText(code.textContent, t("web.ask.copied")),
+      }));
+    } else if (long) {
+      pre.appendChild(iconButton("copy", t("web.ask.copy_code"), {
+        cls: "code-copy",
+        onclick: () => copyText(code.textContent, t("web.ask.copied")),
+      }));
+    }
   }
   // jadvallar — gorizontal scroll konteyneri (yopishqoq birinchi ustun CSS'da)
   for (const table of root.querySelectorAll("table")) {
-    if (table.parentElement?.classList.contains("table-wrap")) continue;
-    const wrap = el("div.table-wrap", { tabindex: "0", role: "region", "aria-label": t("web.ask.table") });
-    table.replaceWith(wrap);
-    wrap.appendChild(table);
+    if (!table.parentElement?.classList.contains("table-wrap")) {
+      const wrap = el("div.table-wrap.md-table-wrap", { tabindex: "0", role: "region", "aria-label": t("web.ask.table") });
+      table.replaceWith(wrap);
+      wrap.appendChild(table);
+    }
+    tableTools(table);
   }
   // rasmlar — faqat `/api/images/<id>` (md.js qoidasi), bosilsa lightbox
   for (const img of root.querySelectorAll("img.gen-img")) {
@@ -166,7 +214,73 @@ export function enhance(root) {
     img.style.cursor = "zoom-in";
     img.addEventListener("click", () => openLightbox(img.getAttribute("src"), img.alt));
   }
+  blockCopy(root);
   hydrate(root);
+}
+
+/**
+ * Nusxa tugmasi qo'yiladigan bloklar. `figure.md-code` yo'q — unda o'z
+ * tugmasi bor; ro'yxat/paragraf yo'q — ular uchun bu shovqin bo'lardi
+ * (va `<ul>` ichiga `<button>` qo'yish yaroqsiz HTML).
+ */
+const COPYABLE = ".md-table-wrap, figure.md-chart, figure.md-mermaid, blockquote, aside.md-callout, details.md-details";
+
+/**
+ * Har bir yirik blok ustida "markdown bo'lib nusxa ol" tugmasi.
+ * Manba `data-l="a,b"` orqali **haqiqiy markdown** — HTML'dan tiklash emas.
+ */
+function blockCopy(root) {
+  for (const node of root.querySelectorAll(":scope > [data-l]")) {
+    if (node.dataset.bcopy || !node.matches(COPYABLE)) continue;
+    node.dataset.bcopy = "1";
+    const btn = iconButton("copy", t("web.md.copy_block"), {
+      cls: "md-block-copy",
+      onclick: () => copyText(blockSource(root, node), t("web.ask.copied")),
+    });
+    // Jadval o'z scroll konteynerida — tugma tashqaridagi asboblar qatoriga,
+    // aks holda u gorizontal scroll bilan birga surilib ketardi.
+    const bar = node.previousElementSibling;
+    if (bar && bar.classList.contains("md-table-tools")) { bar.appendChild(btn); continue; }
+    node.classList.add("md-block");
+    node.appendChild(btn);
+  }
+}
+
+/* ── jadval amallari ──────────────────────────────────────────────── */
+
+/** `<table>` → CSV matn. Katakchalar RFC 4180 bo'yicha qo'shtirnoqlanadi. */
+export function tableCsv(table) {
+  const cell = (td) => {
+    const v = (td.textContent || "").replace(/\s+/g, " ").trim();
+    return /[",;\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+  };
+  return [...table.rows].map((r) => [...r.cells].map(cell).join(",")).join("\r\n");
+}
+
+/**
+ * Jadval ustidagi tugmalar: CSV yuklab olish va markdown nusxasi.
+ *
+ * Bu **ilova**, artefakt sandbox'i emas — shuning uchun `Blob` +
+ * `a[download]` ishlaydi; havola darhol `revokeObjectURL` bilan tozalanadi.
+ */
+function tableTools(table) {
+  const wrap = table.parentElement;
+  if (!wrap || wrap.dataset.tools) return;
+  wrap.dataset.tools = "1";
+  const bar = el("div.md-table-tools");
+  bar.appendChild(iconButton("download", t("web.md.csv"), {
+    cls: "md-table-btn",
+    onclick: () => {
+      const blob = new Blob(["﻿" + tableCsv(table)], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = el("a", { href: url, download: "table.csv" });
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    },
+  }));
+  wrap.insertAdjacentElement("beforebegin", bar);
 }
 
 /** Buferga nusxa; `navigator.clipboard` yo'q bo'lsa jimgina o'tkazib yuboradi. */

@@ -415,7 +415,8 @@ const TOC_MIN_WORDS = 1500;
 function buildToc(shell) {
   const src = sourceOf.get(shell.node) || "";
   if (src.split(/\s+/).length < TOC_MIN_WORDS) return null;
-  const heads = [...shell.answer.querySelectorAll("h1, h2, h3")];
+  // `md.js` `#` → h3 … `######` → h6 chizadi va har biriga barqaror id beradi.
+  const heads = [...shell.answer.querySelectorAll("h1, h2, h3, h4")];
   if (heads.length < 3) return null;
   heads.forEach((h, i) => { if (!h.id) h.id = `sec-${Date.now().toString(36)}-${i}`; });
 
@@ -437,6 +438,50 @@ function buildToc(shell) {
   }, [icon("list"), el("span", null, t("web.ask.contents"))]);
 }
 
+/* ── javob chrome: oddiy matn, "hammasini ochish" ─────────────────── */
+
+/** Tugmalar/ikonkalar matnга kirmasin — nusxa toza chiqsin. */
+const NOT_TEXT = ".md-block-copy, .md-code-btn, .md-table-tools, .code-copy, .md-mermaid-bar, .cite-chip, svg";
+
+/**
+ * Chizilgan javobning **oddiy matni**: markdown belgilarisiz, jadval
+ * katakchalari tab bilan, blok orasida bo'sh qator.
+ */
+function plainText(answerEl) {
+  if (!answerEl) return "";
+  const copy = answerEl.cloneNode(true);
+  for (const junk of copy.querySelectorAll(NOT_TEXT)) junk.remove();
+  for (const tr of copy.querySelectorAll("tr")) {
+    tr.textContent = [...tr.children].map((c) => c.textContent.trim()).join("\t");
+  }
+  const out = [];
+  for (const block of copy.children) {
+    const text = (block.textContent || "").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+    if (text) out.push(text);
+  }
+  return out.join("\n\n");
+}
+
+const EXPAND_MIN = 2;
+
+/** Javobda bir nechta yig'ilgan blok bo'lsa — "hammasini ochish" tugmasi. */
+function expandAll(shell) {
+  const boxes = () => [...shell.answer.querySelectorAll("details.md-details")];
+  if (boxes().length < EXPAND_MIN) return null;
+  const btn = iconButton("chevrons-up-down", t("web.md.expand_all"), {
+    attrs: { "aria-pressed": "false" },
+  });
+  btn.addEventListener("click", () => {
+    const list = boxes();
+    const open = !list.every((d) => d.open);
+    for (const d of list) d.open = open;
+    btn.setAttribute("aria-pressed", String(open));
+    btn.title = open ? t("web.md.collapse_all") : t("web.md.expand_all");
+    btn.setAttribute("aria-label", btn.title);
+  });
+  return btn;
+}
+
 /* ── futer ────────────────────────────────────────────────────────── */
 
 /**
@@ -453,6 +498,15 @@ export function buildFooter(m, shell) {
   row.appendChild(iconButton("copy", t("web.ask.copy"), {
     onclick: () => copyText(src(), t("web.ask.copied")),
   }));
+
+  // "Oddiy matn bo'lib nusxa" — markdown belgilari yo'q variant (Telegram,
+  // xat, hujjatga tashlash uchun). Chizilgan DOM'dan olinadi, qayta parse yo'q.
+  row.appendChild(iconButton("align-left", t("web.md.copy_text"), {
+    onclick: () => copyText(plainText(shell.answer) || src(), t("web.ask.copied")),
+  }));
+
+  const expand = expandAll(shell);
+  if (expand) row.appendChild(expand);
 
   row.appendChild(iconButton("share-2", t("web.ask.share"), {
     onclick: async () => {

@@ -880,5 +880,21 @@
   "web.dash.system_hint": "техническое состояние",
   "web.dash.version": "Версия",
   "web.dash.model_unknown": "Неизвестная модель",
-  "web.dash.chart_sparse": "Мало данных — график заполнится при выборе большего периода"
+  "web.dash.chart_sparse": "Мало данных — график заполнится при выборе большего периода",
+  "web.md.note": "Заметка",
+  "web.md.tip": "Совет",
+  "web.md.warn": "Внимание",
+  "web.md.important": "Важно",
+  "web.md.caution": "Осторожно",
+  "web.md.details": "Подробнее",
+  "web.md.footnotes": "Примечания",
+  "web.md.back": "Назад",
+  "web.md.chart": "Диаграмма",
+  "web.md.draw_diagram": "Построить диаграмму",
+  "web.md.wrap": "Переносить строки",
+  "web.md.csv": "Скачать CSV",
+  "web.md.copy_block": "Копировать блок",
+  "web.md.copy_text": "Копировать как текст",
+  "web.md.expand_all": "Раскрыть всё",
+  "web.md.collapse_all": "Свернуть всё"
 }

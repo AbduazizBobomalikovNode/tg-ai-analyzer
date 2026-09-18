@@ -880,5 +880,21 @@
   "web.dash.system_hint": "technical status",
   "web.dash.version": "Version",
   "web.dash.model_unknown": "Unknown model",
-  "web.dash.chart_sparse": "Not enough data yet — the chart fills in once you pick a longer period"
+  "web.dash.chart_sparse": "Not enough data yet — the chart fills in once you pick a longer period",
+  "web.md.note": "Note",
+  "web.md.tip": "Tip",
+  "web.md.warn": "Warning",
+  "web.md.important": "Important",
+  "web.md.caution": "Caution",
+  "web.md.details": "Details",
+  "web.md.footnotes": "Notes",
+  "web.md.back": "Back",
+  "web.md.chart": "Chart",
+  "web.md.draw_diagram": "Render diagram",
+  "web.md.wrap": "Wrap lines",
+  "web.md.csv": "Download CSV",
+  "web.md.copy_block": "Copy block",
+  "web.md.copy_text": "Copy as plain text",
+  "web.md.expand_all": "Expand all",
+  "web.md.collapse_all": "Collapse all"
 }

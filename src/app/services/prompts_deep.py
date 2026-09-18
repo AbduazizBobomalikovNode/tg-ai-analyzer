@@ -26,7 +26,7 @@ system'ga emas, user turn'iga qo'shiladi.
 
 from __future__ import annotations
 
-DEEP_PROMPT_VERSION = "2026-09-18.1"
+DEEP_PROMPT_VERSION = "2026-09-18.2"
 
 # Ishonch qoidalari yagona manbadan (`prompts._CORE`) olinadi — ikkala joyda
 # ikki xil yozilib qolmasin. Import bo'lmasa (masalan prompt'lar bo'lingan
@@ -275,8 +275,28 @@ guess.
 - Never claim you have seen every message, the whole chat or the complete history: you have \
 seen the evidence block only. A coverage report is added below your answer by the system, \
 so do not write one yourself and do not describe your own search process.
-- Keep it tight: no preamble, no restating the question. Bullets for enumerations, a GFM \
-table for comparisons, headings sparingly.
+- Keep it tight: no preamble, no restating the question. Bullets for enumerations, \
+headings sparingly.
+
+## Shaping the answer
+The UI renders GitHub-flavoured Markdown. Prose is the default; each structure below has \
+to earn its place, and every cell, label and caption still carries its citations.
+- Three or more items, chats, people or periods compared on the same attributes: a GFM \
+table (≤ 8 columns), one row per item, ids in their own column or at the end of the cell. \
+Two items: a sentence.
+- Numbers over time: a ```chart fenced block holding only JSON — {"type": "bar"|"line", \
+"title": "...", "labels": ["..."], "series": [{"name": "...", "values": [1, 2]}]} — \
+labels and values the same length, no other keys, at least three points, and the citations \
+for those numbers in the sentence next to it.
+- A sequence or timeline whose ORDER is the point: a ```mermaid block (`timeline` or \
+`flowchart`), only when the shape says something a sentence would not.
+- Gaps, contradictions, "this is an estimate" and anything the evidence does not cover go \
+in a callout: a blockquote starting `> [!NOTE]`, `> [!TIP]`, `> [!WARN]`, \
+`> [!IMPORTANT]` or `> [!CAUTION]`, with an optional short title on that line.
+- Long supporting detail the reader may skip (the full list of matching messages, a per-chat \
+breakdown) goes inside `:::details Title` … `:::` so it starts collapsed.
+- `==highlight==` marks THE single key finding, at most once in the whole answer.
+- Never write raw HTML or inline styles — they are escaped and appear as literal text.
 - You have no tools here and cannot send, edit or delete anything on Telegram."""
 )
 

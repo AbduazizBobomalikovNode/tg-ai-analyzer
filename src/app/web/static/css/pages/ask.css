@@ -115,13 +115,35 @@
 
 /* Assistent javobi — chapda, ramkasiz blok */
 .msg-a { display: flex; flex-direction: column; gap: var(--s-3); position: relative; }
+/* Javob tipografiyasi: 68ch o'lchov (`--measure`, `.thread` da), 16px/1.65.
+   Sarlavha shkalasi, jadval/kod/callout/details uslublari `components.css`
+   dagi `md-*` blokida — bu yerda faqat javob kontekstidagi tuzatishlar. */
 .msg-a .answer {
   font-size: var(--fs-md); line-height: var(--lh-answer);
   overflow-wrap: anywhere;
+  /* `text-wrap: pretty` — oxirgi qatorda yolg'iz so'z qolmasin (Baseline 2024) */
+  text-wrap: pretty;
 }
+.msg-a .answer p { margin-block: var(--s-3); }
 .msg-a .answer > :first-child { margin-block-start: 0; }
 .msg-a .answer > :last-child { margin-block-end: 0; }
+/* Ketma-ket sarlavhalar orasida ikki marta joy bo'lmasin */
+.msg-a .answer .md-h + .md-h { margin-block-start: var(--s-3); }
 .answer-error { display: flex; align-items: center; gap: var(--s-2); color: var(--danger); font-size: var(--fs-sm); }
+
+/* Javob ichidagi bloklar o'lchovdan kengroq nafas oladi: jadval, kod,
+   diagramma va chart o'qilishi uchun joy talab qiladi, matn esa 68ch da
+   qoladi. Faqat keng ekranda — mobilda chetlar allaqachon tor. */
+@media (min-width: 900px) {
+  .msg-a .answer > .md-table-wrap,
+  .msg-a .answer > .md-table-tools,
+  .msg-a .answer > figure.md-code,
+  .msg-a .answer > figure.md-chart,
+  .msg-a .answer > figure.md-mermaid {
+    margin-inline: calc(var(--s-5) * -1);
+    inline-size: calc(100% + var(--s-5) * 2);
+  }
+}
 
 .ctx-line {
   display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap;
@@ -140,8 +162,17 @@
 .msg-a .table-wrap { overflow-x: auto; max-inline-size: 100%; }
 .msg-a .table-wrap table { min-inline-size: max-content; }
 .msg-a .table-wrap th:first-child, .msg-a .table-wrap td:first-child {
-  position: sticky; inset-inline-start: 0; background: var(--panel); z-index: 1;
+  position: sticky; inset-inline-start: 0; z-index: 1;
+  background: var(--panel);
 }
+/* Yopishqoq ustun zebra qatorda ham qator rangida ko'rinsin, aks holda
+   u "boshqa jadvaldan kelgan" ustunga o'xshab qoladi. */
+.msg-a .md-table tbody tr:nth-child(even) td:first-child {
+  background: color-mix(in oklab, var(--panel-2) 65%, var(--panel));
+}
+.msg-a .md-table thead th:first-child { background: var(--panel-3); z-index: 3; }
+/* Bitta ustunli jadvalda yopishqoqlik keraksiz (va soya chizadi) */
+.msg-a .md-table tr > :first-child:last-child { position: static; }
 
 /* ══ Bosqich chizig'i (oddiy oqim) ════════════════════════════════ */
 .status-strip {

@@ -1815,8 +1815,9 @@ async def test_deeper_forces_the_second_round_even_if_reflect_says_no(
 def test_deep_prompts_describe_the_follow_up_contract() -> None:
     from app.services.prompts_deep import DEEP_PROMPT_VERSION
 
-    # Versiya scale prompt'lari qo'shilganda ko'tarildi (korpus kaskadi).
-    assert DEEP_PROMPT_VERSION == "2026-09-18.1"
+    # Versiya scale prompt'lari (korpus kaskadi) va javob shakli ko'rsatmasi
+    # (GFM jadval / ```chart / callout / :::details) qo'shilganda ko'tarildi.
+    assert DEEP_PROMPT_VERSION == "2026-09-18.2"
     for field_name in ("standalone_question", "intent_follow_up", "needs_retrieval"):
         assert field_name in DEEP_PLAN_PROMPT
     for label in DS.FOLLOW_UPS:

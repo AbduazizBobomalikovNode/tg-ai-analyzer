@@ -880,5 +880,21 @@
   "web.dash.system_hint": "texnik holat",
   "web.dash.version": "Versiya",
   "web.dash.model_unknown": "Noma'lum model",
-  "web.dash.chart_sparse": "Kam ma'lumot — grafik davr tanlanganda to'ladi"
+  "web.dash.chart_sparse": "Kam ma'lumot — grafik davr tanlanganda to'ladi",
+  "web.md.note": "Eslatma",
+  "web.md.tip": "Maslahat",
+  "web.md.warn": "Diqqat",
+  "web.md.important": "Muhim",
+  "web.md.caution": "Ehtiyot bo'ling",
+  "web.md.details": "Tafsilot",
+  "web.md.footnotes": "Izohlar",
+  "web.md.back": "Orqaga",
+  "web.md.chart": "Diagramma",
+  "web.md.draw_diagram": "Diagrammani chizish",
+  "web.md.wrap": "Qatorlarni o'rash",
+  "web.md.csv": "CSV yuklab olish",
+  "web.md.copy_block": "Blokni nusxalash",
+  "web.md.copy_text": "Oddiy matn bo'lib nusxalash",
+  "web.md.expand_all": "Hammasini ochish",
+  "web.md.collapse_all": "Hammasini yig'ish"
 }
