@@ -13,6 +13,7 @@ Rollarni moslash:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import warnings
@@ -57,6 +58,39 @@ _LONG_CONTEXT_PREFIXES = ("gemini-2.5", "gemini-3", "gemini-1.5")
 # `1 - cosine_distance` ostonalari (alert `threshold`, rerank) birlik vektor
 # nazarda tutib sozlangan — normallashtirilmagan qator ular bilan mos kelmaydi.
 NORMALIZE_CLIENT_SIDE = frozenset({"gemini-embedding-001"})
+
+# ─── `embed_content` ni qanday chaqirish kerak (model bo'yicha, jarayon keshi) ──
+#
+# 2026-09-18, jonli tekshiruv: `gemini-embedding-001` ga 3 ta satr berilsa 3 ta
+# vektor qaytadi, `gemini-embedding-2` esa **bitta**. Sabab SDK ichida
+# (`google/genai/models.py::AsyncModels.embed_content`): mldev yo'lida model
+# nomida "gemini-embedding-2" bo'lsa `contents` `t.t_contents()` dan o'tkaziladi,
+# u esa `["a","b","c"]` ni **bitta** `UserContent(parts=[a,b,c])` ga yig'adi —
+# ya'ni uch matn bitta hujjat bo'lib ketadi va bitta vektor qaytadi.
+# (`t_contents([Content(parts=[Part(text=x)]) for x in …])` esa 3 ta Content
+# qoldiradi — shuning uchun tuzatish "har matn = bitta Content".)
+#
+# Moslik buzilgani chaqiruvchi tomonda **qat'iy** ushlanadi
+# (`worker.embed_misaligned`) va hech narsa yozilmaydi, ya'ni bu holatda indeks
+# jimgina emas, butunlay to'xtardi. Shuning uchun adapter buni o'zi tuzatadi:
+# kam vektor qaytsa bir pog'ona pastga tushadi va tanlovni **jarayon
+# davomida** eslab qoladi (keyingi batch'lar to'g'ri yo'ldan boradi).
+_EMBED_BATCHED = "batched"  # contents=[str, …]              — 1 chaqiruv, N vektor
+_EMBED_CONTENT = "content"  # contents=[Content(parts=[…]), …] — 1 chaqiruv, N vektor
+_EMBED_SINGLE = "single"  # har matn uchun alohida chaqiruv
+
+#: `_base_model(model)` → yuqoridagi rejimlardan biri. Jarayon ichida, ataylab
+#: modul darajasida: bitta deployda provider obyekti bir necha marta yaratiladi
+#: (`router.resolve` keshi qayta qurilsa), aniqlash esa bir marta yetarli.
+_EMBED_MODE: dict[str, str] = {}
+
+#: Pog'onalar tartibi — har biri oldingisidan sekinroq/qimmatroq.
+_EMBED_LADDER = (_EMBED_BATCHED, _EMBED_CONTENT, _EMBED_SINGLE)
+
+
+def reset_embed_mode_cache() -> None:
+    """Testlar uchun: aniqlangan rejimlarni unutadi."""
+    _EMBED_MODE.clear()
 
 
 def _base_model(model: str) -> str:
@@ -172,35 +206,114 @@ class GeminiProvider(BaseProvider):
         task_type: EmbedTaskType = EMBED_DOCUMENT,
     ) -> EmbedResult:
         self.require(model, Capability.EMBED)
+        if not texts:
+            raise LLMError(self.name, "embedding: bo'sh matn ro'yxati")
 
-        async def _call() -> Any:
-            try:
-                return await self._client.aio.models.embed_content(
-                    model=model,
-                    contents=texts,  # type: ignore[arg-type]
-                    config=types.EmbedContentConfig(output_dimensionality=dim, task_type=task_type),
-                )
-            except Exception as exc:
-                raise LLMError(self.name, str(exc), status=_status_of(exc)) from exc
+        config = types.EmbedContentConfig(output_dimensionality=dim, task_type=task_type)
+        key = _base_model(model)
+        mode = _EMBED_MODE.get(key, _EMBED_BATCHED)
 
-        resp: Any = await self._with_retry("embed", _call)
-        vectors = normalize_vectors(model, [list(e.values or []) for e in (resp.embeddings or [])])
+        vectors: list[list[float]] = []
+        tokens_in = 0
+        # Pog'onadan pastga: har qadam kam vektor qaytarsa keyingisiga o'tiladi.
+        # Bitta matn uchun pog'ona ahamiyatsiz (hamma yo'l bir xil), lekin
+        # aniqlash ham faqat N > 1 da ma'noli — shuning uchun sinov ham shunda.
+        for step in _EMBED_LADDER[_EMBED_LADDER.index(mode) :]:
+            vectors, tokens_in = await self._embed_with(
+                texts, model=model, config=config, mode=step
+            )
+            if len(vectors) >= len(texts) or len(texts) == 1:
+                mode = step
+                break
+            nxt = _EMBED_LADDER[min(_EMBED_LADDER.index(step) + 1, len(_EMBED_LADDER) - 1)]
+            # Nomi "single_only" — chaqiruvchi uchun muhimi shu: model ro'yxatni
+            # bitta hujjat deb qabul qilyapti. `fallback` qaysi yo'lga tushganini
+            # aytadi (`content` — hali ham bitta so'rov, `single` — N ta).
+            log.warning(
+                "llm.embed_single_only",
+                model=key,
+                mode=step,
+                fallback=nxt,
+                sent=len(texts),
+                got=len(vectors),
+            )
+            if nxt == step:  # oxirgi pog'ona ham yetmadi — pastga tushish yo'q
+                break
+            mode = nxt
+        _EMBED_MODE[key] = mode
+
         if not vectors:
             raise LLMError(self.name, "embedding bo'sh qaytdi")
-
-        meta = getattr(resp, "metadata", None)
-        tokens_in = int(getattr(meta, "billable_character_count", 0) or 0)
         if not tokens_in:
             # Javobda usage yo'q — narx 0 bo'lib byudjet qopqog'i jimgina
             # ishlamay qolmasin (`base.estimate_tokens_heuristic` izohiga qarang:
             # 2026-09-16 da tekshirilgan, `embed_content` metadata bermaydi).
             tokens_in = estimate_tokens_heuristic(texts)
+        # Moslik kafolati baribir **chaqiruvchida** qoladi (`worker.embed_misaligned`,
+        # `nodes.embed_misaligned`): adapter uni tuzatishga urinadi, lekin
+        # tuzata olmasa qisqa ro'yxat qaytadi va yuqorida hech narsa yozilmaydi.
         return EmbedResult(
-            vectors=vectors,
+            vectors=normalize_vectors(model, vectors),
             model=model,
             provider=self.name,
             usage=Usage(tokens_in=tokens_in),
         )
+
+    async def _embed_with(
+        self,
+        texts: list[str],
+        *,
+        model: str,
+        config: Any,
+        mode: str,
+    ) -> tuple[list[list[float]], int]:
+        """Bitta pog'onani bajaradi → (**normallashtirilmagan** vektorlar, token).
+
+        Normallashtirish chaqiruvchida, bir joyda: aks holda per-item yo'lida
+        u har chaqiruvda takrorlanardi.
+        """
+        if mode == _EMBED_SINGLE:
+            return await self._embed_per_item(texts, model=model, config=config)
+        contents: Any = (
+            list(texts)
+            if mode == _EMBED_BATCHED
+            else [types.Content(parts=[types.Part(text=t)]) for t in texts]
+        )
+        resp = await self._embed_call(contents, model=model, config=config)
+        return _embed_vectors(resp), _embed_tokens(resp)
+
+    async def _embed_per_item(
+        self, texts: list[str], *, model: str, config: Any
+    ) -> tuple[list[list[float]], int]:
+        """Har matn — alohida so'rov, `EMBED_SINGLE_CONCURRENCY` bilan cheklangan.
+
+        Semafor bor, chunki bitta cron chunk'i 100 ta matn bo'ladi: cheklovsiz
+        `gather` 100 ta parallel RPC ochib, 429 (`RESOURCE_EXHAUSTED`) yeb
+        qaytardi va retry bilan butun yugurishni cho'zardi.
+        """
+        sem = asyncio.Semaphore(max(1, get_settings().embed_single_concurrency))
+
+        async def one(text: str) -> tuple[list[float], int]:
+            async with sem:
+                resp = await self._embed_call([text], model=model, config=config)
+            got = _embed_vectors(resp)
+            if not got:
+                raise LLMError(self.name, "embedding bo'sh qaytdi")
+            return got[0], _embed_tokens(resp)
+
+        pairs = await asyncio.gather(*(one(t) for t in texts))
+        return [v for v, _ in pairs], sum(n for _, n in pairs)
+
+    async def _embed_call(self, contents: Any, *, model: str, config: Any) -> Any:
+        async def _call() -> Any:
+            try:
+                return await self._client.aio.models.embed_content(
+                    model=model, contents=contents, config=config
+                )
+            except Exception as exc:
+                raise LLMError(self.name, str(exc), status=_status_of(exc)) from exc
+
+        return await self._with_retry("embed", _call)
 
     # ── rasm ─────────────────────────────────────────────────────────────────
 
@@ -376,6 +489,15 @@ class GeminiProvider(BaseProvider):
 
 
 # ─── konvertorlar ────────────────────────────────────────────────────────────
+
+
+def _embed_vectors(resp: Any) -> list[list[float]]:
+    return [list(e.values or []) for e in (getattr(resp, "embeddings", None) or [])]
+
+
+def _embed_tokens(resp: Any) -> int:
+    meta = getattr(resp, "metadata", None)
+    return int(getattr(meta, "billable_character_count", 0) or 0)
 
 
 def _to_declaration(t: ToolSpec) -> types.FunctionDeclaration:

@@ -313,7 +313,26 @@ class Settings(BaseSettings):
     embed_batch_poll_enabled: bool = True
     # Bir poll yugurishida o'qiladigan tugagan joblar soni (xotira qopqog'i:
     # har jobda 2000 ta 768 o'lchamli vektor).
-    embed_batch_poll_limit: int = Field(default=4, ge=1, le=50)
+    # 2026-09-18: 4 → 20. 2.6M xabarlik korpusda bir cron yugurishi 4 ta jobni
+    # (≈ 8k vektor) o'qisa, submit tezligi poll tezligidan oshib ketardi va
+    # tugagan joblar navbatda to'planib qolardi. 20 x 2000 = 40k vektor/poll.
+    embed_batch_poll_limit: int = Field(default=20, ge=1, le=50)
+
+    # --- embed/throughput ---
+    # Bir `embed_content` chaqiruvida N matn yuborilganda ba'zi modellar
+    # **bitta** vektor qaytaradi (`gemini-embedding-2`, SDK `t_contents` ro'yxatni
+    # bitta hujjatga yig'adi — `app.llm.gemini` izohiga qarang). Adapter buni
+    # aniqlab har matnni alohida yuboradi; shu yerdagi son — parallel so'rovlar
+    # qopqog'i (semafor). Kattalashtirish 429 (`RESOURCE_EXHAUSTED`) xavfi.
+    embed_single_concurrency: int = Field(default=8, ge=1, le=64)
+    # `EMBED_MODE=batch` da bitta cron yugurishi (15 daqiqa) nechta job
+    # yuborishi mumkin. Har job `EMBED_BATCH_MAX_ITEMS` gacha element oladi,
+    # ya'ni 20 x 2000 = 40k element/yugurish. Default 1 — eski xulq; backfill
+    # paytida vaqtincha ko'tariladi (`docs/llm.md`).
+    embed_batch_jobs_per_run: int = Field(default=1, ge=1, le=50)
+    # `EMBED_MODE=sync` da bir yugurishda embed qilinadigan xabarlar.
+    # 0 = `EMBED_BATCH_PER_RUN` (eski xulq — yagona haqiqat manbai bitta).
+    embed_sync_per_run: int = Field(default=0, ge=0, le=50_000)
 
     # --- hardening ---
     # Ishonchli reverse-proxy tarmoqlari (CIDR ro'yxati, vergul bilan).

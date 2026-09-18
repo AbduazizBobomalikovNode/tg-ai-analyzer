@@ -457,3 +457,58 @@ async def test_embed_writes_aligned_batch(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 async def _noop_heartbeat(name: str, **kw: Any) -> None: ...
+
+
+# ─── 2026-09-18: sinxron yo'lning bir yugurishdagi qopqog'i ──────────────────
+
+
+class _LimitDb(_EmbedDb):
+    """Tanlov SELECT'ini ushlab qoladi (qopqoq qiymati uchun)."""
+
+    def __init__(self) -> None:
+        super().__init__([])
+        self.selects: list[Any] = []
+
+    async def execute(self, stmt: Any = None, *a: Any, **k: Any) -> Any:
+        self.selects.append(stmt)
+        return await super().execute(stmt, *a, **k)
+
+
+async def _run_embed_with_limit(monkeypatch: pytest.MonkeyPatch, **env: str) -> int:
+    from app.config import get_settings
+
+    db = _LimitDb()
+
+    @asynccontextmanager
+    async def fake_scope() -> AsyncIterator[Any]:
+        yield db
+
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    get_settings.cache_clear()
+    monkeypatch.setattr("app.db.base.session_scope", fake_scope)
+    monkeypatch.setattr(WT, "heartbeat", _noop_heartbeat)
+    try:
+        await WT.embed_messages({})
+    finally:
+        get_settings.cache_clear()
+    # Birinchi SELECT — byudjet tekshiruvi (`_budget_blocked_accounts`);
+    # qopqoq bizni qiziqtirgan tanlovda.
+    limited = [s for s in db.selects if getattr(s, "_limit_clause", None) is not None]
+    return int(limited[-1]._limit_clause.value)
+
+
+async def test_sync_run_size_defaults_to_the_old_field(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`EMBED_SYNC_PER_RUN=0` — eski xulq (`EMBED_BATCH_PER_RUN`)."""
+    got = await _run_embed_with_limit(
+        monkeypatch, EMBED_SYNC_PER_RUN="0", EMBED_BATCH_PER_RUN="500"
+    )
+    assert got == 500
+
+
+async def test_sync_run_size_is_configurable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Backfill uchun ko'tariladi — batch rejimiga o'tmasdan (`docs/llm.md`)."""
+    got = await _run_embed_with_limit(
+        monkeypatch, EMBED_SYNC_PER_RUN="5000", EMBED_BATCH_PER_RUN="500"
+    )
+    assert got == 5000

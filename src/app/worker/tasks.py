@@ -256,7 +256,9 @@ async def embed_messages(ctx: dict[str, Any], limit: int | None = None) -> dict[
         result = await _submit_embed_batch(KIND_MESSAGES, limit, skip_accounts=blocked)
         if result is not None:
             return result
-    limit = limit or s.embed_batch_per_run
+    # Sinxron yo'lning bir yugurishdagi qopqog'i. `EMBED_SYNC_PER_RUN` 0 bo'lsa
+    # eski xulq (`EMBED_BATCH_PER_RUN`) — ikkita raqam bir-biriga zid bo'lmasin.
+    limit = limit or s.embed_sync_per_run or s.embed_batch_per_run
     # phase4: embedding **joriy model** bo'yicha yetishmayotganini qidiradi.
     # Ilgari "umuman embedding yo'q" edi — model almashtirilganda eski vektorli
     # xabarlar cron'da hech qachon to'ldirilmasdi (faqat qo'lda `reembed_all`).
@@ -1049,12 +1051,23 @@ KIND_NODES = "nodes"
 async def _submit_embed_batch(
     kind: str, limit: int | None, *, skip_accounts: set[int] | None = None
 ) -> dict[str, Any] | None:
-    """Batch job yuboradi. `None` = batch ishlamadi, sinxron yo'l davom etsin.
+    """Batch job(lar) yuboradi. `None` = batch ishlamadi, sinxron yo'l davom etsin.
 
     `skip_accounts` — kunlik byudjeti tugagan egalarning akkauntlari (M3).
     Sinxron yo'ldagi bilan **bir xil** ro'yxat: batch arzonroq bo'lsa ham
     pulni o'sha byudjetdan yeydi.
+
+    `EMBED_BATCH_JOBS_PER_RUN` > 1 bo'lsa bir yugurishda bir nechta job
+    yuboriladi (2.6M xabarlik backfill bitta job/15 daqiqa bilan oylar olardi).
+    Xavfsiz, chunki tanlov `_inflight` konteynmentidan o'tadi va har submit
+    `flush` bilan yoziladi — **bitta** sessiya ichida keyingi tanlov oldingi
+    jobga tushgan id'larni ko'rmaydi, ya'ni bir element ikki marta to'lanmaydi.
+
+    Birinchi submit `None` qaytarsa (batch yo'li yo'q / xato) — sinxron yo'lga
+    tushamiz. Keyingilari xato bersa **tushmaymiz**: bir qismi allaqachon
+    yuborilgan, sinxron yo'l o'sha elementlarni ikkinchi marta to'lardi.
     """
+    from app.config import get_settings
     from app.db.base import session_scope
     from app.services import embed_batches as eb
 
@@ -1062,16 +1075,34 @@ async def _submit_embed_batch(
         log.warning("worker.embed_batch.unavailable", kind=kind)
         return None
     skip = set(skip_accounts or ())
+    jobs = max(1, get_settings().embed_batch_jobs_per_run)
+    submitted = 0
+    names: list[str] = []
     async with session_scope() as db:
-        rep = (
-            await eb.submit_messages(db, limit=limit, skip_accounts=skip)
-            if kind == KIND_MESSAGES
-            else await eb.submit_nodes(db, limit=limit, skip_accounts=skip)
-        )
-    if rep.error:
-        return None
-    await heartbeat(f"embed_{kind}", extra={"submitted": rep.submitted, "mode": "batch"})
-    return {"mode": "batch", "submitted": rep.submitted, "job": rep.job}
+        for _ in range(jobs):
+            rep = (
+                await eb.submit_messages(db, limit=limit, skip_accounts=skip)
+                if kind == KIND_MESSAGES
+                else await eb.submit_nodes(db, limit=limit, skip_accounts=skip)
+            )
+            if rep.error:
+                if not names:
+                    return None
+                log.warning("worker.embed_batch.partial", kind=kind, error=rep.error[:200])
+                break
+            if not rep.submitted:  # embed qilinadigan element qolmadi
+                break
+            submitted += rep.submitted
+            names.append(rep.job)
+    await heartbeat(
+        f"embed_{kind}", extra={"submitted": submitted, "jobs": len(names), "mode": "batch"}
+    )
+    return {
+        "mode": "batch",
+        "submitted": submitted,
+        "jobs": len(names),
+        "job": names[0] if names else "",
+    }
 
 
 async def poll_embed_batches(ctx: dict[str, Any], limit: int | None = None) -> dict[str, Any]:

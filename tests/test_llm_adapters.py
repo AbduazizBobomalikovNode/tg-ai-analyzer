@@ -602,3 +602,134 @@ def test_claude_ignores_signature() -> None:
     _, blocks = split_messages([msg])
     assert "sig-alpha" not in json.dumps(blocks, default=str)
     assert blocks[0]["content"][0]["type"] == "tool_use"
+
+
+# ─── 2026-09-18: model ro'yxatni bitta hujjat deb qabul qilsa ────────────────
+#
+# Jonli fakt: `embed_content(contents=[3 ta satr])` `gemini-embedding-001` da
+# 3 ta, `gemini-embedding-2` da **bitta** vektor qaytaradi (SDK `t_contents`
+# satrlar ro'yxatini bitta `UserContent(parts=[…])` ga yig'adi). Bu holatda
+# chaqiruvchi hech narsa yozmaydi (`worker.embed_misaligned`), ya'ni indeks
+# butunlay to'xtaydi — shuning uchun adapter pog'onadan pastga tushadi.
+
+
+class _FakeCollapsing:
+    """`client.aio.models` — SDK yig'ish xulqini taqlid qiladi.
+
+    `content_aware=True`: har `types.Content` alohida hujjat (embedding-2 ning
+    haqiqiy xulqi). `False`: nima yuborilsa ham bitta vektor — "haqiqiy
+    single-only" modeli, per-matn chaqiruvdan boshqa yo'l yo'q.
+    """
+
+    def __init__(self, *, content_aware: bool = True, tokens: int = 5) -> None:
+        self.content_aware = content_aware
+        self.tokens = tokens
+        self.calls: list[Any] = []
+        self.inflight = 0
+        self.max_inflight = 0
+
+    def _count(self, contents: Any) -> int:
+        if not isinstance(contents, list):
+            return 1
+        if all(isinstance(c, types.Content) for c in contents) and self.content_aware:
+            return len(contents)
+        return 1  # satrlar ro'yxati → bitta hujjat
+
+    async def embed_content(self, *, model: str, contents: Any, config: Any) -> Any:
+        self.calls.append(contents)
+        self.inflight += 1
+        self.max_inflight = max(self.max_inflight, self.inflight)
+        await asyncio.sleep(0)  # boshqa korutinlar navbatga tushsin
+        self.inflight -= 1
+        return SimpleNamespace(
+            embeddings=[SimpleNamespace(values=[1.0, 0.0]) for _ in range(self._count(contents))],
+            metadata=SimpleNamespace(billable_character_count=self.tokens),
+        )
+
+
+def _gemini_fake(fake: Any) -> Any:
+    from app.llm.gemini import GeminiProvider, reset_embed_mode_cache
+
+    reset_embed_mode_cache()
+    provider = GeminiProvider(api_key="test-key")  # soxta kalit — tarmoqqa chiqmaydi
+    provider._client = SimpleNamespace(aio=SimpleNamespace(models=fake))
+    return provider
+
+
+def test_embed_batched_path_is_unchanged_for_healthy_models() -> None:
+    """Ko'p vektor qaytaradigan modelda hech qanday qo'shimcha chaqiruv yo'q."""
+    provider, fake = _gemini_with([[1.0, 0.0], [0.0, 1.0], [1.0, 0.0]])
+    from app.llm.gemini import reset_embed_mode_cache
+
+    reset_embed_mode_cache()
+    res = asyncio.run(provider.embed(["a", "b", "c"], model="gemini-embedding-001", dim=2))
+    assert len(res.vectors) == 3
+    assert len(fake.calls) == 1
+    assert fake.calls[0]["contents"] == ["a", "b", "c"]  # satrlar — eski, arzon yo'l
+
+
+def test_embed_falls_back_to_per_content_when_the_list_collapses() -> None:
+    """Pog'ona 2: har matn alohida `Content` — hamon **bitta** so'rov."""
+    fake = _FakeCollapsing(content_aware=True)
+    provider = _gemini_fake(fake)
+    res = asyncio.run(provider.embed(["a", "b", "c"], model="gemini-embedding-2", dim=2))
+
+    assert len(res.vectors) == 3  # moslik tiklandi
+    assert len(fake.calls) == 2  # satrlar (1 vektor) → Content'lar (3 vektor)
+    assert all(isinstance(c, types.Content) for c in fake.calls[1])
+    assert [c.parts[0].text for c in fake.calls[1]] == ["a", "b", "c"]
+
+
+def test_embed_mode_is_cached_per_model_for_the_rest_of_the_process() -> None:
+    """Aniqlash bir marta: keyingi batch'lar to'g'ridan-to'g'ri to'g'ri yo'ldan."""
+    fake = _FakeCollapsing(content_aware=True)
+    provider = _gemini_fake(fake)
+    asyncio.run(provider.embed(["a", "b"], model="gemini-embedding-2", dim=2))
+    fake.calls.clear()
+
+    res = asyncio.run(provider.embed(["c", "d"], model="gemini-embedding-2", dim=2))
+    assert len(res.vectors) == 2
+    assert len(fake.calls) == 1  # ortiqcha "sinov" chaqiruvi yo'q
+    assert all(isinstance(c, types.Content) for c in fake.calls[0])
+
+
+def test_embed_falls_back_to_per_item_calls_and_sums_usage() -> None:
+    """Pog'ona 3: `Content` ham yordam bermasa — har matn alohida so'rov."""
+    fake = _FakeCollapsing(content_aware=False, tokens=5)
+    provider = _gemini_fake(fake)
+    res = asyncio.run(provider.embed(["a", "b", "c"], model="fake-embed-single", dim=2))
+
+    assert len(res.vectors) == 3
+    per_item = [c for c in fake.calls if c == ["a"] or c == ["b"] or c == ["c"]]
+    assert len(per_item) == 3  # har matn bitta so'rov
+    assert res.usage.tokens_in == 15  # 3 x 5 — taxminga tushilmadi
+
+
+def test_embed_per_item_concurrency_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Semafor: 100 ta parallel RPC 429 (`RESOURCE_EXHAUSTED`) yeb qaytardi."""
+    from app.llm import gemini as G
+
+    fake = _FakeCollapsing(content_aware=False)
+    provider = _gemini_fake(fake)
+    monkeypatch.setattr(G, "get_settings", lambda: SimpleNamespace(embed_single_concurrency=2))
+    res = asyncio.run(provider.embed([f"t{i}" for i in range(10)], model="fake-embed-sem", dim=2))
+
+    assert len(res.vectors) == 10
+    assert fake.max_inflight <= 2
+
+
+def test_embed_single_text_needs_no_probing() -> None:
+    """Bitta matnda pog'ona ma'nosiz — bitta chaqiruv, keshga yolg'on yozilmaydi."""
+    from app.llm.gemini import _EMBED_BATCHED, _EMBED_MODE
+
+    fake = _FakeCollapsing(content_aware=True)
+    provider = _gemini_fake(fake)
+    res = asyncio.run(provider.embed(["a"], model="gemini-embedding-2", dim=2))
+    assert len(res.vectors) == 1 and len(fake.calls) == 1
+    assert _EMBED_MODE["gemini-embedding-2"] == _EMBED_BATCHED
+
+
+def test_embed_rejects_an_empty_text_list() -> None:
+    provider, _ = _gemini_with([])
+    with pytest.raises(LLMError):
+        asyncio.run(provider.embed([], model="gemini-embedding-001", dim=2))

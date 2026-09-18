@@ -8,6 +8,7 @@ yozilgan (`google-genai` 2.23: `BatchJob.state`, `dest.inlined_embed_content_res
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -568,3 +569,101 @@ async def test_write_vectors_conflicts_on_id_and_model() -> None:
     (stmt,) = session.writes
     sql = str(stmt.compile(dialect=postgresql.dialect()))
     assert "ON CONFLICT (message_id, model) DO NOTHING" in sql
+
+
+# ─── 2026-09-18: bir cron yugurishida bir nechta job (backfill) ──────────────
+
+
+class _SubmitScope:
+    """`session_scope()` o'rnini bosadi — `_submit_embed_batch` uchun."""
+
+    def __init__(self) -> None:
+        self.session = object()
+
+    async def __aenter__(self) -> Any:
+        return self.session
+
+    async def __aexit__(self, *exc: Any) -> bool:
+        return False
+
+
+def _patch_submit(
+    monkeypatch: pytest.MonkeyPatch, reports: list[Any], *, jobs_per_run: int
+) -> list[Any]:
+    """`submit_messages` ni ketma-ket `reports` bilan almashtiradi."""
+    from app.services import embed_batches as EB
+    from app.worker import tasks as WT
+
+    calls: list[Any] = []
+    queue = list(reports)
+
+    async def fake_submit(session: Any, **kw: Any) -> Any:
+        calls.append(kw)
+        return queue.pop(0) if queue else EB.SubmitReport()
+
+    monkeypatch.setattr(EB, "batch_embedding_available", lambda: True)
+    monkeypatch.setattr(EB, "submit_messages", fake_submit)
+    monkeypatch.setattr("app.db.base.session_scope", lambda: _SubmitScope())
+    monkeypatch.setattr(
+        "app.config.get_settings", lambda: SimpleNamespace(embed_batch_jobs_per_run=jobs_per_run)
+    )
+
+    async def _noop(name: str, **kw: Any) -> None: ...
+
+    monkeypatch.setattr(WT, "heartbeat", _noop)
+    return calls
+
+
+async def test_submit_sends_many_jobs_in_one_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """20 x 2000 = 40k element/yugurish — 2.6M backfill bir kunga sig'adi."""
+    from app.services.embed_batches import SubmitReport
+    from app.worker import tasks as WT
+
+    reports = [SubmitReport(submitted=2000, job=f"batches/{i}") for i in range(3)]
+    calls = _patch_submit(monkeypatch, reports, jobs_per_run=3)
+
+    out = await WT._submit_embed_batch(WT.KIND_MESSAGES, None)
+    assert out == {"mode": "batch", "submitted": 6000, "jobs": 3, "job": "batches/0"}
+    assert len(calls) == 3  # bitta sessiya ichida — `_inflight` takrorlanishni to'sadi
+
+
+async def test_submit_stops_when_nothing_is_left(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bo'sh tanlov — qolgan joblar uchun so'rov qilinmaydi."""
+    from app.services.embed_batches import SubmitReport
+    from app.worker import tasks as WT
+
+    reports = [SubmitReport(submitted=7, job="batches/0"), SubmitReport()]
+    calls = _patch_submit(monkeypatch, reports, jobs_per_run=10)
+
+    out = await WT._submit_embed_batch(WT.KIND_MESSAGES, None)
+    assert out is not None and out["submitted"] == 7 and out["jobs"] == 1
+    assert len(calls) == 2
+
+
+async def test_first_submit_error_falls_back_to_sync(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hech narsa yuborilmagan bo'lsa — sinxron yo'l (`None`)."""
+    from app.services.embed_batches import SubmitReport
+    from app.worker import tasks as WT
+
+    _patch_submit(monkeypatch, [SubmitReport(error="429")], jobs_per_run=5)
+    assert await WT._submit_embed_batch(WT.KIND_MESSAGES, None) is None
+
+
+async def test_later_submit_error_keeps_what_was_sent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bir qismi yuborilgan — sinxron yo'lga tushsak o'sha elementlar ikki marta to'lanardi."""
+    from app.services.embed_batches import SubmitReport
+    from app.worker import tasks as WT
+
+    reports = [SubmitReport(submitted=2000, job="batches/0"), SubmitReport(error="429")]
+    _patch_submit(monkeypatch, reports, jobs_per_run=5)
+
+    out = await WT._submit_embed_batch(WT.KIND_MESSAGES, None)
+    assert out is not None and out["submitted"] == 2000 and out["jobs"] == 1
+
+
+def test_poll_limit_default_matches_submit_throughput() -> None:
+    """Poll submit'dan sekin bo'lsa tugagan joblar navbatda to'planib qolardi."""
+    from app.config import Settings
+
+    assert Settings.model_fields["embed_batch_poll_limit"].default == 20
+    assert Settings.model_fields["embed_batch_jobs_per_run"].default == 1

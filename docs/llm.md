@@ -119,3 +119,57 @@ modelni filtrlab bo'sh qaytarardi. Barcha yozuvchilar
 `embed_batches._write_vectors`) `ON CONFLICT (id, model) DO NOTHING` bilan
 yozadi. Downgrade (`0016` → `0015`) har id uchun **eng yangi** qatorni
 qoldirib qolganini o'chiradi — teskari yo'lda ma'lumot yo'qoladi.
+
+## Embedding o'tkazuvchanligi — 2.6M xabarni backfill qilish
+
+Indeksda bo'shliq bo'lsa (masalan `EMBED_MODEL` almashtirilgan yoki tarix
+endigina sinxronlangan) default cron tezligi yetmaydi. Ikki yo'l bor, ikkalasi
+ham bir xil yozuvchidan o'tadi (`ON CONFLICT (message_id, model) DO NOTHING`),
+shuning uchun ularni aralashtirsa ham bo'ladi.
+
+| | sync (`EMBED_MODE=sync`) | batch (`EMBED_MODE=batch`) |
+|---|---|---|
+| Bir yugurishda | `EMBED_SYNC_PER_RUN` (0 → `EMBED_BATCH_PER_RUN` = 500) | `EMBED_BATCH_JOBS_PER_RUN` × `EMBED_BATCH_MAX_ITEMS` |
+| Cron | har 15 daqiqa | submit har 15 daqiqa, o'qish har 5 daqiqa (`poll_embed_batches`) |
+| Kechikish | soniyalar | soatlar (SLA 24 soat) |
+| Narx (`gemini-embedding-001`) | $0.15/M token | $0.075/M token |
+
+**Sync bilan:** 500/15 daqiqa ≈ 48k/kun — 2.6M uchun ~54 kun. `EMBED_SYNC_PER_RUN`
+ni ko'tarish mumkin (masalan 5000 ≈ 480k/kun), lekin har yugurish `EMBED_BATCH`
+(100) lik chunk'larda **ketma-ket** so'rov qiladi va cron timeout'iga (1200 s)
+urilishi mumkin.
+
+**Batch bilan (tavsiya etiladi):** `EMBED_BATCH_JOBS_PER_RUN=20` va
+`EMBED_BATCH_MAX_ITEMS=2000` → bir submit yugurishida 40k element, sutkasiga
+96 yugurish ≈ **3.8M/kun**, ya'ni 2.6M bir kunga sig'adi. O'qish tomoni ham mos
+bo'lishi kerak: `EMBED_BATCH_POLL_LIMIT=20` (default) × 12 yugurish/soat =
+240 job/soat — submit tezligidan yuqori, navbat to'planmaydi.
+
+Narx tartibi: 2.6M xabar × ~4000 belgi qopqog'i ostida o'rtacha ~40 belgi
+(≈ 10 token) → ~26M token ≈ **$2**; uzunroq korpusda (o'rtacha ~160 belgi)
+~104M token ≈ **$8**. Sinxron yo'lda shu raqamlar ikki barobar.
+
+Backfill tugagach `EMBED_BATCH_JOBS_PER_RUN` ni 1 ga qaytaring — aks holda har
+cron yugurishi bo'sh tanlov uchun 20 ta so'rov qiladi (zararsiz, lekin behuda).
+
+### Model ro'yxatni bitta hujjat deb qabul qilsa
+
+2026-09-18 da jonli tekshirilgan: `embed_content(contents=[3 ta satr])`
+`gemini-embedding-001` da 3 ta vektor, `gemini-embedding-2` da esa **bitta**
+qaytaradi. Sabab SDK ichida: mldev yo'lida model nomida `gemini-embedding-2`
+bo'lsa `contents` `t_contents()` dan o'tadi va satrlar ro'yxati **bitta**
+`UserContent(parts=[…])` ga yig'iladi.
+
+Adapter (`app/llm/gemini.py::embed`) buni o'zi tuzatadi — uch pog'ona:
+
+1. `contents=[str, …]` (eski, arzon yo'l);
+2. kam vektor qaytsa — `contents=[Content(parts=[Part(text=…)]), …]`, ya'ni
+   har matn alohida hujjat, **hamon bitta** so'rov;
+3. u ham yetmasa — har matn uchun alohida so'rov,
+   `EMBED_SINGLE_CONCURRENCY` (default 8) semafori bilan.
+
+Pastga tushish `llm.embed_single_only` bilan loglanadi va tanlov **model
+bo'yicha jarayon davomida** keshlanadi, ya'ni keyingi batch'lar to'g'ri
+yo'ldan boradi. Qat'iy moslik tekshiruvi chaqiruvchida qoladi
+(`worker.embed_misaligned`, `nodes.embed_misaligned`): adapter tuzata olmasa
+ham noto'g'ri vektor **hech qachon** yozilmaydi.
