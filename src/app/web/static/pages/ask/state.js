@@ -38,7 +38,8 @@ export const S = {
   mode: "auto",
   strategy: "auto",
   ctxLimit: 200,
-  deep: false,
+  //: korpus ko'lami: "fast" | "deep" | "exhaustive" (`scaleMode()`)
+  scaleMode: "fast",
 
   // oqim
   busy: false,
@@ -120,6 +121,41 @@ export function savePref(key, value) {
   }, 600);
 }
 
+/* ── korpus ko'lami (mode picker) ──────────────────────────────────── */
+
+/** Uchta ko'lam: yaqin kontekst · saralangan korpus · butun korpus. */
+export const SCALE_MODES = ["fast", "deep", "exhaustive"];
+
+/**
+ * Ko'lam **localStorage'da** saqlanadi, serverdagi prefs'da emas.
+ *
+ * Sabab: `services/prefs.ALLOWED` — yopiq ro'yxat va `default_mode_scale`
+ * u yerda yo'q; noma'lum kalit `PUT /api/settings/prefs` da jimgina
+ * tashlanadi (422 emas), ya'ni "saqlandi" degan yolg'on ko'rinish paydo
+ * bo'lardi. Backend kalitni qo'shsa — `applyPrefs()` uni o'qiydi va bu
+ * yerdagi nusxa faqat zaxira bo'lib qoladi.
+ */
+const SCALE_LS_KEY = "tgai.default_mode_scale";
+
+const validScale = (v) => (SCALE_MODES.includes(v) ? v : null);
+
+/** Saqlangan ko'lam (yo'q/buzuq bo'lsa `null`). */
+export function storedScaleMode() {
+  try { return validScale(localStorage.getItem(SCALE_LS_KEY)); } catch { return null; }
+}
+
+/** Ko'lamni o'rnatadi va brauzerda saqlaydi. */
+export function setScaleMode(v) {
+  const mode = validScale(v) || "fast";
+  S.scaleMode = mode;
+  try { localStorage.setItem(SCALE_LS_KEY, mode); } catch { /* xususiy oyna — sessiyada qoladi */ }
+  emit("prefs");
+  return mode;
+}
+
+/** Ko'lam `fast` emasmi — ya'ni `/api/deep/stream` yo'li. */
+export const isDeepScale = () => S.scaleMode !== "fast";
+
 /** `/api/me` dagi prefs'ni composer holatiga ko'chiradi. */
 export function applyPrefs(prefs) {
   if (!prefs) return;
@@ -127,7 +163,11 @@ export function applyPrefs(prefs) {
     S.mode = prefs.default_mode;
   }
   if (typeof prefs.default_strategy === "string") S.strategy = prefs.default_strategy;
-  if (typeof prefs.deep_default === "boolean") S.deep = prefs.deep_default;
+  // Ko'lam: localStorage → server prefs (agar kalit qo'shilsa) → eski
+  // `deep_default` bayrog'i → "fast".
+  S.scaleMode = storedScaleMode()
+    || validScale(prefs.default_mode_scale)
+    || (prefs.deep_default === true ? "deep" : "fast");
   emit("prefs");
 }
 

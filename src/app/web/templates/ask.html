@@ -83,8 +83,19 @@
         <button type="button" class="chip tool" id="btn-pick-chats" aria-haspopup="dialog">
           {{ m.icon("layers") }}<span>{{ t('web.ask.context') }}</span>
         </button>
-        <button type="button" class="chip tool" id="btn-deep" aria-pressed="false"
-                title="{{ t('web.deep.hint') }}">{{ m.icon("brain") }}<span>{{ t('web.ask.deep') }}</span></button>
+        {# Rejim tanlagich — eski bitta "deep" pilyulasi o'rniga uchta bosqich.
+           `fast` oddiy oqim (`/messages/stream`), `deep`/`exhaustive` —
+           `/api/deep/stream` (`mode` tanada). Tanlov brauzerda saqlanadi
+           (`prefs.ALLOWED` da bunday kalit yo'q — `state.js` ga qarang). #}
+        <div class="segment mode-seg" id="mode-picker" role="radiogroup"
+             aria-label="{{ t('web.ask.mode') }}">
+          <button type="button" role="radio" data-mode="fast" aria-checked="true"
+                  title="{{ t('web.ask.mode_fast_desc') }} · {{ t('web.ask.mode_fast_cost') }}">{{ t('web.ask.mode_fast') }}</button>
+          <button type="button" role="radio" data-mode="deep" aria-checked="false"
+                  title="{{ t('web.ask.mode_deep_desc') }} · {{ t('web.ask.mode_deep_cost') }}">{{ t('web.ask.mode_deep') }}</button>
+          <button type="button" role="radio" data-mode="exhaustive" aria-checked="false"
+                  title="{{ t('web.ask.mode_exhaustive_desc') }} · {{ t('web.ask.mode_exhaustive_cost') }}">{{ t('web.ask.mode_exhaustive') }}</button>
+        </div>
         <button type="button" class="chip tool" id="btn-expert" aria-haspopup="dialog"
                 aria-label="{{ t('web.ask.expert') }}">{{ m.icon("sliders-horizontal") }}</button>
         <span class="spacer"></span>
@@ -93,9 +104,30 @@
         <button type="button" class="btn danger send-btn" id="btn-stop" hidden
                 aria-label="{{ t('web.ask.stop') }}">{{ m.icon("x") }}<span>{{ t('web.ask.stop') }}</span></button>
       </div>
+      <p class="mode-hint" id="mode-hint"></p>
     </div>
   </form>
 </div>
+
+{# Baho kartasi — `estimate` hodisasi bo'yicha to'ldiriladi va bosqich
+   chizig'ining birinchi elementi bo'lib qoladi. Shablonda turishi ataylab:
+   matnlar serverda tarjima qilinadi, JS faqat `cloneNode` + `textContent`
+   qiladi (`innerHTML` yo'q). `exhaustive` tasdiqsiz yuborilganda server
+   `estimate` + `done {needs_confirm:true}` qaytaradi — o'shanda
+   `[data-est-confirm]` ochiladi. #}
+<template id="tpl-estimate">
+  <div class="estimate-card" role="group" aria-label="{{ t('web.ask.est_title') }}">
+    <div class="est-head">{{ m.icon("activity") }}<b>{{ t('web.ask.est_title') }}</b></div>
+    <p class="est-line" data-est-line></p>
+    <div class="est-confirm" data-est-confirm hidden>
+      <p class="est-warn">{{ t('web.ask.est_confirm') }}</p>
+      <div class="est-actions">
+        <button type="button" class="btn primary small" data-est-start>{{ t('web.ask.est_start') }}</button>
+        <button type="button" class="btn ghost small" data-est-fallback>{{ t('web.ask.est_fallback') }}</button>
+      </div>
+    </div>
+  </div>
+</template>
 
 {# Umumiy varaq: chat tanlash, expert, sitata, lightbox, TOC, amallar.
    Bitta konteyner — `panels.js` mazmunini almashtiradi (fokus tuzog'i bilan). #}

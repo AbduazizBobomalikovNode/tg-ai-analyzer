@@ -18,6 +18,7 @@ import { rank } from "../../lib/palette.js";
 import { compact } from "../../lib/fmt.js";
 import {
   S, cfg, on, emit, savePref, setChats, contextChatObjects, toggleContextChat, clearContextChats,
+  SCALE_MODES, setScaleMode,
 } from "./state.js";
 import { openSheet, closeSheet } from "./panels.js";
 import { chatAvatar } from "./messages.js";
@@ -171,19 +172,56 @@ export function openExpertSheet() {
       el("span.expert-label", null, t("web.ask.ctx_limit")),
       el("div.expert-slider", null, [limit, limitOut]),
     ]),
+    // Bu uchtasi **`Tez` rejimda** ishlaydi: `Chuqur`/`To'liq` da kontekstni
+    // korpus quvuri o'zi tanlaydi (`scale_search`).
     el("p.form-note", null, t("web.ask.expert_note")),
+    el("p.form-note", null, `${t("web.ask.mode_fast")}: ${t("web.ask.mode_fast_desc")}. ${t("web.ask.mode_local_note")}`),
     el("div.sheet-actions", null,
       el("button.btn.primary", { type: "button", onclick: closeSheet }, t("web.close"))),
   ]);
 }
 
-/* ── deep pill ────────────────────────────────────────────────────── */
+/* ── rejim tanlagich (ko'lam) ─────────────────────────────────────── */
 
-function paintDeep() {
-  const btn = $("#btn-deep");
-  if (!btn) return;
-  btn.setAttribute("aria-pressed", String(S.deep));
-  btn.classList.toggle("is-on", S.deep);
+/**
+ * Uch bosqichli segment: `Tez · Chuqur · To'liq`. Tanlangan bosqichning
+ * tavsifi va taxminiy narxi/vaqti pastdagi bitta satrda ko'rinadi —
+ * har tugmaning ostiga yozilsa composer ikki barobar balandlashadi.
+ */
+function paintMode() {
+  const picker = $("#mode-picker");
+  const hint = $("#mode-hint");
+  if (picker) {
+    for (const btn of picker.querySelectorAll("[data-mode]")) {
+      const on = btn.dataset.mode === S.scaleMode;
+      btn.setAttribute("aria-checked", String(on));
+      btn.tabIndex = on ? 0 : -1;
+    }
+  }
+  if (hint) {
+    hint.textContent = `${t(`web.ask.mode_${S.scaleMode}_desc`)} · ${t(`web.ask.mode_${S.scaleMode}_cost`)}`;
+  }
+}
+
+/** Radiogroup klaviaturasi: strelkalar tanlovni ko'chiradi (WAI-ARIA). */
+function initModePicker() {
+  const picker = $("#mode-picker");
+  if (!picker) return;
+  picker.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-mode]");
+    if (!btn) return;
+    setScaleMode(btn.dataset.mode);
+  });
+  picker.addEventListener("keydown", (e) => {
+    const step = e.key === "ArrowRight" || e.key === "ArrowDown" ? 1
+      : e.key === "ArrowLeft" || e.key === "ArrowUp" ? -1 : 0;
+    if (!step) return;
+    e.preventDefault();
+    const i = SCALE_MODES.indexOf(S.scaleMode);
+    const next = SCALE_MODES[(i + step + SCALE_MODES.length) % SCALE_MODES.length];
+    setScaleMode(next);
+    picker.querySelector(`[data-mode="${next}"]`)?.focus();
+  });
 }
 
 /* ── URL'dan kontekst ─────────────────────────────────────────────── */
@@ -223,19 +261,15 @@ export function initComposer() {
 
   $("#btn-pick-chats")?.addEventListener("click", openChatPicker);
   $("#btn-expert")?.addEventListener("click", openExpertSheet);
-  $("#btn-deep")?.addEventListener("click", () => {
-    S.deep = !S.deep;
-    savePref("deep_default", S.deep);
-    paintDeep();
-  });
+  initModePicker();
 
   on("context", paintChips);
   on("chats", paintChips);
-  on("prefs", () => { paintDeep(); });
+  on("prefs", () => { paintMode(); });
   on("busy", (busy) => { input.disabled = false; form.classList.toggle("is-busy", busy); });
 
   S.ctxLimit = cfg.contextDefault || S.ctxLimit;
   paintChips();
-  paintDeep();
+  paintMode();
   autosize(input);
 }

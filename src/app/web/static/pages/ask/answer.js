@@ -22,7 +22,7 @@ import { t } from "../../lib/i18n.js";
 import { toastError } from "../../lib/toast.js";
 import { isMobile } from "../../lib/store.js";
 import { haptic } from "../../lib/tg.js";
-import { S, emit, contextChatObjects } from "./state.js";
+import { S, emit, contextChatObjects, isDeepScale } from "./state.js";
 import {
   hooks, assistantShell, userNode, appendNode, renderAnswer, enhance, metaLine,
   scrollBottom, copyText, setEmptyVisible, threadEl, contextLine,
@@ -179,15 +179,32 @@ async function runNormal(path, body, shell) {
 
 /* ── chuqur oqim ──────────────────────────────────────────────────── */
 
-async function runDeep(question, shell) {
-  const panel = createDeepPanel(shell.answer);
+/** Hozirgi deep paneli — `Stop` bosilganda bosqichni uzilgan deb belgilash uchun. */
+let livePanel = null;
+
+/**
+ * Korpus oqimi (`deep` va `exhaustive`).
+ *
+ * `exhaustive` **tasdiqsiz** yuborilsa server faqat `estimate` va
+ * `done {needs_confirm:true}` qaytaradi — javob yozilmaydi. Shunda
+ * `null` qaytadi va karta tugmalari yangi aylanishni boshlaydi
+ * (`confirm:true` bilan yoki `deep` rejimida).
+ *
+ * @param {string} question
+ * @param {object} shell
+ * @param {{mode: string, confirm?: boolean}} opts
+ */
+async function runDeep(question, shell, opts) {
+  const { mode, confirm = false } = opts;
+  const panel = createDeepPanel(shell.answer, { mode });
+  livePanel = panel;
   shell.extra.appendChild(panel.node);
   let text = "";
   let final = null;
   let failed = null;
 
   await stream("/api/deep/stream", {
-    conversation_id: S.convId, question, deep: true,
+    conversation_id: S.convId, question, deep: true, mode, confirm,
   }, (ev) => {
     const d = ev.data || {};
     if (ev.kind === "token") {
@@ -201,12 +218,51 @@ async function runDeep(question, shell) {
 
   if (failed) throw failed;
   if (!final) throw new ApiError("chat.err.internal", 0, "no done event");
+  if (final.needs_confirm) {
+    panel.confirm({
+      onStart: () => retryDeep(shell, question, { mode, confirm: true }),
+      onFallback: () => retryDeep(shell, question, { mode: "deep", confirm: false }),
+    });
+    scrollBottom();
+    return null;
+  }
   renderAnswer(shell.answer, text);
   sourceOf.set(shell.node, text);
   const clusters = panel.finish(final);
   final.text = text;
   final.followups = (clusters || []).map((c) => c.label).filter(Boolean).slice(0, 4);
   return final;
+}
+
+/**
+ * Xuddi shu blok ichida deep oqimini qaytadan yugurtiradi (tasdiq
+ * kartasidagi "Boshlash" / "Chuqur rejimda" tugmalari).
+ */
+async function retryDeep(shell, question, opts) {
+  if (S.busy || !question) return;
+  clearBanners();
+  clear(shell.answer); clear(shell.foot); clear(shell.cards); clear(shell.extra);
+  S.abort = new AbortController();
+  setBusy(true);
+  try {
+    const final = await runDeep(question, shell, opts);
+    if (final) finishBlock(shell, final, { deep: true });
+  } catch (err) {
+    if (err?.name === "AbortError") stopped(shell);
+    else showError(err, shell);
+  } finally {
+    setBusy(false);
+    S.abort = null;
+    livePanel = null;
+    scrollBottom();
+  }
+}
+
+/** Oqim uzilganda: faol bosqich belgilanadi va futerga qisqa izoh. */
+function stopped(shell) {
+  livePanel?.stop();
+  shell.stage.hidden = true;
+  replace(shell.foot, el("div.muted", null, t("web.ask.stopped")));
 }
 
 /* ── umumiy aylanish ──────────────────────────────────────────────── */
@@ -239,24 +295,25 @@ export async function ask(text) {
 
   S.abort = new AbortController();
   setBusy(true);
-  const deep = S.deep;
+  // `fast` — oddiy oqim (yaqin kontekst), `deep`/`exhaustive` — korpus quvuri.
+  const deep = isDeepScale();
   try {
     await ensureConversation();
     const final = deep
-      ? await runDeep(text, shell)
+      ? await runDeep(text, shell, { mode: S.scaleMode, confirm: false })
       : await runNormal(`/api/conversations/${S.convId}/messages/stream`, requestBody(text), shell);
-    finishBlock(shell, final, { deep });
-    haptic.notify("success");
-  } catch (err) {
-    if (err?.name === "AbortError") {
-      shell.stage.hidden = true;
-      replace(shell.foot, el("div.muted", null, t("web.ask.stopped")));
-    } else {
-      showError(err, shell);
+    // `null` — `exhaustive` tasdiq kutmoqda, javob hali yo'q.
+    if (final) {
+      finishBlock(shell, final, { deep });
+      haptic.notify("success");
     }
+  } catch (err) {
+    if (err?.name === "AbortError") stopped(shell);
+    else showError(err, shell);
   } finally {
     setBusy(false);
     S.abort = null;
+    livePanel = null;
     emit("conversations-dirty");
     scrollBottom();
   }
@@ -292,24 +349,26 @@ async function regenerate(mid, shell) {
   // Deep quvuri savolni tanada kutadi (`/api/deep/stream`), oddiy yo'l esa
   // uni **saqlangan qatordan** oladi (`take_for_regenerate`) — shuning uchun
   // deep uchun savol matni bo'lmasa qayta yugurtirmaymiz.
-  if (S.deep && !question) { toastError(new ApiError("chat.err.not_found", 0, null)); return; }
+  if (isDeepScale() && !question) { toastError(new ApiError("chat.err.not_found", 0, null)); return; }
   clearBanners();
   clear(shell.answer); clear(shell.foot); clear(shell.cards); clear(shell.extra);
   S.abort = new AbortController();
   setBusy(true);
-  const deep = S.deep;
+  const deep = isDeepScale();
   try {
     const body = { ...requestBody(""), stream: true };
     delete body.text;
     const final = deep
-      ? await runDeep(question, shell)
+      ? await runDeep(question, shell, { mode: S.scaleMode, confirm: false })
       : await runNormal(`/api/conversations/${S.convId}/messages/${mid}/regenerate`, body, shell);
-    finishBlock(shell, final, { deep });
+    if (final) finishBlock(shell, final, { deep });
   } catch (err) {
-    if (err?.name !== "AbortError") showError(err, shell);
+    if (err?.name === "AbortError") stopped(shell);
+    else showError(err, shell);
   } finally {
     setBusy(false);
     S.abort = null;
+    livePanel = null;
   }
 }
 

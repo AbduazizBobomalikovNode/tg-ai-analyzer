@@ -18,7 +18,7 @@ import { el, clear, replace, $ } from "../../lib/dom.js";
 import { get, post } from "../../lib/api.js";
 import { icon } from "../../lib/icons.js";
 import { t } from "../../lib/i18n.js";
-import { compact, date as fmtDate, dateTime, usd } from "../../lib/fmt.js";
+import { compact, num, pct, ms as fmtMs, date as fmtDate, dateTime, usd } from "../../lib/fmt.js";
 import { peerClass } from "../../lib/palette.js";
 import { toast, toastError } from "../../lib/toast.js";
 import { isMobile } from "../../lib/store.js";
@@ -226,26 +226,264 @@ function citeChip(part, index, seq) {
   return chip;
 }
 
-/* ── bosqich timeline ─────────────────────────────────────────────── */
+/* ── bosqich modeli (sof funksiya) ────────────────────────────────── */
 
-const STAGES = [
-  ["plan", "brain", "web.deep.step_plan"],
-  ["search", "search", "web.ask.stage_search"],
-  ["cluster", "layers", "web.ask.stage_cluster"],
-  ["rerank", "filter", "web.ask.stage_rerank"],
-  ["write", "edit-3", "web.deep.step_write"],
+/**
+ * Bosqichlar **yagona tartibi**. `fast` (klassik) oqim `plan → search →
+ * cluster → rerank → write` ni ishlatadi; korpus ko'lami (`deep`,
+ * `exhaustive`, `services/scale_search.py`) esa `estimate → buckets →
+ * pull → filter → select → map → reduce → write` ni. Ikkalasi bitta
+ * ro'yxatda turadi, chunki deep oqimi ikkalasini ham aralashtirib
+ * yuborishi mumkin (rejadan keyin klaster ham keladi).
+ */
+export const STAGE_ORDER = [
+  "plan", "estimate", "buckets", "pull", "filter", "select",
+  "search", "map", "reduce", "cluster", "rerank", "write",
 ];
 
+/** Rejim bo'yicha **oldindan ko'rinadigan** bosqichlar (qolgani kelganda ochiladi). */
+const VISIBLE_STAGES = {
+  fast: ["plan", "search", "cluster", "rerank", "write"],
+  deep: ["plan", "estimate", "buckets", "pull", "filter", "select", "map", "reduce", "write"],
+};
+VISIBLE_STAGES.exhaustive = VISIBLE_STAGES.deep;
+
+const STAGE_ICON = {
+  plan: "brain", estimate: "activity", buckets: "layers", pull: "database",
+  filter: "filter", select: "check-check", search: "search", map: "bolt",
+  reduce: "layers", cluster: "layers", rerank: "filter", write: "edit-3",
+};
+
+const STAGE_LABEL = {
+  plan: "web.deep.step_plan", estimate: "web.ask.stage_estimate",
+  buckets: "web.ask.stage_buckets", pull: "web.ask.stage_pull",
+  filter: "web.ask.stage_filter", select: "web.ask.stage_select",
+  search: "web.ask.stage_search", map: "web.ask.stage_map",
+  reduce: "web.ask.stage_reduce", cluster: "web.ask.stage_cluster",
+  rerank: "web.ask.stage_rerank", write: "web.ask.stage_writing",
+};
+
+const numOr = (v, fallback = 0) => (Number.isFinite(Number(v)) ? Number(v) : fallback);
+
+/** Bo'sh model — `stageModel()` va panel shundan boshlaydi. */
+export function emptyModel(mode = "deep") {
+  return {
+    mode,
+    stages: {},            // kalit → {state, detail?, startedAt, endedAt}
+    active: null,          // hozir ishlayotgan bosqich (aria-live shu o'zgarganda)
+    estimate: null,        // {mode, buckets, est_messages, est_cost_usd, ceiling_usd}
+    needsConfirm: false,
+    plan: null,
+    clusters: [],
+    coverage: null,
+    stoppedBy: null,
+    error: null,
+    funnel: {
+      bucketsPlanned: 0, bucketsDone: 0, candidates: 0,
+      filtered: 0, filterTotal: 0, kept: 0, keepRate: null,
+      scanCost: 0, cached: false,
+      selected: 0, chats: 0, weeks: 0, trimmed: 0,
+      chunk: 0, chunks: 0, claims: 0, claimsIn: 0, contradictions: 0,
+      searched: 0, served: 0, planned: 0,
+    },
+  };
+}
+
+/**
+ * Bitta hodisani modelga qo'shadi — **DOM yo'q, i18n yo'q, mutatsiya yo'q
+ * emas**: model o'zgartiriladi va qaytariladi (panel bitta nusxa yuritadi).
+ *
+ * @param {object} model  `emptyModel()` natijasi
+ * @param {string} kind   SSE hodisa nomi
+ * @param {object} d      hodisa tanasi
+ * @param {number} at     hodisa vaqti (ms) — bosqich davomiyligi uchun
+ */
+export function reduceEvent(model, kind, d = {}, at = 0) {
+  const f = model.funnel;
+
+  const touch = (key, state) => {
+    const prev = model.stages[key] || { startedAt: at };
+    const startedAt = prev.startedAt ?? at;
+    model.stages[key] = {
+      state,
+      startedAt,
+      endedAt: state === "done" || state === "failed" ? at : null,
+    };
+    model.active = state === "active" ? key : (model.active === key ? null : model.active);
+  };
+  /** `key` dan oldingi, boshlangan va hali tugamagan bosqichlarni yopadi. */
+  const closeBefore = (key) => {
+    const limit = STAGE_ORDER.indexOf(key);
+    for (const [k, st] of Object.entries(model.stages)) {
+      if (STAGE_ORDER.indexOf(k) < limit && st.state === "active") touch(k, "done");
+    }
+  };
+  const advance = (key, next) => {
+    closeBefore(key);
+    touch(key, "done");
+    if (next) touch(next, "active");
+  };
+
+  switch (kind) {
+    case "plan":
+      model.plan = d;
+      f.planned = (d.subqueries || []).length;
+      advance("plan", model.mode === "fast" ? "search" : "estimate");
+      break;
+
+    case "estimate":
+      model.estimate = {
+        mode: d.mode || model.mode,
+        buckets: numOr(d.buckets),
+        est_messages: numOr(d.est_messages),
+        est_cost_usd: d.est_cost_usd == null ? null : Number(d.est_cost_usd),
+        ceiling_usd: d.ceiling_usd == null ? null : Number(d.ceiling_usd),
+      };
+      f.bucketsPlanned = model.estimate.buckets || f.bucketsPlanned;
+      advance("estimate", "buckets");
+      break;
+
+    case "buckets":
+      f.bucketsPlanned = numOr(d.planned, f.bucketsPlanned);
+      f.chats = numOr(d.chats, f.chats);
+      f.weeks = numOr(d.weeks, f.weeks);
+      model.range = d.range || model.range || null;
+      advance("buckets", "pull");
+      break;
+
+    case "pull":
+      // `bucket_i` — tugagan bucket raqami; oqim ≤1/s bo'lgani uchun
+      // sakrab kelishi mumkin, shuning uchun **maksimum** olinadi.
+      f.bucketsDone = Math.max(f.bucketsDone, numOr(d.bucket_i));
+      f.bucketsPlanned = numOr(d.buckets, f.bucketsPlanned);
+      f.candidates = Math.max(f.candidates, numOr(d.candidates));
+      touch("pull", "active");
+      break;
+
+    case "filter":
+      f.filtered = Math.max(f.filtered, numOr(d.done));
+      f.filterTotal = Math.max(f.filterTotal, numOr(d.total));
+      f.kept = Math.max(f.kept, numOr(d.kept));
+      f.keepRate = d.keep_rate == null
+        ? (f.filtered ? f.kept / f.filtered : null)
+        : Number(d.keep_rate);
+      if (d.cost_usd != null) f.scanCost = Math.max(f.scanCost, Number(d.cost_usd));
+      if (d.cached != null) f.cached = Boolean(d.cached);
+      closeBefore("filter");
+      touch("filter", "active");
+      break;
+
+    case "select":
+      f.selected = numOr(d.evidence, f.selected);
+      f.chats = numOr(d.chats, f.chats);
+      f.weeks = numOr(d.weeks, f.weeks);
+      f.trimmed = numOr(d.quota_trimmed, f.trimmed);
+      advance("select", "map");
+      break;
+
+    case "map":
+      f.chunk = Math.max(f.chunk, numOr(d.chunk));
+      f.chunks = Math.max(f.chunks, numOr(d.chunks));
+      f.claims = Math.max(f.claims, numOr(d.claims));
+      closeBefore("map");
+      touch("map", "active");
+      break;
+
+    case "reduce":
+      f.claimsIn = numOr(d.claims_in, f.claimsIn);
+      f.contradictions = numOr(d.contradictions, f.contradictions);
+      advance("reduce", "write");
+      break;
+
+    case "search":
+      if (d.level === "server") f.served += 1;
+      else f.searched += 1;
+      touch("search", "active");
+      break;
+
+    case "cluster":
+      model.clusters = d.clusters || [];
+      advance("cluster", null);
+      break;
+
+    case "rerank":
+      f.reranked = numOr(d.kept);
+      advance("rerank", null);
+      break;
+
+    case "token":
+      closeBefore("write");
+      touch("write", "active");
+      break;
+
+    case "coverage":
+      model.coverage = d;
+      model.stoppedBy = d.stopped_by || model.stoppedBy;
+      f.bucketsDone = Math.max(f.bucketsDone, numOr(d.buckets_scanned));
+      f.bucketsPlanned = Math.max(f.bucketsPlanned, numOr(d.buckets_planned));
+      f.filtered = Math.max(f.filtered, numOr(d.filtered));
+      f.kept = Math.max(f.kept, numOr(d.kept));
+      if (d.scan_cost_usd != null) f.scanCost = Math.max(f.scanCost, Number(d.scan_cost_usd));
+      break;
+
+    case "done":
+      model.needsConfirm = Boolean(d.needs_confirm);
+      for (const [k, st] of Object.entries(model.stages)) {
+        if (st.state === "active") touch(k, model.needsConfirm ? "pending" : "done");
+      }
+      model.active = null;
+      break;
+
+    case "error":
+      model.error = d;
+      for (const [k, st] of Object.entries(model.stages)) {
+        if (st.state === "active") touch(k, "failed");
+      }
+      model.active = null;
+      break;
+
+    default:
+      break;
+  }
+  return model;
+}
+
+/**
+ * Hodisalar ketma-ketligidan yakuniy model — **sof funksiya**
+ * (`tests/test_js_lib.py` shu yerni o'lchaydi).
+ *
+ * @param {Array<{kind: string, data?: object, t?: number}>} events
+ * @param {{mode?: string}} [opts]
+ */
+export function stageModel(events, opts = {}) {
+  const model = emptyModel(opts.mode || "deep");
+  for (const ev of events || []) {
+    if (!ev || !ev.kind) continue;
+    reduceEvent(model, ev.kind, ev.data || {}, numOr(ev.t));
+  }
+  return model;
+}
+
+/* ── bosqich timeline (chizish) ───────────────────────────────────── */
+
 /** Vertikal (desktop) / gorizontal scroll-snap (mobil) bosqich reyki. */
-function stageRail() {
+function stageRail(mode) {
   const items = new Map();
+  const visible = new Set(VISIBLE_STAGES[mode] || VISIBLE_STAGES.deep);
   const rail = el("ol.stage-rail", { "aria-label": t("web.ask.stages") });
-  for (const [key, ico, label] of STAGES) {
+  for (const key of STAGE_ORDER) {
     const detail = el("span.stage-detail");
-    const body = el("div.stage-body", null, [el("span.stage-label", null, t(label)), detail]);
-    const li = el("li.stage-item", { dataset: { state: "pending", stage: key } }, [icon(ico), body]);
+    const time = el("span.stage-time");
+    const track = el("span.stage-bar", { hidden: true }, el("i", { style: { inlineSize: "0%" } }));
+    const body = el("div.stage-body", null, [
+      el("span.stage-label", null, t(STAGE_LABEL[key])), detail, time, track,
+    ]);
+    const li = el("li.stage-item", {
+      dataset: { state: "pending", stage: key },
+      hidden: !visible.has(key),
+    }, [icon(STAGE_ICON[key]), body]);
     rail.appendChild(li);
-    items.set(key, { li, detail });
+    items.set(key, { li, detail, time, track });
   }
   return { rail, items };
 }
@@ -346,6 +584,29 @@ function coveragePanel(cov, costUsd) {
   rows.appendChild(bar(t("web.deep.cov_chats"),
     `${cov.chats_searched ?? 0}/${cov.chats_total ?? 0}`, (cov.chats_searched || 0) / total));
 
+  /* Korpus ko'lami (`scale_search`): nechta bucket ko'rildi, saralash
+     voronkasi va nega to'xtadi. Bu uch satr "qancha ko'rilmadi" degan
+     savolga javob beradi — foiz emas, aniq sonlar. */
+  if (cov.buckets_planned) {
+    const done = Number(cov.buckets_scanned || 0);
+    rows.appendChild(bar(t("web.ask.cov_buckets"),
+      `${num(done)}/${num(cov.buckets_planned)}`, done / Math.max(1, cov.buckets_planned)));
+  }
+  if (cov.filtered || cov.kept) {
+    rows.appendChild(el("div.cov-funnel", null, t("web.ask.cov_funnel", {
+      scanned: num(cov.filtered || 0),
+      kept: num(cov.kept || 0),
+      analyzed: num(cov.messages_used ?? cov.evidence ?? cov.kept ?? 0),
+    })));
+  }
+  if (cov.stopped_by) {
+    const why = t(`web.ask.stopped_${cov.stopped_by}`);
+    rows.appendChild(el("div.cov-stopped", null, [
+      icon("info"),
+      el("span", null, `${t("web.ask.cov_stopped")}: ${why}`),
+    ]));
+  }
+
   const gapSet = new Set(cov.gaps || []);
   for (const title of [...gapSet].slice(0, 8)) {
     const chat = S.chats.find((c) => c.title === title);
@@ -376,6 +637,7 @@ function coveragePanel(cov, costUsd) {
     `${t("web.deep.cov_rounds")}: ${cov.rounds ?? 1}`,
   ];
   if (r.from && r.to) facts.push(`${t("web.deep.cov_range")}: ${fmtDate(r.from)} … ${fmtDate(r.to)}`);
+  if (cov.scan_cost_usd != null) facts.push(`${t("web.ask.cov_scan_cost")}: ${usd(cov.scan_cost_usd)}`);
   if (costUsd != null) facts.push(`${t("web.deep.cov_cost")}: ${usd(costUsd)}`);
   rows.appendChild(el("div.cov-facts", null, facts.join(" · ")));
 
@@ -408,77 +670,266 @@ function bar(label, value, ratio) {
   ]);
 }
 
-/* ── deep paneli ──────────────────────────────────────────────────── */
+/* ── baho kartasi ─────────────────────────────────────────────────── */
 
 /**
- * Oqim uchun deep paneli. Qaytadi: DOM tugun + oqim hodisalarini qabul
- * qiluvchi `onEvent`, va yakuniy bezak uchun `finish`.
+ * Baho kartasi shablondan (`#tpl-estimate`) klonlanadi — matnlar serverda
+ * tarjima qilinadi, bu yerda faqat `textContent`. Shablon bo'lmasa (eski
+ * sahifa keshi) — `el()` bilan zaxira karta.
  */
-export function createDeepPanel(answerEl) {
-  const { rail, items } = stageRail();
+function estimateCard() {
+  const tpl = $("#tpl-estimate");
+  const first = tpl && tpl.content && tpl.content.firstElementChild;
+  if (first) return first.cloneNode(true);
+  return el("div.estimate-card", { role: "group", "aria-label": t("web.ask.est_title") }, [
+    el("div.est-head", null, [icon("activity"), el("b", null, t("web.ask.est_title"))]),
+    el("p.est-line", { dataset: { estLine: "" } }),
+    el("div.est-confirm", { hidden: true, dataset: { estConfirm: "" } }, [
+      el("p.est-warn", null, t("web.ask.est_confirm")),
+      el("div.est-actions", null, [
+        el("button.btn.primary.small", { type: "button", dataset: { estStart: "" } }, t("web.ask.est_start")),
+        el("button.btn.ghost.small", { type: "button", dataset: { estFallback: "" } }, t("web.ask.est_fallback")),
+      ]),
+    ]),
+  ]);
+}
+
+/** Baho satri: `≈ 14 200 xabar · 186 bucket · ≈ $0.07 (shift $0.10)`. */
+function estimateLine(est) {
+  return t("web.ask.est_line", {
+    msgs: num(est.est_messages),
+    buckets: num(est.buckets),
+    cost: usd(est.est_cost_usd),
+    ceiling: usd(est.ceiling_usd),
+  });
+}
+
+/* ── bosqich tafsiloti ────────────────────────────────────────────── */
+
+/**
+ * Bitta bosqichning o'ng tomonidagi matn. Model'dan o'qiydi, shuning
+ * uchun hodisa **kechikib** kelsa ham satr izchil qoladi (har raqam
+ * `lib/fmt` orqali — mingliklar locale bo'yicha ajratiladi).
+ */
+function stageDetail(key, model, shownCandidates) {
+  const f = model.funnel;
+  switch (key) {
+    case "estimate":
+      return model.estimate
+        ? t("web.ask.step_estimate", {
+          msgs: num(model.estimate.est_messages), buckets: num(model.estimate.buckets),
+        })
+        : "";
+    case "buckets":
+      return t("web.ask.step_buckets", {
+        n: num(f.bucketsPlanned), chats: num(f.chats), weeks: num(f.weeks),
+      });
+    case "pull":
+      return t("web.ask.step_pull", {
+        i: num(f.bucketsDone), n: num(f.bucketsPlanned), candidates: num(shownCandidates),
+      });
+    case "filter":
+      return t("web.ask.step_filter", {
+        done: num(f.filtered), total: num(f.filterTotal), kept: num(f.kept),
+        rate: pct(f.keepRate == null ? 0 : f.keepRate),
+      });
+    case "select": {
+      const line = t("web.ask.step_select", {
+        n: num(f.selected), chats: num(f.chats), weeks: num(f.weeks),
+      });
+      return f.trimmed ? `${line} · ${t("web.ask.step_trimmed", { n: num(f.trimmed) })}` : line;
+    }
+    case "map":
+      return t("web.ask.step_map", { i: num(f.chunk), n: num(f.chunks), claims: num(f.claims) });
+    case "reduce":
+      return t("web.ask.step_reduce", { n: num(f.claimsIn), c: num(f.contradictions) });
+    case "search":
+      return f.served
+        ? t("web.deep.step_server", { n: f.served })
+        : t("web.deep.step_search", { n: f.searched, m: f.planned || f.searched });
+    case "cluster":
+      return t("web.deep.step_cluster", { n: (model.clusters || []).length });
+    case "rerank":
+      return f.reranked != null ? t("web.deep.step_rank", { n: num(f.reranked) }) : "";
+    default:
+      return "";
+  }
+}
+
+/** Progress bar nisbati (`null` — bar ko'rsatilmaydi). */
+function stageRatio(key, f) {
+  if (key === "pull" && f.bucketsPlanned) return f.bucketsDone / f.bucketsPlanned;
+  if (key === "filter" && f.filterTotal) return f.filtered / f.filterTotal;
+  if (key === "map" && f.chunks) return f.chunk / f.chunks;
+  return null;
+}
+
+const reducedMotion = () => {
+  try { return window.matchMedia("(prefers-reduced-motion: reduce)").matches; } catch { return false; }
+};
+
+/* ── deep paneli ──────────────────────────────────────────────────── */
+
+const TICK_MS = 500;        // o'tgan vaqtni yangilash oralig'i
+const COUNT_MS = 400;       // nomzodlar sanog'ining "o'sish" davomiyligi
+
+/**
+ * Oqim uchun deep paneli. Qaytadi: DOM tugun, oqim hodisalarini qabul
+ * qiluvchi `onEvent`, tasdiq kartasi uchun `confirm`, `stop` va yakuniy
+ * bezak uchun `finish`.
+ *
+ * Butun holat `stageModel` modelida — DOM faqat uning **ko'rinishi**.
+ * Shu tufayli kech kelgan yoki tashlab ketilgan hodisa (oqim ≤1/s
+ * siqiladi) bosqichlarni chalkashtirmaydi.
+ *
+ * @param {HTMLElement} answerEl
+ * @param {{mode?: string}} [opts]  "fast" | "deep" | "exhaustive"
+ */
+export function createDeepPanel(answerEl, opts = {}) {
+  const mode = opts.mode || "deep";
+  const model = emptyModel(mode);
+  const { rail, items } = stageRail(mode);
+  const estimate = el("div.estimate-wrap", { hidden: true });
+  // aria-live **faqat bosqich almashganda** yangilanadi: har progress
+  // yangilanishida e'lon qilinsa ekran o'quvchi sanoqni o'qib tugatmaydi.
+  const live = el("p.stage-live.sr-only", { "aria-live": "polite", "aria-atomic": "true" });
   const plan = el("div.plan-card", { hidden: true });
   const clusters = el("div.cluster-wrap", { hidden: true });
   const sources = el("div.sources-wrap", { hidden: true });
   const coverage = el("div.coverage-wrap", { hidden: true });
-  const node = el("section.deep-panel", { "aria-label": t("web.ask.deep") },
-    [rail, plan, clusters, sources, coverage]);
+  const node = el("section.deep-panel", {
+    "aria-label": t("web.ask.deep"), dataset: { mode },
+  }, [estimate, rail, live, plan, clusters, sources, coverage]);
 
-  let searched = 0, served = 0, planned = 0, clusterRows = [];
+  let shownCandidates = 0;    // ekrandagi (animatsiyalangan) qiymat
+  let countRaf = 0;
+  let ticker = 0;
+  let announced = null;
 
-  const setStage = (key, state, detail) => {
-    const item = items.get(key);
-    if (!item) return;
-    item.li.dataset.state = state;
-    if (detail != null) item.detail.textContent = detail;
-    // Tugagan bosqich yig'iladi, lekin `<li>` DOM'da qoladi — ochib ko'rish mumkin.
-    if (state === "done") item.li.classList.add("is-collapsed");
-    if (state === "active") item.li.classList.remove("is-collapsed");
+  /* ── chizish ──────────────────────────────────────────────────── */
+
+  const paint = () => {
+    const now = Date.now();
+    for (const [key, item] of items) {
+      const st = model.stages[key];
+      if (!st) continue;
+      item.li.hidden = false;
+      item.li.dataset.state = st.state;
+      item.li.classList.toggle("is-collapsed", st.state === "done");
+      const detail = stageDetail(key, model, shownCandidates);
+      if (detail) item.detail.textContent = detail;
+      const elapsed = (st.endedAt ?? now) - st.startedAt;
+      item.time.textContent = elapsed > 0 ? fmtMs(elapsed) : "";
+      const ratio = stageRatio(key, model.funnel);
+      item.track.hidden = ratio == null;
+      if (ratio != null) {
+        const p = Math.max(0, Math.min(100, Math.round(ratio * 100)));
+        item.track.firstChild.style.inlineSize = `${p}%`;
+      }
+    }
+    if (model.active !== announced) {
+      announced = model.active;
+      const item = announced ? items.get(announced) : null;
+      live.textContent = announced && item
+        ? [t(STAGE_LABEL[announced]), item.detail.textContent].filter(Boolean).join(" · ")
+        : "";
+    }
+    // Faol bosqich bor ekan — o'tgan vaqt tiriklayin sanaladi.
+    const busy = Object.values(model.stages).some((s) => s.state === "active");
+    if (busy && !ticker) ticker = setInterval(paint, TICK_MS);
+    if (!busy && ticker) { clearInterval(ticker); ticker = 0; }
   };
-  const done = (key) => setStage(key, "done");
+
+  /** Nomzodlar sanog'i sakramasin: qisqa o'sish (harakat kamaytirilsa — darhol). */
+  const countTo = (target) => {
+    if (reducedMotion() || typeof requestAnimationFrame !== "function") {
+      shownCandidates = target;
+      return;
+    }
+    const from = shownCandidates;
+    const t0 = Date.now();
+    cancelAnimationFrame(countRaf);
+    const step = () => {
+      const k = Math.min(1, (Date.now() - t0) / COUNT_MS);
+      shownCandidates = Math.round(from + (target - from) * k);
+      paint();
+      if (k < 1) countRaf = requestAnimationFrame(step);
+    };
+    countRaf = requestAnimationFrame(step);
+  };
+
+  /* ── baho / tasdiq ────────────────────────────────────────────── */
+
+  const paintEstimate = (handlers) => {
+    if (!model.estimate) return;
+    const card = estimateCard();
+    const line = card.querySelector("[data-est-line]");
+    if (line) line.textContent = estimateLine(model.estimate);
+    const box = card.querySelector("[data-est-confirm]");
+    if (box && handlers) {
+      box.hidden = false;
+      const start = card.querySelector("[data-est-start]");
+      const fallback = card.querySelector("[data-est-fallback]");
+      start?.addEventListener("click", () => { estimate.dataset.answered = "1"; handlers.onStart?.(); });
+      fallback?.addEventListener("click", () => { estimate.dataset.answered = "1"; handlers.onFallback?.(); });
+    }
+    replace(estimate, card);
+    estimate.hidden = false;
+  };
+
+  /* ── oqim ─────────────────────────────────────────────────────── */
 
   const onEvent = (kind, d) => {
-    if (kind === "plan") {
-      planned = (d.subqueries || []).length;
-      renderPlan(plan, d);
-      plan.hidden = false;
-      done("plan");
-      setStage("search", "active", t("web.deep.step_search", { n: 0, m: planned }));
-    } else if (kind === "search") {
-      if (d.level === "server") {
-        served += 1;
-        setStage("search", "active", t("web.deep.step_server", { n: served }));
-      } else {
-        searched += 1;
-        setStage("search", "active", t("web.deep.step_search", { n: searched, m: planned || searched }));
-      }
-    } else if (kind === "cluster") {
-      done("search");
-      clusterRows = d.clusters || [];
-      replace(clusters, clusterChips(clusterRows, answerEl));
-      clusters.hidden = clusterRows.length === 0;
-      setStage("cluster", "done", t("web.deep.step_cluster", { n: clusterRows.length }));
-    } else if (kind === "rerank") {
-      setStage("rerank", "done", t("web.deep.step_rank", { n: d.kept || 0 }));
-    } else if (kind === "token") {
-      done("rerank");
-      setStage("write", "active");
+    reduceEvent(model, kind, d, Date.now());
+    if (kind === "estimate") paintEstimate(null);
+    else if (kind === "plan") { renderPlan(plan, d); plan.hidden = false; }
+    else if (kind === "pull") countTo(model.funnel.candidates);
+    else if (kind === "cluster") {
+      replace(clusters, clusterChips(model.clusters, answerEl));
+      clusters.hidden = model.clusters.length === 0;
     } else if (kind === "coverage") {
       node.dataset.coverage = "1";
       replace(coverage, coveragePanel(d, null));
       coverage.hidden = false;
-    } else if (kind === "error") {
-      for (const [key, item] of items) {
-        if (item.li.dataset.state === "active") setStage(key, "failed");
+    }
+    paint();
+  };
+
+  /**
+   * `exhaustive` tasdiqsiz yuborilgan: server `estimate` + `done
+   * {needs_confirm:true}` qaytardi. Karta shu yerda tugmalar bilan qayta
+   * chiziladi — javobning o'zi hali yozilmagan.
+   */
+  const confirm = (handlers) => {
+    if (!model.estimate) {
+      model.estimate = { buckets: 0, est_messages: 0, est_cost_usd: null, ceiling_usd: null };
+    }
+    paintEstimate(handlers);
+  };
+
+  /** Stop bosilganda: faol bosqich "uzilgan" bo'lib qoladi, taymer to'xtaydi. */
+  const stop = () => {
+    for (const [key, st] of Object.entries(model.stages)) {
+      if (st.state === "active") {
+        model.stages[key] = { ...st, state: "failed", endedAt: Date.now() };
       }
     }
+    model.active = null;
+    if (typeof cancelAnimationFrame === "function") cancelAnimationFrame(countRaf);
+    paint();
+    if (ticker) { clearInterval(ticker); ticker = 0; }
   };
 
   /** `done` kelganda: bosqichlar yopiladi, manbalar va qamrov to'ldiriladi. */
   const finish = (d) => {
-    for (const [key] of items) {
-      const item = items.get(key);
-      if (item.li.dataset.state !== "failed") setStage(key, "done");
+    for (const [key, st] of Object.entries(model.stages)) {
+      if (st.state !== "failed" && st.state !== "done") {
+        model.stages[key] = { ...st, state: "done", endedAt: st.endedAt ?? Date.now() };
+      }
     }
+    model.active = null;
+    paint();
+    if (ticker) { clearInterval(ticker); ticker = 0; }
     const strip = sourceStrip(d.citations, answerEl);
     if (strip) { replace(sources, strip); sources.hidden = false; }
     linkifyCitations(answerEl, d.citations);
@@ -486,13 +937,23 @@ export function createDeepPanel(answerEl) {
       const facts = coverage.querySelector(".cov-facts");
       if (facts) facts.textContent += ` · ${t("web.deep.cov_cost")}: ${usd(d.cost_usd)}`;
     }
-    return clusterRows;
+    return model.clusters;
   };
 
-  return { node, onEvent, finish, clusters: () => clusterRows };
+  return {
+    node, onEvent, finish, confirm, stop,
+    model: () => model,
+    clusters: () => model.clusters,
+  };
 }
 
-/** Reja kartasi: subquery chiplari, oyna, chat soni. */
+/**
+ * Reja kartasi: qayta yozilgan savol, davom etish turi (badge), subquery
+ * chiplari, oyna va chat soni.
+ *
+ * `standalone_question` — modelning savolni **qanday tushungani**; uni
+ * ko'rsatish "nega bunday javob berdi" savolini oldindan yopadi.
+ */
 function renderPlan(box, plan) {
   clear(box);
   const chips = (plan.subqueries || []).slice(0, 8).map((q) => el("span.chip.tiny", null, q));
@@ -503,11 +964,27 @@ function renderPlan(box, plan) {
   facts.push(Array.isArray(plan.chats) && plan.chats.length
     ? t("web.ask.plan_chats", { n: plan.chats.length })
     : t("web.ask.plan_all_chats"));
-  box.appendChild(el("div.plan-head", null, [icon("brain"), el("b", null, t("web.ask.plan"))]));
+
+  const head = el("div.plan-head", null, [icon("brain"), el("b", null, t("web.ask.plan"))]);
+  const intent = String(plan.intent_follow_up || "");
+  if (INTENTS.has(intent)) {
+    head.appendChild(el("span.chip.tiny.intent-badge", {
+      dataset: { intent },
+    }, t(`web.ask.intent_${intent}`)));
+  }
+  box.appendChild(head);
+  if (plan.standalone_question) {
+    box.appendChild(el("p.plan-standalone", null,
+      t("web.ask.standalone", { q: String(plan.standalone_question) })));
+  }
   if (chips.length) box.appendChild(el("div.plan-chips", null, chips));
   box.appendChild(el("div.plan-facts", null, facts.join(" · ")));
 }
 
+/** Tanilgan davom turlari — begona qiymat badge bo'lib chiqmaydi. */
+const INTENTS = new Set([
+  "deeper", "repeat", "correction", "context_switch", "reformat", "explain",
+]);
 /**
  * Saqlangan (tarixdagi) deep javobi uchun panel — qamrov va manbalar
  * `context` ichida bo'lsa chiziladi, aks holda `null`.

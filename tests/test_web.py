@@ -611,10 +611,43 @@ def test_deep_disabled_refuses_both_routes(
     assert r2.status_code == 403 and r2.json()["detail"]["code"] == "chat.err.disabled"
 
 
-def test_ask_page_has_deep_toggle(client: TestClient) -> None:
+def test_ask_page_has_the_scale_mode_picker(client: TestClient) -> None:
+    """Bitta "deep" pilyulasi o'rniga uch bosqichli ko'lam tanlagichi.
+
+    Tanlagich **shablonda** turadi (JS emas): sahifa ochilishi bilan
+    ko'rinadi va yorliqlari serverda tarjima qilinadi. `radiogroup` —
+    uchtasidan bittasi tanlanadi, shuning uchun `aria-checked`.
+    """
     client.cookies.set(sec.SESSION_COOKIE, sec.issue_session(7))
     r = client.get("/ask?lang=en")
-    assert 'id="btn-deep"' in r.text and 'aria-pressed="false"' in r.text
+    assert 'id="mode-picker"' in r.text and 'role="radiogroup"' in r.text
+    for mode in ("fast", "deep", "exhaustive"):
+        assert f'data-mode="{mode}"' in r.text, mode
+    # Standart — `fast` (arzon yo'l), qolgani tanlanmagan.
+    assert r.text.count('aria-checked="true"') == 1
+    assert 'data-mode="fast" aria-checked="true"' in r.text
+    assert 'id="mode-hint"' in r.text
+    client.cookies.clear()
+
+
+def test_ask_page_has_estimate_and_confirm_markup(client: TestClient) -> None:
+    """Baho/tasdiq kartasi shablonda — JS faqat `cloneNode` + `textContent`.
+
+    `exhaustive` tasdiqsiz yuborilganda server javob yozmaydi
+    (`done {needs_confirm:true}`) — o'shanda shu karta tugmalari bilan
+    ochiladi.
+    """
+    client.cookies.set(sec.SESSION_COOKIE, sec.issue_session(7))
+    r = client.get("/ask?lang=en")
+    for marker in (
+        'id="tpl-estimate"',
+        "data-est-line",
+        "data-est-confirm",
+        "data-est-start",
+        "data-est-fallback",
+    ):
+        assert marker in r.text, marker
+    client.cookies.clear()
 
 
 def test_chat_api_accepts_deep_mode(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1476,6 +1509,54 @@ def test_new_ui_strings_exist_in_all_three_locales() -> None:
         "web.ask.empty_title",
         "web.ask.empty_text",
         "web.ask.load_earlier",
+        # v2/deep-search — ko'lam tanlagichi, baho kartasi, bosqichlar
+        "web.ask.mode",
+        "web.ask.mode_fast",
+        "web.ask.mode_deep",
+        "web.ask.mode_exhaustive",
+        "web.ask.mode_fast_desc",
+        "web.ask.mode_deep_desc",
+        "web.ask.mode_exhaustive_desc",
+        "web.ask.mode_fast_cost",
+        "web.ask.mode_deep_cost",
+        "web.ask.mode_exhaustive_cost",
+        "web.ask.mode_local_note",
+        "web.ask.est_title",
+        "web.ask.est_line",
+        "web.ask.est_confirm",
+        "web.ask.est_start",
+        "web.ask.est_fallback",
+        "web.ask.stage_estimate",
+        "web.ask.stage_buckets",
+        "web.ask.stage_pull",
+        "web.ask.stage_filter",
+        "web.ask.stage_select",
+        "web.ask.stage_map",
+        "web.ask.stage_reduce",
+        "web.ask.step_estimate",
+        "web.ask.step_buckets",
+        "web.ask.step_pull",
+        "web.ask.step_filter",
+        "web.ask.step_select",
+        "web.ask.step_trimmed",
+        "web.ask.step_map",
+        "web.ask.step_reduce",
+        "web.ask.standalone",
+        "web.ask.intent_deeper",
+        "web.ask.intent_repeat",
+        "web.ask.intent_correction",
+        "web.ask.intent_context_switch",
+        "web.ask.intent_reformat",
+        "web.ask.intent_explain",
+        "web.ask.cov_buckets",
+        "web.ask.cov_funnel",
+        "web.ask.cov_scan_cost",
+        "web.ask.cov_stopped",
+        "web.ask.stopped_yield",
+        "web.ask.stopped_ceiling",
+        "web.ask.stopped_saturation",
+        "web.ask.stopped_wall",
+        "web.ask.stopped_complete",
     ]
     missing = {name: [k for k in required if not data.get(k)] for name, data in locales.items()}
     assert not any(missing.values()), missing

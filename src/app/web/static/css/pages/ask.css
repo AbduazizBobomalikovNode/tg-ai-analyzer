@@ -409,3 +409,64 @@
 @media (prefers-reduced-motion: reduce) {
   .cite-chip, .conv-act { transition: none; }
 }
+
+/* ══ Rejim tanlagich (ko'lam) ══════════════════════════════════════
+   `.segment` (components.css) ustida: u `aria-selected` bilan ishlaydi,
+   bu yerda esa radiogroup — `aria-checked`. Composer'da joy tor, shuning
+   uchun tavsif va narx tanlangan bosqich uchun bitta satrda (`#mode-hint`). */
+.mode-seg { flex: none; }
+.mode-seg button[aria-checked="true"] {
+  background: var(--panel); color: var(--text); box-shadow: var(--sh-1);
+}
+.mode-seg button { min-block-size: 28px; padding-inline: var(--s-2); }
+.mode-hint {
+  margin: var(--s-1) 0 0; font-size: var(--fs-xs); color: var(--muted);
+  line-height: var(--lh-body);
+}
+
+/* ══ Baho kartasi ══════════════════════════════════════════════════
+   Bosqich chizig'ining birinchi elementi: u yerda "qancha bo'ladi"
+   degan savolga javob **boshlanishidan oldin** turadi. */
+.estimate-card {
+  display: grid; gap: var(--s-2);
+  padding: var(--s-3); border: 1px solid var(--border);
+  border-radius: var(--r-md, 12px); background: var(--panel);
+}
+.est-head { display: flex; align-items: center; gap: var(--s-2); font-size: var(--fs-sm); }
+.est-head .icon { inline-size: 15px; block-size: 15px; flex: none; }
+.est-line { margin: 0; font-size: var(--fs-sm); color: var(--text); }
+.est-confirm { display: grid; gap: var(--s-2); padding-block-start: var(--s-2); border-block-start: 1px solid var(--border-soft); }
+.est-warn { margin: 0; font-size: var(--fs-xs); color: var(--warn-text, var(--muted)); }
+.est-actions { display: flex; gap: var(--s-2); flex-wrap: wrap; }
+
+/* ══ Bosqich: o'tgan vaqt va progress ══════════════════════════════ */
+.stage-time { font-size: var(--fs-xs); color: var(--faint); font-variant-numeric: tabular-nums; }
+.stage-bar {
+  flex: 1 1 120px; min-inline-size: 60px; max-inline-size: 180px;
+  block-size: 4px; border-radius: 2px; background: var(--panel-3); overflow: hidden;
+}
+.stage-bar i {
+  display: block; block-size: 100%; background: var(--stage-active);
+  transition: inline-size var(--t-hover, .2s) linear;
+}
+.stage-item[data-state="done"] .stage-bar i { background: var(--stage-done); }
+
+/* ══ Reja: tushunilgan savol va davom turi ═════════════════════════ */
+.plan-standalone { margin: 0; font-size: var(--fs-sm); color: var(--text); }
+.intent-badge { margin-inline-start: var(--s-2); color: var(--muted); }
+
+/* ══ Qamrov: voronka va to'xtash sababi ════════════════════════════ */
+.cov-funnel { font-size: var(--fs-xs); color: var(--text); font-variant-numeric: tabular-nums; }
+.cov-stopped { display: flex; align-items: center; gap: var(--s-2); font-size: var(--fs-xs); color: var(--muted); }
+.cov-stopped .icon { inline-size: 14px; block-size: 14px; flex: none; }
+
+@media (max-width: 860px) {
+  /* Tanlagich yorliqlari mobilda ham to'liq ko'rinadi — chunki bu
+     narx haqidagi qaror, qisqartma emas. */
+  .composer-tools { flex-wrap: wrap; }
+  .stage-bar { max-inline-size: 120px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stage-bar i { transition: none; }
+}

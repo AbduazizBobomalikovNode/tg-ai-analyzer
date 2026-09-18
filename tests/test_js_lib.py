@@ -487,6 +487,218 @@ def test_safe_href_allows_only_http_and_tg() -> None:
     assert out[4:] == [None] * (len(cases) - 4)
 
 
+#: `/api/deep/stream` ning korpus rejimi (`services/scale_search.py`) uchun
+#: namunaviy hodisa ketma-ketligi — shartnomadagi tartibda.
+_SCALE_EVENTS: list[dict[str, object]] = [
+    {
+        "kind": "plan",
+        "t": 0,
+        "data": {
+            "subqueries": ["a", "b"],
+            "standalone_question": "To'lov qachon kelishildi?",
+            "intent_follow_up": "deeper",
+        },
+    },
+    {
+        "kind": "estimate",
+        "t": 500,
+        "data": {
+            "mode": "deep",
+            "buckets": 186,
+            "est_messages": 14200,
+            "est_cost_usd": 0.07,
+            "ceiling_usd": 0.1,
+        },
+    },
+    {
+        "kind": "buckets",
+        "t": 900,
+        "data": {
+            "planned": 186,
+            "chats": 24,
+            "weeks": 30,
+            "range": {"from": "2026-01-01", "to": "2026-09-01"},
+        },
+    },
+    {"kind": "pull", "t": 1500, "data": {"bucket_i": 40, "buckets": 186, "candidates": 900}},
+    {"kind": "pull", "t": 2500, "data": {"bucket_i": 186, "buckets": 186, "candidates": 2000}},
+    {
+        "kind": "filter",
+        "t": 3500,
+        "data": {
+            "done": 1000,
+            "total": 2000,
+            "kept": 320,
+            "keep_rate": 0.32,
+            "cost_usd": 0.01,
+            "cached": False,
+        },
+    },
+    {
+        "kind": "filter",
+        "t": 4500,
+        "data": {
+            "done": 2000,
+            "total": 2000,
+            "kept": 640,
+            "keep_rate": 0.32,
+            "cost_usd": 0.02,
+            "cached": False,
+        },
+    },
+    {
+        "kind": "select",
+        "t": 5000,
+        "data": {
+            "evidence": 512,
+            "chats": 18,
+            "weeks": 26,
+            "quota_trimmed": 128,
+        },
+    },
+    {"kind": "map", "t": 6000, "data": {"chunk": 1, "chunks": 4, "claims": 12}},
+    {"kind": "map", "t": 8000, "data": {"chunk": 4, "chunks": 4, "claims": 48}},
+    {"kind": "reduce", "t": 9000, "data": {"claims_in": 48, "contradictions": 3}},
+    {"kind": "token", "t": 9500, "data": {"text": "…"}},
+    {
+        "kind": "coverage",
+        "t": 12000,
+        "data": {
+            "chats_searched": 18,
+            "chats_total": 24,
+            "messages_scanned": 2000,
+            "buckets_scanned": 186,
+            "buckets_planned": 186,
+            "filtered": 2000,
+            "kept": 640,
+            "stopped_by": "saturation",
+            "scan_cost_usd": 0.02,
+        },
+    },
+    {"kind": "done", "t": 12500, "data": {"citations": []}},
+]
+
+
+def test_stage_model_folds_a_scale_run() -> None:
+    """`deep.js::stageModel` — hodisalar → bosqich holati va voronka sonlari.
+
+    Bu reduktor sof: DOM ham, i18n ham yo'q, shuning uchun node'da
+    to'g'ridan-to'g'ri o'lchanadi. U yuzaning **yagona haqiqati** — rail,
+    progress barlar va qamrov paneli faqat shu modelning ko'rinishi, ya'ni
+    kech kelgan yoki siqilgan hodisa (`pull`/`filter` ≤1/s) bosqichlarni
+    chalkashtira olmaydi.
+    """
+    script = """
+const m = M.stageModel(INPUT, { mode: "deep" });
+const states = {};
+for (const [k, v] of Object.entries(m.stages)) states[k] = v.state;
+const elapsed = {};
+for (const [k, v] of Object.entries(m.stages)) elapsed[k] = (v.endedAt ?? 0) - v.startedAt;
+process.stdout.write(JSON.stringify({
+  states, elapsed, funnel: m.funnel, stopped: m.stoppedBy,
+  active: m.active, needsConfirm: m.needsConfirm,
+  standalone: m.plan && m.plan.standalone_question,
+  intent: m.plan && m.plan.intent_follow_up,
+  estimate: m.estimate,
+}));
+"""
+    out = _ask_module("deep.js", script, _SCALE_EVENTS)
+
+    # Hamma bosqich yopildi, yozish `done` bilan tugadi.
+    assert out["states"] == {
+        "plan": "done",
+        "estimate": "done",
+        "buckets": "done",
+        "pull": "done",
+        "filter": "done",
+        "select": "done",
+        "map": "done",
+        "reduce": "done",
+        "write": "done",
+    }
+    assert out["active"] is None and out["needsConfirm"] is False
+
+    f = out["funnel"]
+    # Voronka: 2000 saralandi → 640 mos → 512 tahlilga (kvota 128 ni kesdi).
+    assert (f["filtered"], f["filterTotal"], f["kept"]) == (2000, 2000, 640)
+    assert f["keepRate"] == 0.32
+    assert (f["selected"], f["trimmed"]) == (512, 128)
+    assert (f["bucketsDone"], f["bucketsPlanned"]) == (186, 186)
+    assert f["candidates"] == 2000
+    assert (f["chunk"], f["chunks"], f["claims"]) == (4, 4, 48)
+    assert (f["claimsIn"], f["contradictions"]) == (48, 3)
+    assert f["scanCost"] == 0.02
+    assert out["stopped"] == "saturation"
+
+    # Reja kartasi uchun: qayta yozilgan savol va davom turi saqlanadi.
+    assert out["standalone"] == "To'lov qachon kelishildi?"
+    assert out["intent"] == "deeper"
+    assert out["estimate"]["est_messages"] == 14200
+
+    # Davomiylik: bosqich keyingisi kelganda yopiladi — `pull` 900→3500,
+    # `filter` 3500→5000 (`select` kelganda).
+    assert out["elapsed"]["pull"] == 2600
+    assert out["elapsed"]["filter"] == 1500
+
+
+def test_stage_model_handles_confirm_and_abort() -> None:
+    """Tasdiq kutilayotgan `exhaustive` — bosqichlar `done` bo'lib qolmaydi.
+
+    Server `estimate` dan keyin `done {needs_confirm:true}` yuboradi va
+    javob yozilmaydi; UI shu holatda "tugadi" deb ko'rsatsa foydalanuvchi
+    javobni behuda kutadi. `error` esa faol bosqichni `failed` qiladi.
+    """
+    script = """
+const confirmRun = M.stageModel(INPUT.confirm, { mode: "exhaustive" });
+const failRun = M.stageModel(INPUT.fail, { mode: "deep" });
+const pick = (m) => {
+  const s = {};
+  for (const [k, v] of Object.entries(m.stages)) s[k] = v.state;
+  return s;
+};
+process.stdout.write(JSON.stringify({
+  confirmStates: pick(confirmRun),
+  needsConfirm: confirmRun.needsConfirm,
+  estimate: confirmRun.estimate,
+  failStates: pick(failRun),
+  error: failRun.error && failRun.error.code,
+}));
+"""
+    payload = {
+        "confirm": [
+            {
+                "kind": "estimate",
+                "t": 0,
+                "data": {
+                    "mode": "exhaustive",
+                    "buckets": 900,
+                    "est_messages": 120000,
+                    "est_cost_usd": 0.48,
+                    "ceiling_usd": 0.5,
+                },
+            },
+            {"kind": "done", "t": 10, "data": {"needs_confirm": True}},
+        ],
+        "fail": [
+            {"kind": "estimate", "t": 0, "data": {"buckets": 4, "est_messages": 100}},
+            {"kind": "buckets", "t": 5, "data": {"planned": 4}},
+            {"kind": "pull", "t": 9, "data": {"bucket_i": 1, "buckets": 4, "candidates": 10}},
+            {"kind": "error", "t": 20, "data": {"code": "chat.err.budget"}},
+        ],
+    }
+    out = _ask_module("deep.js", script, payload)
+
+    assert out["needsConfirm"] is True
+    assert out["estimate"]["ceiling_usd"] == 0.5
+    # Tasdiq kutilmoqda — hech bir bosqich "tugagan" emas.
+    assert out["confirmStates"]["buckets"] == "pending"
+    assert "write" not in out["confirmStates"]
+
+    assert out["failStates"]["pull"] == "failed"
+    assert out["failStates"]["buckets"] == "done"
+    assert out["error"] == "chat.err.budget"
+
+
 def test_page_modules_only_use_icons_that_exist() -> None:
     """Sahifa modullari `icon("x")` / `iconButton("x", …)` bilan chaqiradi.
 
