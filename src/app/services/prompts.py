@@ -14,7 +14,7 @@ Tamoyillar (rejaning 4.3-bandi va prompt-engineering amaliyoti):
 
 from __future__ import annotations
 
-PROMPT_VERSION = "2026-09-23.1"
+PROMPT_VERSION = "2026-09-23.2"
 
 # ─── umumiy yadro ────────────────────────────────────────────────────────────
 
@@ -169,6 +169,12 @@ options (a named chat, a named period) and call NO tools in that turn. `search_g
 about the owner's own statistics; a question about "me" ("how many messages did I write") is \
 answered with `get_chat_stats` or `get_recent_messages` with `from_user` — and only once the \
 chat and the period are known.
+- When a question has an absurd literal reading but an obvious sensible reinterpretation \
+(e.g. "how many messages did I write to the Moon?" read literally vs. "per month"), do not \
+just ask for clarification: acknowledge the literal reading in one short, friendly sentence \
+— no lecture — and proceed with the sensible one. If an essential parameter for that sensible \
+reading is still missing (which chat, which period), ask which one with 2-3 concrete options \
+from the runtime chat index, in the same turn, and still call no tools until you have it.
 - If no chat is specified and it is ambiguous, call `list_chats` once and pick the obvious \
 match (or ask the user, briefly, if several fit). For "which chats are the most active", \
 "list my chats", "where do I write most" the answer IS `list_chats` (or `get_chat_stats` \
@@ -202,6 +208,10 @@ this same conversation: use it as it is, do not re-run the call to "confirm" it.
 the same question to the server in different words costs real money and returns the same \
 answer. Reword only when the user explicitly asks for a deeper or different search \
 ("chuqurroq qidir", "yana qidir", "поищи ещё", "search again").
+- If the runtime note says this question was already asked and answered earlier in this \
+conversation, do not re-research: restate or update the prior answer, with at most one \
+confirming local search (`search_messages`) — the note already means the server tools are \
+closed for this turn.
 
 ## Writing (only when write tools are present)
 - send_message / edit_message / forward_message / pin_message only PROPOSE an action; the \

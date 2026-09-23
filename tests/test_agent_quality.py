@@ -1101,6 +1101,25 @@ def test_agent_prompt_points_a_named_month_at_since_until() -> None:
     assert "`since`/`until` to `get_window_digest`" in AGENT_SYSTEM_PROMPT
 
 
+def test_agent_prompt_acknowledges_absurd_puns_and_still_offers_the_sensible_reading() -> None:
+    """`absurd-01`: "Oyga qancha xabar yozdim?" — javob faqat qayta so'ramasin.
+
+    Judge kutgani: literal o'qishning imkonsizligini (Oyga — Oy bilan chat
+    yo'q) yumshoq aytish VA "oyiga" (per month) talqinini taklif qilish/davom
+    ettirish, ikkalasi ham bitta javobda. Ilgari prompt faqat "clarify" derdi —
+    model shunchaki qayta so'rab qo'ya qolardi.
+    """
+    from app.services.prompts import AGENT_SYSTEM_PROMPT
+
+    low = AGENT_SYSTEM_PROMPT.lower()
+    assert "absurd literal reading" in low
+    assert "sensible reinterpretation" in low
+    assert "one short, friendly sentence" in low
+    assert "no lecture" in low
+    assert "2-3 concrete options" in low
+    assert "call no tools until you have it" in low
+
+
 def _wire_chat(monkeypatch: pytest.MonkeyPatch, chat: Chat) -> None:
     async def fake_resolve(ctx: Any, args: Any) -> Chat:
         return chat

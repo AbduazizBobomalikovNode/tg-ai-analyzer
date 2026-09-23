@@ -816,3 +816,160 @@ async def test_repeat_guard_is_off_without_a_cache_hit(
 ) -> None:
     out = await _run_q(_repeat_turn(), "Shu guruhda ijara narxi haqida nima deyishgan?")
     assert len(fake_tool) == 2 and out.repeat_guard is False
+
+
+# ─── takror-turn aniqlash (kod darajasida, eval `econ-01` turn 2) ────────────
+#
+# `is_repeat_turn` — tool hali chaqirilmasdan turib, kodda: yangi savol
+# suhbatning so'nggi user turn'lariga mos keladimi. Cache-hit asosidagi
+# `repeat_seen` (yuqorida) faqat *keyin*, natijaga qarab ishlaydi; jonli
+# yiqilishda model bir xil savolni ikki xil so'z bilan qidirib, kesh hech
+# qachon urilmagan edi (`get_message_context` + ikkita `search_messages`).
+
+_PRIOR_Q = "Shu guruhda ijara narxi haqida nima deyishgan?"
+
+
+def test_is_repeat_turn_exact_match() -> None:
+    history = [Msg.user(_PRIOR_Q), Msg.assistant("avvalgi javob")]
+    assert A.is_repeat_turn(_PRIOR_Q, history) is True
+
+
+def test_is_repeat_turn_matches_reordered_words_via_jaccard() -> None:
+    """Bir xil so'zlar, boshqa tartib — aniq moslik emas, lekin Jaccard=1.0."""
+    history = [Msg.user(_PRIOR_Q)]
+    reordered = "Ijara narxi haqida shu guruhda nima deyishgan?"
+    assert A.is_repeat_turn(reordered, history) is True
+
+
+def test_is_repeat_turn_false_for_a_different_question() -> None:
+    history = [Msg.user(_PRIOR_Q)]
+    assert A.is_repeat_turn("Shu guruhda ovqat narxi haqida nima deyishgan?", history) is False
+
+
+def test_is_repeat_turn_false_when_user_asks_to_dig_deeper() -> None:
+    history = [Msg.user(_PRIOR_Q)]
+    assert A.is_repeat_turn("chuqurroq qidir", history) is False
+    assert A.is_repeat_turn(f"{_PRIOR_Q} Yana qidir.", history) is False
+
+
+@pytest.mark.parametrize("short", ["va?", ".", "nega", "ha", ""])
+def test_is_repeat_turn_never_fires_for_very_short_questions(short: str) -> None:
+    """Soxta pozitiv xavfi: qisqa savollar ('va?', '.') token soni past — hech
+    qachon repeat deb hisoblanmaydi, garchi tarixda aynan o'sha matn bo'lsa ham."""
+    history = [Msg.user(short)]
+    assert A.is_repeat_turn(short, history) is False
+
+
+async def test_repeat_turn_marks_runtime_note_and_blocks_server_search_from_the_first_call(
+    fake_tool: list[dict[str, Any]],
+) -> None:
+    """Takroriy turn kod darajasida aniqlanadi — kesh urilishini kutmaydi.
+
+    Jonli yiqilish naqshi: `search_messages` (boshqa so'zlar) + `get_message_context`
+    + `search_telegram` — 3 bajarilgan chaqiruv, scenario cap esa 2.
+    """
+    llm = _LLM(
+        [
+            _res(
+                calls=[
+                    ToolCall("a", "search_messages", {"query": "ijara narxi"}),
+                    ToolCall("b", "search_telegram", {"query": "ijara"}),
+                    ToolCall("c", "get_message_context", {"message_id": 1}),
+                ]
+            ),
+            _res("javob"),
+        ]
+    )
+    out = await A.run_agent(
+        _Session(),  # type: ignore[arg-type]
+        user_id=1,
+        account_id=5,
+        question=_PRIOR_Q,
+        history=[Msg.user(_PRIOR_Q), Msg.assistant("avvalgi javob")],
+        pinned_chat=None,
+        locale="uz",
+        llm=llm,  # type: ignore[arg-type]
+    )
+    note_msg = llm.calls[0]["messages"][-1].content
+    assert A.REPEAT_TURN_NOTE in note_msg
+    blocked = [c for c in out.tool_calls if c.get("blocked") == "repeat_guard"]
+    assert [c["tool"] for c in blocked] == ["search_telegram"]
+    assert [n["name"] for n in fake_tool] == ["search_messages", "get_message_context"]
+    assert out.calls_executed == 2  # scenario cap: max_tool_calls: 2
+    assert out.repeat_guard is True
+    assert out.text == "javob"
+
+
+async def test_repeat_turn_call_cap_blocks_a_second_local_search_beyond_the_budget(
+    fake_tool: list[dict[str, Any]],
+) -> None:
+    """Repeat-turn qopqog'i faqat server tool'larga emas — bajariladigan
+    chaqiruvlar (lokal ham) 2 tadan oshmaydi."""
+    llm = _LLM(
+        [
+            _res(
+                calls=[
+                    ToolCall("a", "search_messages", {"query": "ijara narxi"}),
+                    ToolCall("b", "search_messages", {"query": "ijara"}),
+                    ToolCall("c", "search_messages", {"query": "kvartira"}),
+                ]
+            ),
+            _res("javob"),
+        ]
+    )
+    out = await A.run_agent(
+        _Session(),  # type: ignore[arg-type]
+        user_id=1,
+        account_id=5,
+        question=_PRIOR_Q,
+        history=[Msg.user(_PRIOR_Q)],
+        pinned_chat=None,
+        locale="uz",
+        llm=llm,  # type: ignore[arg-type]
+    )
+    assert out.calls_executed == 2 and len(fake_tool) == 2
+    tool_msgs = [m for m in llm.calls[1]["messages"] if m.role.value == "tool"]
+    assert any("budget of 2 tool calls is used up" in m.content for m in tool_msgs)
+
+
+async def test_repeat_turn_does_not_fire_for_a_different_question(
+    fake_tool: list[dict[str, Any]],
+) -> None:
+    llm = _LLM([_res(calls=[ToolCall("a", "search_telegram", {"query": "ovqat"})]), _res("javob")])
+    out = await A.run_agent(
+        _Session(),  # type: ignore[arg-type]
+        user_id=1,
+        account_id=5,
+        question="Shu guruhda ovqat narxi haqida nima deyishgan?",
+        history=[Msg.user(_PRIOR_Q)],
+        pinned_chat=None,
+        locale="uz",
+        llm=llm,  # type: ignore[arg-type]
+    )
+    assert A.REPEAT_TURN_NOTE not in llm.calls[0]["messages"][-1].content
+    assert out.repeat_guard is False
+    assert len(fake_tool) == 1  # search_telegram bajarildi, to'silmadi
+
+
+async def test_repeat_turn_steps_aside_for_an_explicit_deeper_request(
+    fake_tool: list[dict[str, Any]],
+) -> None:
+    llm = _LLM(
+        [
+            _res(calls=[ToolCall("a", "search_telegram", {"query": "ijara narxi batafsil"})]),
+            _res("javob"),
+        ]
+    )
+    out = await A.run_agent(
+        _Session(),  # type: ignore[arg-type]
+        user_id=1,
+        account_id=5,
+        question=f"{_PRIOR_Q} Chuqurroq qidir.",
+        history=[Msg.user(_PRIOR_Q)],
+        pinned_chat=None,
+        locale="uz",
+        llm=llm,  # type: ignore[arg-type]
+    )
+    assert A.REPEAT_TURN_NOTE not in llm.calls[0]["messages"][-1].content
+    assert out.repeat_guard is False
+    assert len(fake_tool) == 1  # "chuqurroq qidir" — server qidiruv to'silmaydi

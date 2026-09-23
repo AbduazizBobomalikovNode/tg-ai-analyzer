@@ -28,7 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db.models import ActionStatus, AgentAction, AgentRun, Chat
-from app.llm import LLM, LLMError, Msg, Task
+from app.llm import LLM, LLMError, Msg, Role, Task
 from app.llm.pricing import estimate_cost
 from app.logging import get_logger
 from app.observability import TOOL_CALLS
@@ -37,6 +37,7 @@ from app.services import tools as T
 from app.services import write_tools as W
 from app.services.prompts import AGENT_SYSTEM_PROMPT, runtime_note
 from app.services.search import est_tokens
+from app.services.textnorm import uz_fold
 
 log = get_logger(__name__)
 
@@ -154,6 +155,61 @@ def wants_deeper_search(text: str) -> bool:
     return bool(_DEEPER_INTENT.search(text or ""))
 
 
+#: Takror-**turn** aniqlash (eval `econ-01`, turn 2): yangi savol shu suhbatda
+#: allaqachon berilganmi — modelning tool tanlashiga qarab emas, kirishdan
+#: **oldin** kodda hal qilinadi. Oxirgi shuncha user turn tekshiriladi.
+REPEAT_TURN_HISTORY = 6
+#: Fold qilingan token to'plamlari Jaccard o'xshashligi shu chegaradan yuqori
+#: bo'lsa — "aynan o'sha savol" deymiz (kichik imlo/so'z tartibi farqi bilan).
+REPEAT_TURN_JACCARD_MIN = 0.9
+#: Bundan kam fold-token bo'lgan savol hech qachon repeat deb hisoblanmaydi —
+#: qisqa savollar ("va?", ".") tasodifan mos kelishi mumkin (soxta pozitiv
+#: xavfi token sonidan yuqori bo'ladi).
+REPEAT_TURN_MIN_TOKENS = 3
+#: Model uchun runtime_note'ga qo'shiladigan qator (o'zbekcha — user tilidan
+#: mustaqil, chunki bu ko'rsatma modelga, foydalanuvchiga emas).
+REPEAT_TURN_NOTE = (
+    "Bu savol shu suhbatda allaqachon berilgan va javob berilgan — avvalgi javobni "
+    "qisqacha takrorla/yangila; ko'pi bilan bitta lokal qidiruv (search_messages) "
+    "ruxsat, server qidiruvi yo'q."
+)
+
+
+def _repeat_fold(text: str) -> str:
+    """`uz_fold` (kirill→lotin, apostrofsiz) + `fold_query` (tinish olib tashlash)."""
+    return fold_query(uz_fold(text))
+
+
+def is_repeat_turn(question: str, history: list[Msg]) -> bool:
+    """Yangi savol so'nggi `REPEAT_TURN_HISTORY` user turn'idan biriga mos keladimi.
+
+    Aniq moslik yoki fold qilingan token to'plamlari Jaccard >= `REPEAT_TURN_JACCARD_MIN`
+    — va foydalanuvchi aniq "chuqurroq qidir" demagan bo'lsa
+    (`wants_deeper_search`, takror-qo'riqchi istisnosi shu yerda ham amal qiladi).
+    Juda qisqa savollar hech qachon repeat emas — `REPEAT_TURN_MIN_TOKENS`.
+    """
+    if wants_deeper_search(question):
+        return False
+    q_folded = _repeat_fold(question)
+    q_tokens = set(q_folded.split())
+    if len(q_tokens) < REPEAT_TURN_MIN_TOKENS:
+        return False
+    prior_user_turns = [m.content for m in history if m.role == Role.USER]
+    for prior in prior_user_turns[-REPEAT_TURN_HISTORY:]:
+        p_folded = _repeat_fold(prior)
+        if not p_folded:
+            continue
+        if p_folded == q_folded:
+            return True
+        p_tokens = set(p_folded.split())
+        if not p_tokens:
+            continue
+        union = q_tokens | p_tokens
+        if union and len(q_tokens & p_tokens) / len(union) >= REPEAT_TURN_JACCARD_MIN:
+            return True
+    return False
+
+
 def _blocked_reresearch(call: Any, local_queries: dict[str, int]) -> T.ToolResult | None:
     """Aynan shu so'zlar lokal qidiruvda topilgan bo'lsa — serverga chiqarmaymiz.
 
@@ -199,6 +255,12 @@ async def run_agent(
     (`services/tool_cache.py`, 10 daqiqa) tushadi va bir xil savol qaytarilganda
     qidiruv **ikkinchi marta yugurmaydi** (eval `econ-01`). Kesh bo'lmasa
     (Redis yo'q, `conversation_id` yo'q) hech narsa o'zgarmaydi.
+
+    `question` `history` ichidagi so'nggi user turn'lardan biriga mos kelsa
+    (`is_repeat_turn`) — bu **kodda**, model hech narsa chaqirmasdan turib
+    aniqlanadi: `runtime_note` ogohlantirish qatori oladi, server qidiruv
+    tool'lari birinchi iteratsiyadanoq to'siladi va bu yugurishning bajariladigan
+    chaqiruvlar qopqog'i 2 taga tushadi (eval `econ-01`, turn 2).
     """
     s = get_settings()
     client = llm or LLM()
@@ -222,6 +284,13 @@ async def run_agent(
         llm=client,
         user_id=user_id,
     )
+    # Takror-turn aniqlash **tool chaqirilishidan oldin**, kodda: shu savol
+    # suhbatning so'nggi user turn'lariga mos keladimi (eval `econ-01`, turn 2).
+    # Model tool tanlovidan mustaqil — cache-hit asosidagi qo'riqchi (pastda,
+    # `repeat_seen`) faqat *keyin*, natijaga qarab ishlaydi.
+    deeper_requested = wants_deeper_search(question)
+    repeat_turn = is_repeat_turn(question, history)
+
     # Chat ro'yxati user turn'ida beriladi — system'da emas (kesh buzilmasin).
     # Shu tufayli agent `list_chats` chaqirmasdan chat nomini aniqlaydi.
     note = runtime_note(
@@ -236,6 +305,8 @@ async def run_agent(
             compact=True,
         ),
     )
+    if repeat_turn:
+        note = f"{note}\n\n{REPEAT_TURN_NOTE}"
     messages: list[Msg] = [
         Msg.system(AGENT_SYSTEM_PROMPT),
         *history,
@@ -266,12 +337,17 @@ async def run_agent(
     # shu suhbatda allaqachon berilgan) server qidiruvlari shu yugurishda
     # yopiladi — model boshqa so'zlar bilan qayta urinmasin (eval `econ-01`:
     # `cache_hits=2`, keyin ikkita qayta yozilgan `search_telegram`, $0.086).
-    repeat_seen = False
-    repeat_guard = False
-    deeper_requested = wants_deeper_search(question)
+    # `repeat_turn` yuqorida allaqachon aniqlangan bo'lsa — qo'riqchi **birinchi**
+    # iteratsiyadanoq ishlaydi, kesh urilishini kutmaydi.
+    repeat_seen = repeat_turn
+    repeat_guard = repeat_turn
     tools_off = False  # byudjet tugadi — keyingi chaqiruv tool'siz
     cost_usd: float | None = None
     call_cap = max(1, int(s.agent_max_executed_calls or MAX_EXECUTED_CALLS_PER_RUN))
+    if repeat_turn:
+        # Takroriy turn — ko'pi bilan ikkita bajarilgan chaqiruv (bitta
+        # tasdiqlovchi lokal qidiruv + bitta qo'shimcha), server qidiruvi yo'q.
+        call_cap = min(call_cap, 2)
     cost_cap = float(s.agent_max_cost_usd or 0.0)
 
     for it in range(1, max_iter + 1):
