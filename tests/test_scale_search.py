@@ -455,7 +455,37 @@ async def test_filter_early_stops_when_the_yield_dies() -> None:
     assert stats.stopped_by == "yield"
     # 20 partiya bo'lardi; erta to'xtash ancha oldin kesdi
     assert llm.count(SCALE_FILTER_PROMPT) < 20
-    assert stats.truncated is True
+    # `yield` — rejaning bajarilmagan qismi **emas**: byudjet ham, vaqt ham
+    # tugamagan, shunchaki yangi natija kelmay qo'ygan. Ilgari bu ham
+    # `truncated` edi va javob ostida "byudjet tugadi" deb yozilardi.
+    assert stats.truncated is False and stats.pool_capped is False
+
+
+@pytest.mark.asyncio
+async def test_a_pool_over_the_filter_cap_is_truncated() -> None:
+    """Qopqoqdan oshgan hovuz — nomzodlar **umuman** ko'rilmadi, bu uzilish."""
+    pool = [_hit(i) for i in range(1, 12)]
+    llm = FakeLLM(filter='{"keep": []}')
+    meter = _meter(llm)
+    stats = SC.ScanStats()
+    await SC.filter_batched(
+        session_factory_of(FakeSession()),
+        account_id=1,
+        question="to'lov",
+        pool=pool,
+        bucket_of={},
+        meter=meter,
+        budget=_budget(meter),
+        taint=DS._Taint(),
+        stats=stats,
+        mode="fast",  # FILTER_MAX["fast"] == 0 → butun hovuz qopqoqdan tashqarida
+    )
+    assert stats.pool_capped is True and stats.truncated is True
+
+
+def test_only_wall_and_ceiling_mean_the_plan_was_not_done() -> None:
+    assert [r for r in SC.STOP_REASONS if SC.is_truncating(r)] == ["ceiling", "wall"]
+    assert SC.is_truncating("yield") is False and SC.is_truncating("saturation") is False
 
 
 @pytest.mark.asyncio

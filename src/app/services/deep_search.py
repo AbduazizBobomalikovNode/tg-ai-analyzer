@@ -184,11 +184,30 @@ DISCOVER_RE = re.compile(
         (
             rf"a{_APO}zo\s+bo{_APO}lmagan",
             rf"obuna\s+bo{_APO}lmagan",
+            r"obuna\s+emas",
             r"не\s+подписан",
             r"не\s+состою",
             r"not\s+subscribed",
             r"not\s+a\s+member",
+            r"not\s+in\s+(?:those|these|the)\s+channels",
+            # (2) "ochiq / ommaviy / boshqa kanallar" — **kanal so'zi bilan
+            # bog'langan**: yolg'iz "boshqa" yoki "ochiq" hech narsani
+            # anglatmaydi va o'z arxividan chiqishni arzon qilib qo'yardi.
+            r"ochiq\s+kanal",
+            r"ommaviy\s+kanal",
+            r"boshqa\s+kanal",
+            r"begona\s+kanal",
+            r"public\s+channel",
+            r"other\s+channels",
+            r"публичн\w*\s+канал",
+            r"открыт\w*\s+канал",
+            r"друг\w*\s+канал",
+            # (3) "butun Telegram bo'ylab". "Internet" ataylab yo'q —
+            # "internetda nima yozishdi" ko'pincha o'z chatlari haqida.
             r"butun\s+telegram",
+            r"telegram\w*\s+umuman",
+            r"umuman\s+telegram",
+            r"telegram[\s-]*wide",
             r"по\s+всему\s+telegram",
             r"across\s+telegram",
         )
@@ -397,6 +416,14 @@ class Coverage:
     buckets_planned: int = 0
     filtered: int = 0
     kept: int = 0
+    #: Tirsakdan **keyingi** hovuz (`ScanStats.elbow`) va u tashlab yuborgani.
+    #: Bu "byudjet" emas, reyting: funnel'ni "1935 ko'rildi → 544 reytingdan
+    #: o'tdi → 35 ishlatildi" deb halol ko'rsatish uchun kerak.
+    ranked: int = 0
+    dropped_by_ranking: int = 0
+    #: Hovuz filtr qopqog'idan katta edi — bir qism nomzod **umuman**
+    #: ko'rilmadi (tirsakdan farqli: bu rejaning bajarilmagan qismi).
+    pool_capped: bool = False
     stopped_by: str = ""  # yield | ceiling | saturation | wall | complete | estimate_only
     # Bosqich sabablari alohida: `filter` hovuzni tugatib "complete" deganda
     # ham `pull` qo'ygan "wall" ko'rinib tursin (`scale_search.combine_stops`).
@@ -410,6 +437,9 @@ class Coverage:
             "buckets_planned": self.buckets_planned,
             "filtered": self.filtered,
             "kept": self.kept,
+            "ranked": self.ranked,
+            "dropped_by_ranking": self.dropped_by_ranking,
+            "pool_capped": self.pool_capped,
             "stopped_by": self.stopped_by,
             "pull_stopped_by": self.pull_stopped_by,
             "filter_stopped_by": self.filter_stopped_by,
@@ -997,6 +1027,8 @@ def parse_plan(
     if DISCOVER_RE.search(plan.standalone_question):
         # Savolning o'zi "men ularda yo'qman" deyapti — model `global` deb
         # qo'ysa ham serverning ochiq qismiga chiqiladi.
+        if plan.server_scope != "discover":
+            log.info("deep.plan_discover", was=plan.server_scope)
         plan.server_scope = "discover"
     return _apply_follow_up(plan, history)
 
@@ -1548,11 +1580,20 @@ async def escalate(
     events: EventSink | None,
     max_calls: int = SERVER_MAX_CALLS,
 ) -> ServerOutcome:
-    """Pog'onalar **tartibda**: gap-chatlar → global → discover (aniq so'ralsa).
+    """Pog'onalar **tartibda**: (discover) → gap-chatlar → global.
 
     Har pog'ona `max_calls` va `MethodBuckets` bilan chegaralangan. To'lgan
     bucket — xato emas: o'sha pog'ona **o'tkazib yuboriladi** va qamrovga
     `server_skipped` bo'lib yoziladi (kutish yo'q, retry yo'q).
+
+    `server_scope == "discover"` bo'lsa ochiq kanallar pog'onasi **birinchi**
+    yuguradi: u aynan so'ralgan narsa, qolgan ikkitasi esa egasining o'z
+    arxivi. Ilgari u oxirida turardi va shu bilan birga chat/global
+    pog'onalari **butunlay o'chirilardi** — natijada bitta noto'g'ri
+    `discover` butun server qamrovini yo'q qilar, to'g'risi esa o'z
+    chatlaridagi kontekstdan mahrum bo'lardi. Endi discover o'ziga kerakli
+    chaqiruvni **zaxiralab** oladi (1 ta, bepul slot tugasa +2 tekin zaxira
+    yo'l), qolgani odatdagidek pastga oqadi.
     """
     outcome = ServerOutcome()
     if max_calls <= 0 or not plan.subqueries:
@@ -1563,8 +1604,58 @@ async def escalate(
     def budget_left() -> bool:
         return outcome.calls < max_calls
 
+    async def global_rung() -> None:
+        """`messages.SearchGlobal` — egasi kirgan barcha chatlar bo'ylab."""
+        res = await TG.server_search_global(
+            account_id,
+            subqueries[0],
+            scope=global_scope_for(plan, chats_by_id),
+            since=plan.since,
+            until=plan.until,
+            limit=SERVER_LIMIT,
+        )
+        got = await _absorb(session_factory, account_id, res, outcome)
+        outcome.hits.extend(got)
+        if res.calls:
+            outcome.rungs.append("global")
+        _log_rung("global", res.calls, len(got), res.error_text or res.rate_limited)
+        await _emit(
+            events, "search", subquery=subqueries[0], hits=len(got), level="server", rung="global"
+        )
+
+    # ── 0-pog'ona: ochiq kanallar — FAQAT aniq so'ralganda, va **birinchi** ──
+    # Zaxiralangan joy: discover so'ralgan yugurishda u boshqa pog'onalar
+    # byudjetni yeb qo'yishidan oldin yuguradi.
+    if plan.server_scope == "discover":
+        res = await TG.server_discover(account_id, subqueries[0])
+        got = await _absorb(session_factory, account_id, res, outcome)
+        outcome.hits.extend(got)
+        if res.calls:
+            outcome.rungs.append("discover")
+        if res.note:
+            log.info("deep.discover_note", note=res.note[:160], code=res.note_code)
+        _log_rung("discover", res.calls, len(got), res.note)
+        await _emit(
+            events, "search", subquery=subqueries[0], hits=len(got), level="server", rung="discover"
+        )
+        # Bepul slot tugagan (`note_code`) → qidiruvning o'zi **umuman
+        # bo'lmagan**. Buni jim o'tkazib yuborish yolg'on bo'lardi: sabab
+        # qamrovga yoziladi va tekin zaxira yo'l sinab ko'riladi (Stars
+        # hech qachon emas).
+        if res.note_code == "post_search_flood":
+            outcome.notes.append(_discover_skip_note(res.retry_at))
+            if budget_left():
+                chans = await TG.server_channel_search(account_id, subqueries[0])
+                outcome.calls += chans.calls
+                if chans.rate_limited and chans.rate_limited not in outcome.skipped:
+                    outcome.skipped.append(chans.rate_limited)
+                if chans.channels:
+                    outcome.rungs.append("channels")
+                    outcome.notes.append(_channels_note(chans.channels))
+                _log_rung("channels", chans.calls, len(chans.channels), chans.error_text)
+
     # ── 1-pog'ona: bo'shliqli chatlar ichida (messages.Search) ──────────────
-    if plan.server_scope != "discover":
+    if budget_left():
         stop = False
         for chat in list(gap_chats)[:SERVER_GAP_CHATS_MAX]:
             if stop:
@@ -1603,75 +1694,8 @@ async def escalate(
                     break
 
     # ── 2-pog'ona: akkaunt kirgan barcha chatlar (messages.SearchGlobal) ────
-    if plan.server_scope != "discover" and budget_left():
-        scope = global_scope_for(plan, chats_by_id)
-        res = await TG.server_search_global(
-            account_id,
-            subqueries[0],
-            scope=scope,
-            since=plan.since,
-            until=plan.until,
-            limit=SERVER_LIMIT,
-        )
-        got = await _absorb(session_factory, account_id, res, outcome)
-        outcome.hits.extend(got)
-        if res.calls:
-            outcome.rungs.append("global")
-        _log_rung("global", res.calls, len(got), res.error_text or res.rate_limited)
-        await _emit(
-            events, "search", subquery=subqueries[0], hits=len(got), level="server", rung="global"
-        )
-
-    # ── 3-pog'ona: ochiq kanallar — FAQAT aniq so'ralganda ──────────────────
-    if plan.server_scope == "discover" and budget_left():
-        res = await TG.server_discover(account_id, subqueries[0])
-        got = await _absorb(session_factory, account_id, res, outcome)
-        outcome.hits.extend(got)
-        if res.calls:
-            outcome.rungs.append("discover")
-        if res.note:
-            log.info("deep.discover_note", note=res.note[:160], code=res.note_code)
-        _log_rung("discover", res.calls, len(got), res.note)
-        await _emit(
-            events, "search", subquery=subqueries[0], hits=len(got), level="server", rung="discover"
-        )
-        # Bepul slot tugagan (`note_code`) → qidiruvning o'zi **umuman
-        # bo'lmagan**. Buni jim o'tkazib yuborish yolg'on bo'lardi: sabab
-        # qamrovga yoziladi va ikkita tekin zaxira yo'l sinab ko'riladi
-        # (Stars hech qachon emas).
-        if res.note_code == "post_search_flood":
-            outcome.notes.append(_discover_skip_note(res.retry_at))
-            if budget_left():
-                chans = await TG.server_channel_search(account_id, subqueries[0])
-                outcome.calls += chans.calls
-                if chans.rate_limited and chans.rate_limited not in outcome.skipped:
-                    outcome.skipped.append(chans.rate_limited)
-                if chans.channels:
-                    outcome.rungs.append("channels")
-                    outcome.notes.append(_channels_note(chans.channels))
-                _log_rung("channels", chans.calls, len(chans.channels), chans.error_text)
-            if budget_left() and "global" not in outcome.rungs:
-                gres = await TG.server_search_global(
-                    account_id,
-                    subqueries[0],
-                    scope=global_scope_for(plan, chats_by_id),
-                    since=plan.since,
-                    until=plan.until,
-                    limit=SERVER_LIMIT,
-                )
-                gfound = await _absorb(session_factory, account_id, gres, outcome)
-                outcome.hits.extend(gfound)
-                if gres.calls:
-                    outcome.rungs.append("global")
-                _log_rung("global", gres.calls, len(gfound), gres.error_text)
-                await _emit(
-                    events,
-                    "search",
-                    subquery=subqueries[0],
-                    hits=len(gfound),
-                    level="server",
-                    rung="global",
-                )
+    if budget_left() and "global" not in outcome.rungs:
+        await global_rung()
 
     log.info(
         "deep.server_rungs",
@@ -2092,11 +2116,20 @@ def build_coverage(
         cov.filtered = int(scan.get("filter_done") or 0)
         cov.messages_scanned = int(scan.get("pulled") or 0)
         cov.kept = int(scan.get("kept") or 0)
+        cov.ranked = int(scan.get("elbow") or 0)
+        cov.dropped_by_ranking = max(0, cov.messages_scanned - cov.ranked)
+        cov.pool_capped = bool(scan.get("pool_capped"))
         cov.stopped_by = str(scan.get("stopped_by") or "")
         cov.pull_stopped_by = str(scan.get("pull_stopped_by") or "")
         cov.filter_stopped_by = str(scan.get("filter_stopped_by") or "")
         cov.scan_cost_usd = float(scan.get("scan_cost_usd") or 0.0)
-        if scan.get("truncated"):
+        # `truncated` = **rejalashtirilgan ish bajarilmadi**. Bosqich sababi
+        # buni tasdiqlamasa (`yield`, `saturation`, `complete`) bayroq
+        # ko'tarilmaydi — aks holda oddiy tirsak kesishi javob ostida
+        # "byudjet tugadi" degan yolg'on ogohlantirish berardi.
+        from app.services import scale_search as SC
+
+        if scan.get("truncated") and (SC.is_truncating(cov.stopped_by) or cov.pool_capped):
             cov.truncated = True
     cov.confidence = confidence_of(
         evidence=len(evidence),
@@ -2117,6 +2150,12 @@ _COVERAGE_LABELS: dict[str, dict[str, str]] = {
         "rounds": "raund",
         "nothing": "hech narsa skanlanmadi",
         "truncated": "byudjet tugadi — dalillarning bir qismi tashlandi",
+        "cut_wall": "vaqt byudjeti tugadi — rejaning bir qismi skanlanmadi",
+        "cut_ceiling": "xarajat qopqog'iga yetildi — rejaning bir qismi skanlanmadi",
+        "cut_cap": "hovuz filtr qopqog'idan katta — bir qism nomzod ko'rilmadi",
+        "cut_saturation": "dalil yetarli — keyingi nomzodlar takrorlanardi",
+        "cut_ranking": "ahamiyati past nomzodlar reyting bilan tashlandi",
+        "ranked": "reytingdan o'tgan",
         "confidence": "ishonch",
         "server": "Telegram server qidiruvi",
         "server_skipped": "shift to'ldi, o'tkazib yuborildi",
@@ -2141,6 +2180,12 @@ _COVERAGE_LABELS: dict[str, dict[str, str]] = {
         "rounds": "раунд",
         "nothing": "ничего не просканировано",
         "truncated": "бюджет исчерпан — часть свидетельств отброшена",
+        "cut_wall": "вышло время — часть плана не просканирована",
+        "cut_ceiling": "достигнут потолок расходов — часть плана не просканирована",
+        "cut_cap": "пул больше потолка фильтра — часть кандидатов не просмотрена",
+        "cut_saturation": "свидетельств достаточно — дальше шли повторы",
+        "cut_ranking": "малозначимые кандидаты отброшены ранжированием",
+        "ranked": "прошло ранжирование",
         "confidence": "уверенность",
         "server": "Поиск на сервере Telegram",
         "server_skipped": "лимит исчерпан, шаг пропущен",
@@ -2165,6 +2210,12 @@ _COVERAGE_LABELS: dict[str, dict[str, str]] = {
         "rounds": "round",
         "nothing": "nothing was scanned",
         "truncated": "budget exhausted — some evidence was dropped",
+        "cut_wall": "the time budget ran out — part of the plan was not scanned",
+        "cut_ceiling": "the cost ceiling was reached — part of the plan was not scanned",
+        "cut_cap": "the pool was larger than the filter cap — some candidates were not looked at",
+        "cut_saturation": "enough evidence — further candidates repeated what was already found",
+        "cut_ranking": "low-relevance candidates were dropped by ranking",
+        "ranked": "ranked",
         "confidence": "confidence",
         "server": "Telegram server search",
         "server_skipped": "rate limit reached, rung skipped",
@@ -2181,6 +2232,35 @@ _COVERAGE_LABELS: dict[str, dict[str, str]] = {
         "stop_estimate_only": "estimate only — the scan did not start",
     },
 }
+
+
+def coverage_disclosure(cov: Coverage, lab: dict[str, str]) -> str:
+    """Javob ostidagi **bitta** oshkoralik qatori — sababga qarab.
+
+    Nega kerak: ilgari har qanday `truncated` bitta matn berardi —
+    "byudjet tugadi — dalillarning bir qismi tashlandi". Jonli yugurishda
+    `stopped_by="yield"`, narx $0.06 (qopqoq $0.10), vaqt yetarli, tirsak
+    1935 nomzoddan 544 tasini qoldirgan edi: ogohlantirish **yolg'on** edi.
+    Endi matn to'xtash sababidan kelib chiqadi va faqat rejaning
+    bajarilmagan qismi ⚠️ bilan belgilanadi; reyting kesishi — oddiy ish,
+    u ogohlantirish emas, raqam.
+    """
+    if cov.stopped_by == "wall":
+        return f"⚠️ {lab['cut_wall']}"
+    if cov.stopped_by == "ceiling":
+        return f"⚠️ {lab['cut_ceiling']}"
+    if cov.pool_capped:
+        return f"⚠️ {lab['cut_cap']}"
+    if cov.truncated:
+        # Skandan tashqari uzilish: qattiq devor, sintez byudjeti, kesilgan
+        # javob — bular haqiqatan byudjet.
+        return f"⚠️ {lab['truncated']}"
+    if cov.stopped_by == "saturation":
+        return lab["cut_saturation"]
+    if cov.dropped_by_ranking > 0:
+        kept = cov.ranked or cov.kept
+        return f"{lab['cut_ranking']} ({kept}/{cov.messages_scanned})"
+    return ""
 
 
 def render_coverage(cov: Coverage, *, locale: str = "uz") -> str:
@@ -2211,9 +2291,10 @@ def render_coverage(cov: Coverage, *, locale: str = "uz") -> str:
         # Skan bo'lgan bo'lsa qamrov "nechta chat" emas, "nechta bo'lak"
         # bilan o'lchanadi — va **nega to'xtaganini** ham aytadi.
         stop = lab.get(f"stop_{cov.stopped_by}", cov.stopped_by)
+        ranked = f"{lab['ranked']}: {cov.ranked} · " if cov.ranked else ""
         out += (
             f"\n\n{lab['scan']}: {cov.buckets_scanned}/{cov.buckets_planned} "
-            f"{lab['buckets']} · {lab['filtered']}: {cov.filtered} · "
+            f"{lab['buckets']} · {ranked}{lab['filtered']}: {cov.filtered} · "
             f"{lab['kept']}: {cov.kept} · {stop}"
         )
     if cov.server_rungs_used:
@@ -2225,8 +2306,9 @@ def render_coverage(cov: Coverage, *, locale: str = "uz") -> str:
         out += f"\n\n⚠️ {lab['server_skipped']}: {', '.join(cov.server_skipped)}"
     for note in cov.server_notes[:3]:
         out += f"\n\n⚠️ {note}"
-    if cov.truncated:
-        out += f"\n\n⚠️ {lab['truncated']}"
+    disclosure = coverage_disclosure(cov, lab)
+    if disclosure:
+        out += f"\n\n{disclosure}"
     return out
 
 
@@ -3168,6 +3250,7 @@ __all__ = [
     "build_plan_prompt",
     "build_reflect_prompt",
     "confidence_of",
+    "coverage_disclosure",
     "earliest_synced_at",
     "escalate",
     "evidence_refs",

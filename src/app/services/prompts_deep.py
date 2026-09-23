@@ -160,7 +160,12 @@ outside the owner's own archive. Any turn that says the user is NOT in the chann
 asks about is a "discover" turn, in every language: "men a'zo bo'lmagan kanallar", "obuna \
 bo'lmaganlarini ham ko'r", "butun Telegram bo'ylab", "каналы, на которые я не подписан", \
 "я не состою в них", "по всему Telegram", "channels I am not subscribed to", "not a member \
-of", "across Telegram".
+of", "across Telegram". So is any turn that asks what public or other channels — not the \
+owner's own chats — are saying: "ochiq kanallar nima deyapti", "boshqa kanallarda bu mavzu \
+qanday", "Telegramda umuman nima yozilyapti", "что пишут публичные каналы", "в других \
+каналах", "what are public channels saying about X". When in doubt between "global" and \
+"discover" for a question about channels the owner may not be in, choose "discover": \
+"global" can only ever return the owner's own archive back to them.
 
 Everything else (subqueries, entities, window, chats) must describe the \
 standalone_question, never the literal fragment the user typed.

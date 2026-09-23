@@ -154,10 +154,14 @@ bitta akkaunt kvotasini bo'lishadi).
   (c) `lookup`/`person` oynasi eng eski sinxronlangan xabardan oldin,
   (d) planner/reflect `server_scope` ni `global`/`discover` qilgan.
   `server_scope="none"` hammasini bekor qiladi.
-- Pog'onalar tartibi: bo'shliqli chatlar (`messages.Search`, top 2 subquery) →
-  global (`messages.SearchGlobal`) → `discover` (`channels.SearchPosts`) —
-  oxirgisi **faqat** `server_scope=="discover"` da. Jami
-  `DEEP_SERVER_MAX_CALLS` (6) chaqiruv.
+- Pog'onalar tartibi: `discover` (`channels.SearchPosts`) — **faqat**
+  `server_scope=="discover"` da, lekin shunda **birinchi va zaxiralangan**
+  1 chaqiruv (bepul slot tugasa +2 tekin zaxira yo'l, `contacts.Search`) →
+  bo'shliqli chatlar (`messages.Search`, top 2 subquery) → global
+  (`messages.SearchGlobal`). Ilgari `discover` oxirida turardi va shu bilan
+  qolgan ikki pog'onani **butunlay o'chirardi** — bitta noto'g'ri `discover`
+  butun server qamrovini yo'q qilardi. Jami `DEEP_SERVER_MAX_CALLS` (6)
+  chaqiruv.
 - To'lgan bucket — xato emas: pog'ona **o'tkazib yuboriladi** va
   `coverage.server_skipped` ga yoziladi. Kutish yo'q, retry yo'q.
 - Server hitlari alohida RRF ro'yxati (og'irlik 0.9). Lokal `chats` da bor
@@ -233,6 +237,12 @@ qamrov va sitata validatsiyasi — o'sha (`deep_search.py`).
 - Tugun embedding'lari bo'lmasa (`retrieval_node_embeddings` bo'sh) reja
   butunlay `(chat, oy)` zaxira yo'liga tushadi — quvur ishlaydi, lekin
   granularlik oylik. Prod'da bu hozir shunday.
+- **`truncated` faqat rejalashtirilgan ish bajarilmaganda** rost bo'ladi:
+  `stopped_by` `wall`/`ceiling` yoki `pool_capped` (`is_truncating`).
+  `yield`/`saturation`/`complete` — truncation **emas**, oddiy to'yinish.
+  Tirsak kesishi (reytingdan past nomzodlarni tashlash) ham o'zi bilan
+  `truncated=True` opkelmaydi — u neytral holda `Coverage.ranked` /
+  `dropped_by_ranking` orqali `coverage_disclosure` ga chiqadi.
 - Konstantalar o'lchovdan: `evals/perf/bench.py --sections scale` va
   `evals/calibrate_filter.py` (filtr chegarasi uchun recall jadvali).
   O'zgartirishdan oldin **kamida 3 marta** qayta o'lchang.
@@ -300,6 +310,13 @@ yugurtiring, bitta yugurish hech narsani isbotlamaydi).
   "adjust once" buni to'xtatmadi.
 - **`seen_calls`** — aynan bir xil `(tool, args)` ikkinchi marta bajarilmaydi;
   natija o'zgarmaydi, DB/MTProto ishi va token esa behuda ketadi.
+- **Takroriy qidiruv qopqog'i.** Yugurish ichida `(cached)` natija
+  ko'ringandan keyin server qidiruv tool'lari (`search_telegram`/
+  `search_global`/`search_calendar`/`discover_channels`) shu turn uchun
+  bloklanadi — foydalanuvchi ochiq-oydin chuqurroq/qayta qidirishni
+  so'ramasa (`agent.wants_deeper_search`). Bloklangan chaqiruv ham
+  `calls_log` ga `blocked="repeat_guard"` bilan tushadi, `context_used.
+  repeat_guard` ham belgilanadi.
 - **Suhbat keshi (`services/tool_cache.py`)** — `seen_calls` bitta yugurish
   ichida ishlaydi, bu esa **turn'lar orasida**: kalit `(conversation_id, tool,
   buklangan args)`, TTL 10 daqiqa, Redis (yo'q bo'lsa kesh ham yo'q). Faqat

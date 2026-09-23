@@ -242,6 +242,20 @@ STOP_RANK: dict[str, int] = {
 }
 
 
+#: **Rejalashtirilgan ish bajarilmay qolgan** sabablar. Faqat shular
+#: `truncated=True` beradi. Nega ro'yxat kerak: `yield` (tirsak/erta to'xtash)
+#: ham `truncated` qilib qo'yilar edi va javob ostida "byudjet tugadi" degan
+#: **yolg'on** ogohlantirish chiqardi — jonli yugurishda narx $0.06 (qopqoq
+#: $0.10), vaqt yetarli, shunchaki reyting past nomzodlarni tashlagan edi.
+#: Tirsak kesishi — odatdagi reyting ishi, uzilish emas.
+TRUNCATING_STOPS = ("wall", "ceiling")
+
+
+def is_truncating(reason: str) -> bool:
+    """Shu sabab "reja bajarilmadi" deganimi? (`yield`/`saturation` — yo'q.)"""
+    return reason in TRUNCATING_STOPS
+
+
 def combine_stops(*reasons: str) -> str:
     """Bir necha bosqich sababidan eng ustunini tanlaydi (`STOP_RANK`)."""
     best = "complete"
@@ -497,6 +511,10 @@ class ScanStats:
     pull_stopped_by: str = ""
     filter_stopped_by: str = ""
     stopped_by: str = "complete"
+    #: Hovuz rejim qopqog'idan (`FILTER_MAX`) katta bo'lgani — bir qism
+    #: nomzod filtrga **umuman** kirmadi. Tirsakdan farqli: bu reja bilan
+    #: qopqoq orasidagi uzilish, reyting emas.
+    pool_capped: bool = False
     truncated: bool = False
     scan_cost_usd: float = 0.0
     est_cost_usd: float = 0.0
@@ -547,6 +565,7 @@ class ScanStats:
             "pull_stopped_by": self.pull_stopped_by,
             "filter_stopped_by": self.filter_stopped_by,
             "stopped_by": self.stopped_by,
+            "pool_capped": self.pool_capped,
             "truncated": self.truncated,
             "scan_cost_usd": round(self.scan_cost_usd, 6),
         }
@@ -1336,8 +1355,12 @@ async def filter_batched(
     st = stats or ScanStats()
     limited = list(pool)[: filter_max_for(mode, follow_up)]
     st.filter_total = len(limited)
+    # Qopqoqdan oshgan nomzodlar **umuman** ko'rilmaydi — bu rejaning
+    # bajarilmagan qismi, shuning uchun bo'sh hovuz yo'lida ham belgilanadi.
+    st.pool_capped = st.pool_capped or len(pool) > len(limited)
     if not limited:
         st.note_stop("filter", "complete")
+        st.truncated = st.truncated or st.pool_capped
         return []
 
     q_hash = question_hash(question)
@@ -1439,7 +1462,11 @@ async def filter_batched(
     # mumkin — uni "complete" bilan **bekor qilmaymiz** (`combine_stops`:
     # wall/ceiling yield/complete dan ustun turadi).
     st.note_stop("filter", stopped or "complete")
-    st.truncated = st.truncated or bool(stopped) or len(pool) > len(limited)
+    # `truncated` — **rejalashtirilgan ish bajarilmadi** degani, "hovuz
+    # kesildi" emas. Vaqt/narx to'xtatgan bo'lsa yoki hovuz rejim qopqog'idan
+    # katta bo'lib bir qismi umuman ko'rilmagan bo'lsa — ha. `yield` esa
+    # oddiy reyting natijasi (`TRUNCATING_STOPS` izohiga qarang).
+    st.truncated = st.truncated or is_truncating(stopped) or st.pool_capped
     st.filter_done = processed + st.cache_hits
     st.scan_cost_usd = round(budget.spent, 6)
 
@@ -2224,6 +2251,7 @@ __all__ = [
     "SOFT_MAX_EVIDENCE",
     "STOP_RANK",
     "STOP_REASONS",
+    "TRUNCATING_STOPS",
     "Bucket",
     "Claim",
     "Estimate",
@@ -2250,6 +2278,7 @@ __all__ = [
     "filter_line",
     "filter_max_for",
     "force_all_chats",
+    "is_truncating",
     "iso_label",
     "map_chunks",
     "map_claims",
