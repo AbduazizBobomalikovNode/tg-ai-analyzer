@@ -167,5 +167,19 @@
     contextDefault: {{ context_default | int }},
     contextMax: {{ context_max | int }},
   });
+
+  // Composer balandligini `--composer-h` ga yozadi (`document.body`) —
+  // xabarlar ro'yxati (`css/pages/ask.css` `.thread`) shu bilan pastki
+  // padding oladi, aks holda oxirgi qator composer ostida "qolib"
+  // ko'rinadi (kontekst chiplari/hint matni bilan composer balandligi
+  // o'zgarganda ham to'g'ri qoladi).
+  const composerEl = document.getElementById("composer");
+  if (composerEl && typeof ResizeObserver !== "undefined") {
+    const setComposerHeight = () => {
+      document.body.style.setProperty("--composer-h", `${composerEl.offsetHeight}px`);
+    };
+    new ResizeObserver(setComposerHeight).observe(composerEl);
+    setComposerHeight();
+  }
 </script>
 {% endblock %}

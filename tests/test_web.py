@@ -2183,3 +2183,59 @@ def test_dashboard_model_row_and_sparse_chart_have_plain_language_fallbacks() ->
     assert 't("web.dash.model_unknown")' in js
     assert 't("web.dash.chart_sparse")' in js
     assert "max(6px" in js
+
+
+def test_ask_thread_bottom_padding_tracks_composer_height() -> None:
+    """L177 (scale_live2 skrinshotlar): oxirgi bosqich qatori composer
+    ostida "qolib" ko'rinardi — endi ro'yxat composer'ning **haqiqiy**
+    balandligiga teng pastki padding oladi. `--composer-h`ni
+    `templates/ask.html` `ResizeObserver` orqali `document.body`ga
+    yozadi (composer torroq/kengroq bo'lganda ham to'g'ri qoladi);
+    ask.css faqat zaxira qiymat va `calc()` ishlatishini o'zi bilan
+    isbotlaydi."""
+    css = (_WEB / "static/css/pages/ask.css").read_text(encoding="utf-8")
+    assert "--composer-h" in css, "zaxira qiymat e'lon qilinishi kerak"
+    assert "calc(var(--composer-h)" in css, "`.thread` padding shu bilan hisoblanishi kerak"
+    html = (_WEB / "templates/ask.html").read_text(encoding="utf-8")
+    assert "ResizeObserver" in html
+    assert '"--composer-h"' in html
+    assert "document.body.style.setProperty" in html
+
+
+def test_ask_answer_container_is_wider_than_prose_measure() -> None:
+    """L177: 1440px desktopda javob konteyneri ~533px edi (68ch), uch
+    ustunli jadval doim gorizontal scroll qilardi — endi `.thread` 88ch
+    gacha kengayadi, lekin oddiy matn (paragraf/sarlavha/ro'yxat) hamon
+    68ch (`--measure`) da qoladi, faqat jadval/kod/chart/mermaid to'liq
+    konteyner kengligini egallaydi (>=900px'da yana ham kengroq bleed
+    qiladi — mavjud qoida)."""
+    css = (_WEB / "static/css/pages/ask.css").read_text(encoding="utf-8")
+    assert "max-inline-size: min(100%, 88ch)" in css, "`.thread` kengaytirilishi kerak"
+    assert "max-inline-size: var(--measure);" in css, "oddiy matn 68ch da qolishi kerak"
+    # Jadval/kod/chart/mermaid — default cap + >=900px bleed, ikkalasida ham chegara olinadi.
+    bleed_classes = (
+        ".md-table-wrap",
+        ".md-table-tools",
+        "figure.md-code",
+        "figure.md-chart",
+        "figure.md-mermaid",
+    )
+    for cls in bleed_classes:
+        assert f".msg-a .answer > {cls}" in css, cls
+
+
+def test_ask_stage_items_wrap_instead_of_clipping_on_mobile() -> None:
+    """L177 mobil skrinshot: bosqich reykasidagi faol elementning
+    tafsilot/vaqt matni ("Baholash 1.5…") ekran chetida kesilib
+    ko'rinardi. Endi item hech qachon ko'rinadigan kenglikdan oshmaydi
+    (`max-inline-size: 100%`) — matn kerak bo'lsa `.stage-body`ning
+    `flex-wrap`i bilan ichkarida ko'p qatorga o'tadi, scroll bilan
+    "topish" shart emas."""
+    css = (_WEB / "static/css/pages/ask.css").read_text(encoding="utf-8")
+    idx_media = css.index("@media (max-width: 860px)")
+    idx_rule = css.index(".stage-rail .stage-item {", idx_media)
+    block = css[idx_rule : idx_rule + 300]
+    assert "max-inline-size: 100%" in block
+    assert "min-inline-size: 0" in block
+    assert "overflow-wrap: anywhere" in css[idx_rule : idx_rule + 500]
+    assert ".stage-detail, .stage-time" in css[idx_rule : idx_rule + 500]

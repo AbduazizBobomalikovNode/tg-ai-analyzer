@@ -9,7 +9,11 @@
  *     "tugagach joyini o'zgartir" qoidasi yo'q.
  */
 
-.page-ask { --list-w: 300px; }
+/* `--composer-h` — composer'ning real balandligi (`templates/ask.html`
+   `ResizeObserver` orqali `document.body`ga yozadi). Shu yerdagi qiymat
+   faqat JS ishga tushmaguncha (yoki `ResizeObserver` yo'q muhitda) zaxira —
+   composer bir qatorli holatiga yaqin. */
+.page-ask { --list-w: 300px; --composer-h: 150px; }
 
 /* ══ Chip — bu sahifadagi asosiy boshqaruv shakli ══════════════════
    `.chip-btn` (components.css) dan farqi: chip bu yerda ham tugma, ham
@@ -95,10 +99,21 @@
 
 /* ══ Tred ══════════════════════════════════════════════════════════ */
 .ask-pane { position: relative; min-block-size: 0; }
-.thread-scroll { flex: 1 1 auto; overflow: auto; overscroll-behavior: contain; }
+/* `scroll-padding-block-end` — dastur (`scrollIntoView`/anchor) composer
+   ostiga tushib qolmasin, `--composer-h` orqali (pastda, `.thread` ham
+   shu bilan). */
+.thread-scroll {
+  flex: 1 1 auto; overflow: auto; overscroll-behavior: contain;
+  scroll-padding-block-end: var(--composer-h);
+}
 .thread {
-  inline-size: 100%; max-inline-size: var(--measure); margin-inline: auto;
-  padding: var(--s-5) var(--s-4) var(--s-6);
+  /* 88ch — jadval/kod/chart uchun joy (pastda, `.msg-a .answer`); oddiy
+     matn hamon 68ch (`--measure`) da qoladi. Pane torroq bo'lsa (300px
+     ro'yxat + 64px rail dan qolgani) `min(100%, …)` uni siqadi. */
+  inline-size: 100%; max-inline-size: min(100%, 88ch); margin-inline: auto;
+  /* Pastki padding composer balandligiga teng — oxirgi xabar composer
+     ostida "qolib" ko'rinmasin (L177: mobilda ayniqsa sezilardi). */
+  padding: var(--s-5) var(--s-4) calc(var(--composer-h) + var(--s-4));
   display: flex; flex-direction: column; gap: var(--s-5);
 }
 .thread-top { display: flex; justify-content: center; }
@@ -138,9 +153,23 @@
 }
 .answer-truncated .icon { inline-size: 15px; block-size: 15px; flex: none; }
 
-/* Javob ichidagi bloklar o'lchovdan kengroq nafas oladi: jadval, kod,
-   diagramma va chart o'qilishi uchun joy talab qiladi, matn esa 68ch da
-   qoladi. Faqat keng ekranda — mobilda chetlar allaqachon tor. */
+/* Javob konteyneri (`.thread`) 88ch gacha kengaydi, lekin oddiy matn
+   (paragraf, sarlavha, ro'yxat, callout) o'qish uchun 68ch (`--measure`)
+   da qolishi kerak — aks holda qator juda uzun bo'lib ko'zni charchatadi.
+   Jadval/kod/diagramma/chart esa qamrov kengroq bo'lishidan foyda ko'radi
+   (uch ustunli jadval 68ch'da har doim gorizontal scroll qilardi, L177). */
+.msg-a .answer > * { max-inline-size: var(--measure); }
+.msg-a .answer > .md-table-wrap,
+.msg-a .answer > .md-table-tools,
+.msg-a .answer > figure.md-code,
+.msg-a .answer > figure.md-chart,
+.msg-a .answer > figure.md-mermaid {
+  max-inline-size: none;
+}
+
+/* >=900px'da bu bloklar konteynerdan ham kengroq "bleed" qiladi — matn
+   68ch da qolgani uchun jadval/kod xira ko'rinmasin. Faqat keng ekranda —
+   mobilda chetlar allaqachon tor. */
 @media (min-width: 900px) {
   .msg-a .answer > .md-table-wrap,
   .msg-a .answer > .md-table-tools,
@@ -439,7 +468,18 @@
     display: flex; gap: var(--s-3); overflow-x: auto;
     scroll-snap-type: x proximity; padding-block-end: var(--s-1);
   }
-  .stage-rail .stage-item { flex: none; scroll-snap-align: start; }
+  /* Item hech qachon ekrandan kengroq bo'lmasin — aks holda tafsilot/vaqt
+     matni (`.stage-detail`/`.stage-time`) rayning ko'rinadigan qismidan
+     tashqarida qolib "kesilgandek" ko'rinardi (L177 mobil skrinshot:
+     "Baholash 1.5…"). `max-inline-size: 100%` itemni rayning o'zi kabi
+     ko'rinadigan kenglikka qisadi, `.stage-body`ning `flex-wrap: wrap`i
+     esa matnni ichkarida ko'p qatorga o'tkazadi — scroll shart emas. */
+  .stage-rail .stage-item {
+    flex: none; scroll-snap-align: start;
+    max-inline-size: 100%; min-inline-size: 0;
+  }
+  .stage-body { min-inline-size: 0; }
+  .stage-detail, .stage-time { min-inline-size: 0; overflow-wrap: anywhere; }
   .msg-u .bubble { max-inline-size: 92%; }
 }
 
