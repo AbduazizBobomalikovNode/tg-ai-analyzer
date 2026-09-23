@@ -433,3 +433,33 @@ def test_conversation_missing_detects_only_the_deleted_conversation() -> None:
     assert not conversation_missing({"_http_error": 404, "_body": '{"code":"account.not_found"}'})
     assert not conversation_missing({"_http_error": 429, "_body": "rate_limited"})
     assert not conversation_missing({"text": "ok"})
+
+
+# ─── senariy rubrikalari ─────────────────────────────────────────────────────
+
+
+def _scenario(scenario_id: str) -> dict:
+    import yaml
+
+    root = Path(__file__).resolve().parents[1] / "evals" / "conversations"
+    for path in sorted(root.glob("*.yaml")):
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        for sc in data.get("scenarios") or []:
+            if sc.get("id") == scenario_id:
+                return dict(sc)
+    raise AssertionError(f"{scenario_id} senariysi topilmadi")
+
+
+def test_global_04_rubric_fails_an_answer_with_no_external_source_and_no_note() -> None:
+    """Judge "faqat o'z chatlarim" javobini **yiqitishi** shart (jonli miss).
+
+    `global-04` savoli aynan "obuna bo'lmagan kanallar" haqida: tashqi manba
+    ham keltirilmasa, u qidirilmagani ham aytilmasa — javob noto'g'ri, lekin
+    eski rubrika ("tashqi manbalarni belgilaydi") uni o'tkazib yuborardi.
+    """
+    rubric = _scenario("global-04")["turns"][0]["expect"]["judge"]
+    lowered = rubric.lower()
+    assert "fail" in lowered, "rubrika aniq yiqilish shartini aytadi"
+    for token in ("qidirilmagan", "tashqi", "kanal"):
+        assert token in lowered, token
+    assert "o'z chatlarini" in lowered

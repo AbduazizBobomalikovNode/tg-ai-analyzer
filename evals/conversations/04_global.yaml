@@ -71,5 +71,12 @@ scenarios:
           scope: global
           max_cost_usd: 0.25
           judge: >-
-            Javob tashqi manbalarni aniq belgilaydi ("tashqi manba") va sitatalar
-            #x<n> yoki #c<chat>m<id> shaklida; uydirma kanal nomlari yo'q.
+            FAIL agar javob na bitta akkaunt tashqarisidagi ochiq kanalni
+            (@username yoki kanal nomi bilan) keltirsa, na tashqi manbalar
+            qidirilmaganini/qidirib bo'lmaganini (kvota, limit, imkoniyat yo'q)
+            aniq aytsa — faqat o'z chatlaridan olingan javob, sukut bilan,
+            o'tmaydi. Faqat o'z chatlarini ko'rsatib "mana ochiq kanallardagi
+            fikrlar" deyish ham FAIL. PASS uchun: tashqi manbalar aniq
+            belgilangan ("tashqi manba") va sitatalar #x<n> yoki #c<chat>m<id>
+            shaklida, uydirma kanal nomlari yo'q — YOKI tashqi qidiruv nega
+            bo'lmagani halol aytilgan.

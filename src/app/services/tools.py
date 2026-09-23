@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import inspect
 import json
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from functools import lru_cache
@@ -259,14 +259,20 @@ async def chat_index(
     )
     items = []
     for c in rows.scalars().all():
-        line = f'id={c.id} {c.type} "{c.title}" msgs={c.synced_total}'
+        # Chat **nomi bilan** belgilanadi; lokal DB id faqat `[id:N]` ichida,
+        # ya'ni aniq ichki maydonda (prompt: uni foydalanuvchiga ko'rsatmaslik
+        # va havolaga qo'ymaslik). Ilgari qator `id=3830` bilan boshlanardi va
+        # model shu raqamni javobga ham, yasama `t.me/c/3830/…` havolaga ham
+        # tashlardi.
+        uname = f" @{c.username}" if c.username else ""
+        line = f'"{c.title}"{uname} {c.type} msgs={c.synced_total} [id:{c.id}]'
         if not compact:
             line = (
-                f'id={c.id} {c.type} "{c.title}"'
-                + (f" @{c.username}" if c.username else "")
+                f'"{c.title}"{uname} {c.type}'
                 + f" msgs={c.synced_total}"
                 + (f" members={c.participants_count}" if c.participants_count else "")
                 + (" admin" if c.is_admin else "")
+                + f" [id:{c.id}]"
             )
         if c.id == pinned_chat_id:
             line += " [pinned]"
@@ -283,26 +289,82 @@ async def list_chats(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     return ToolResult("\n".join(items), meta={"chats": len(items)})
 
 
+async def _recent_rows(
+    ctx: ToolContext,
+    chat: Chat,
+    *,
+    limit: int,
+    since: datetime | None = None,
+    sender_ids: Sequence[int] | None = None,
+) -> list[Message]:
+    """Eng yangi N xabar (ixtiyoriy muallif/oyna filtri bilan), eskisi birinchi.
+
+    Reyting yo'q — "so'zsiz" so'rovlar uchun (`from_user` bor, `query` yo'q):
+    `hybrid_search` bo'sh so'rovda `[]` qaytaradi (kanal terminlari yo'q), bu
+    esa "bu odam nima yozdi?" savoliga javob emas.
+    """
+    stmt = select(Message).where(Message.chat_id == chat.id)
+    if since is not None:
+        stmt = stmt.where(Message.published_at >= since)
+    if sender_ids:
+        stmt = stmt.where(Message.sender_id.in_(list(sender_ids)))
+    rows = await ctx.session.execute(stmt.order_by(Message.tg_msg_id.desc()).limit(limit))
+    return list(reversed(rows.scalars().all()))
+
+
+async def _senders_or_error(
+    ctx: ToolContext, chat: Chat, from_user: str
+) -> tuple[list[int] | None, ToolResult | None]:
+    sender_ids = await resolve_senders(ctx.session, ctx.account_id, from_user)
+    if not sender_ids:
+        return None, ToolResult(
+            f'no known sender matching "{from_user}" in this account '
+            "(names come from synced history; try a username or a shorter fragment)",
+            meta={"chat": chat.title, "hits": 0},
+        )
+    return sender_ids, None
+
+
 async def search_messages(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     chat = await _resolve_chat(ctx, args)
     if chat is None:
         return _no_chat()
     query = str(args.get("query") or "").strip()
-    if not query:
-        return ToolResult("error: `query` is required", ok=False)
     limit = max(1, min(int(args.get("limit") or 15), SEARCH_LIMIT_MAX))
     window = _parse_days(args.get("days"))
     since = ctx.now - window if window else None
     from_user = str(args.get("from_user") or "").strip()
     sender_ids: list[int] | None = None
     if from_user:
-        sender_ids = await resolve_senders(ctx.session, ctx.account_id, from_user)
-        if not sender_ids:
+        sender_ids, bad = await _senders_or_error(ctx, chat, from_user)
+        if bad is not None:
+            return bad
+    if not query:
+        # "Nima yozdi?" — so'z yo'q, muallif bor. Bu xato emas: filtr o'zi
+        # so'rov, javob esa **eng yangi** xabarlar.
+        if not from_user:
             return ToolResult(
-                f'no known sender matching "{from_user}" in this account '
-                "(names come from synced history; try a username or a shorter fragment)",
+                "error: `query` is required (or pass `from_user` to list that "
+                "person's latest messages)",
+                ok=False,
+            )
+        msgs = await _recent_rows(ctx, chat, limit=limit, since=since, sender_ids=sender_ids)
+        if not msgs:
+            return ToolResult(
+                f'no messages from "{from_user}" in "{chat.title}"',
                 meta={"chat": chat.title, "hits": 0},
             )
+        names = await sender_names(
+            ctx.session, ctx.account_id, (m.sender_id for m in msgs if m.sender_id)
+        )
+        lines = [_line(chat, m, names=names) for m in msgs]
+        head = (
+            f'chat="{chat.title}" from="{from_user}" messages={len(lines)} '
+            "(newest last, no query — not ranked)"
+        )
+        return ToolResult(
+            _clip(head + "\n" + "\n".join(lines)), meta={"chat": chat.title, "hits": len(lines)}
+        )
     # `days` / `from_user` **SQL ichida**: ilgari filtr reytingdan keyin
     # qo'llanardi — top-N avval kesilib, keyin oynadan tashqarisi tashlanardi
     # va natija jimgina 15 dan 2 ga tushardi.
@@ -331,18 +393,24 @@ async def get_recent_messages(ctx: ToolContext, args: dict[str, Any]) -> ToolRes
     if chat is None:
         return _no_chat()
     limit = max(1, min(int(args.get("limit") or 30), RECENT_LIMIT_MAX))
-    rows = await ctx.session.execute(
-        select(Message)
-        .where(Message.chat_id == chat.id)
-        .order_by(Message.tg_msg_id.desc())
-        .limit(limit)
-    )
-    msgs = list(reversed(rows.scalars().all()))
+    from_user = str(args.get("from_user") or "").strip()
+    sender_ids: list[int] | None = None
+    if from_user:
+        sender_ids, bad = await _senders_or_error(ctx, chat, from_user)
+        if bad is not None:
+            return bad
+    msgs = await _recent_rows(ctx, chat, limit=limit, sender_ids=sender_ids)
+    if from_user and not msgs:
+        return ToolResult(
+            f'no messages from "{from_user}" in "{chat.title}"',
+            meta={"chat": chat.title, "n": 0},
+        )
     names = await sender_names(
         ctx.session, ctx.account_id, (m.sender_id for m in msgs if m.sender_id)
     )
     lines = [_line(chat, m, names=names) for m in msgs]
-    head = f'chat="{chat.title}" latest {len(lines)} messages (oldest first)'
+    who = f' from="{from_user}"' if from_user else ""
+    head = f'chat="{chat.title}"{who} latest {len(lines)} messages (oldest first)'
     return ToolResult(
         _clip(head + "\n" + "\n".join(lines)), meta={"chat": chat.title, "n": len(lines)}
     )
@@ -378,20 +446,43 @@ async def get_window_digest(ctx: ToolContext, args: dict[str, Any]) -> ToolResul
     chat = await _resolve_chat(ctx, args)
     if chat is None:
         return _no_chat()
+    # `since`/`until` — aniq davr ("iyulda nima bo'ldi"): `days` bilan bir
+    # o'lchov, ikkisi ham berilsa **sana ustun** (u aniqroq). Faqat `until`
+    # berilsa oyna `days` ga teng va shu sanada tugaydi.
+    raw_since, raw_until = args.get("since"), args.get("until")
+    for label, raw in (("since", raw_since), ("until", raw_until)):
+        if raw not in (None, "") and _parse_date(raw) is None:
+            return ToolResult(f"error: `{label}` must be an ISO date (YYYY-MM-DD)", ok=False)
+    dated = raw_since not in (None, "") or raw_until not in (None, "")
     days = max(1, min(int(args.get("days") or 7), WINDOW_DAYS_MAX))
-    since = ctx.now - timedelta(days=days)
-    digests = await digests_for_window(ctx.session, chat, since=since, until=ctx.now, llm=ctx.llm)
+    until = _parse_date(raw_until, end_of_day=True) or ctx.now
+    since = _parse_date(raw_since) or (until - timedelta(days=days))
+    if since >= until:
+        return ToolResult("error: `since` must be before `until`", ok=False)
+    span = max(1, min((until - since).days or 1, WINDOW_DAYS_MAX))
+    if dated and (until - since).days > WINDOW_DAYS_MAX:
+        since = until - timedelta(days=WINDOW_DAYS_MAX)
+    digests = await digests_for_window(ctx.session, chat, since=since, until=until, llm=ctx.llm)
+    window = (
+        f"{since.date()} … {until.date()}" if dated else f"last {days} days"
+    )  # hisobotda ham, xatoda ham bir xil ibora
     if not digests:
         return ToolResult(
-            f'no messages in the last {days} days in "{chat.title}"',
-            meta={"chat": chat.title, "days": days},
+            f'no messages in "{chat.title}" ({window})',
+            meta={"chat": chat.title, "days": span if dated else days},
         )
     parts = [f"[{d.day.date()}] ({d.msg_count} msgs) {d.text}" for d in digests]
     tokens = sum(d.tokens_in + d.tokens_out for d in digests)
-    head = f'chat="{chat.title}" daily digests, last {days} days ({len(parts)} active days)'
+    head = f'chat="{chat.title}" daily digests, {window} ({len(parts)} active days)'
     return ToolResult(
         _clip(head + "\n\n" + "\n\n".join(parts), n=MAX_RESULT_CHARS * 2),
-        meta={"chat": chat.title, "days": days, "computed_tokens": tokens},
+        meta={
+            "chat": chat.title,
+            "days": span if dated else days,
+            "since": since.date().isoformat(),
+            "until": until.date().isoformat(),
+            "computed_tokens": tokens,
+        },
     )
 
 
@@ -499,9 +590,15 @@ def _hit_line(
     *,
     chat_title: str | None = None,
     with_chat: bool = False,
-    with_link: bool = False,
+    with_link: bool = True,
 ) -> str:
-    """`ServerHit` → bitta qator. Manba — javobdagi entity ro'yxatlari."""
+    """`ServerHit` → bitta qator. Manba — javobdagi entity ro'yxatlari.
+
+    `with_link` **default yoqiq**: havolasiz qator ko'rgan model havolani o'zi
+    to'qiydi (`t.me/c/<lokal id>/<msg>` — lokal DB id bilan, ya'ni har doim
+    noto'g'ri). `ServerHit.link` allaqachon to'ldirilgan (`tg_search.tg_link`,
+    `persist_server_hits`) — shuni beramiz.
+    """
     ts = h.date.strftime("%Y-%m-%d %H:%M") if h.date else "?"
     title = chat_title or h.chat_title
     where = f' in "{title}"' if (chat_title or with_chat) else ""
@@ -660,11 +757,17 @@ def _search_args(args: dict[str, Any]) -> tuple[dict[str, Any], ToolResult | Non
     `tg_search` ichida (ikki yo'l bitta koddan o'tadi).
     """
     query = str(args.get("query") or "").strip()
-    if not query:
-        return {}, ToolResult("error: `query` is required", ok=False)
     flt_name = str(args.get("filter") or "").strip()
     if flt_name and flt_name.lower() not in _FILTERS:
         return {}, _bad_filter(flt_name)
+    # Bo'sh `query` **o'zi yetarli emas**, lekin `from_user`/`filter` bilan
+    # birga ma'noli: Telegram `messages.Search` ni `q=""` + `from_id` bilan
+    # qabul qiladi — "shu odam nima yozdi" so'zsiz so'rov.
+    narrowed = bool(str(args.get("from_user") or "").strip()) or bool(flt_name)
+    if not query and not narrowed:
+        return {}, ToolResult(
+            "error: `query` is required (or narrow with `from_user` / `filter`)", ok=False
+        )
     since = _parse_date(args.get("since"))
     until = _parse_date(args.get("until"), end_of_day=True)
     for label, raw, parsed in (
@@ -675,6 +778,7 @@ def _search_args(args: dict[str, Any]) -> tuple[dict[str, Any], ToolResult | Non
             return {}, ToolResult(f"error: `{label}` must be an ISO date (YYYY-MM-DD)", ok=False)
     return {
         "q": query,
+        "from_user": str(args.get("from_user") or "").strip(),
         "filter_name": flt_name.lower(),
         "limit": max(1, min(int(args.get("limit") or 15), TG_SEARCH_LIMIT_MAX)),
         "min_date": since,
@@ -682,8 +786,21 @@ def _search_args(args: dict[str, Any]) -> tuple[dict[str, Any], ToolResult | Non
     }, None
 
 
+def _what(opts: dict[str, Any]) -> str:
+    """Nima qidirilgani — bo'sh so'rovda so'z emas, filtr nomi ko'rsatiladi."""
+    if opts.get("q"):
+        return f'"{opts["q"]}"'
+    if opts.get("from_user"):
+        return f"everything from {opts['from_user']}"
+    return f"filter={opts.get('filter_name') or 'all'}"
+
+
 def _search_head(scope: str, opts: dict[str, Any], hits: int) -> str:
-    bits = [scope, f'query="{opts["q"]}"']
+    bits = [scope]
+    if opts.get("q"):
+        bits.append(f'query="{opts["q"]}"')
+    if opts.get("from_user"):
+        bits.append(f"from={opts['from_user']}")
     if opts.get("filter_name"):
         bits.append(f"filter={opts['filter_name']}")
     if opts.get("min_date"):
@@ -708,7 +825,7 @@ def _render_hits(
     lines = [_hit_line(h, chat_title=chat_title, with_chat=with_chat) for h in result.hits]
     if not lines:
         return ToolResult(
-            f'no matches for "{opts["q"]}" ({scope}) on Telegram server',
+            f"no matches for {_what(opts)} ({scope}) on Telegram server",
             meta={"query": opts["q"], "hits": 0, "source": "telegram"},
         )
     return ToolResult(
@@ -1351,7 +1468,7 @@ async def saved_messages_search(ctx: ToolContext, args: dict[str, Any]) -> ToolR
         return ToolResult(result.error_text, ok=False)
     if not result.hits:
         return ToolResult(
-            f'no matches for "{opts["q"]}" in Saved Messages',
+            f"no matches for {_what(opts)} in Saved Messages",
             meta={"query": opts["q"], "hits": 0, "source": "telegram"},
         )
     lines = [_hit_line(h, chat_title="Saved Messages") for h in result.hits]
@@ -1459,16 +1576,18 @@ def _parse_days(raw: Any) -> timedelta | None:
 
 _CHAT_ARG = {
     "type": "string",
-    "description": "Chat selector: DB id, @username or a title fragment. Omit to use the "
-    "chat the user pinned in the UI.",
+    "description": "Chat selector: the chat title, its @username, or the internal id from "
+    "the chat index. Omit to use the chat the user pinned in the UI.",
 }
+_SINCE_ARG = {"type": "string", "description": "Only messages from this date on (YYYY-MM-DD)"}
+_UNTIL_ARG = {"type": "string", "description": "Only messages up to this date (YYYY-MM-DD)"}
 
 READ_TOOLS: dict[str, Tool] = {
     "list_chats": Tool(
         ToolSpec(
             "list_chats",
-            "List the user's synced Telegram chats/channels with ids, type, message counts. "
-            "Call once when the target chat is unclear.",
+            "List the user's synced Telegram chats/channels with title, @username, type and "
+            "message counts. Call once when the target chat is unclear.",
             {"type": "object", "properties": {}, "additionalProperties": False},
         ),
         list_chats,
@@ -1480,14 +1599,17 @@ READ_TOOLS: dict[str, Tool] = {
             "Use for 'find / where / who said / posts about X'. Returns up to `limit` lines "
             "with #id, date, author name, metrics, text and t.me link. Narrow with "
             "`from_user` (a name or @username seen in the synced history) and `days`; both "
-            "are applied inside the search, so `limit` still returns that many matches.",
+            "are applied inside the search, so `limit` still returns that many matches. "
+            "With `from_user` and no `query` it returns that person's latest messages.",
             {
                 "type": "object",
                 "properties": {
                     "chat": _CHAT_ARG,
                     "query": {
                         "type": "string",
-                        "description": "2-6 keywords or a short phrase in the chat's language",
+                        "description": "2-6 keywords or a short phrase in the chat's language. "
+                        "May be empty when `from_user` is given (then: that person's latest "
+                        "messages)",
                     },
                     "limit": {
                         "type": "integer",
@@ -1505,7 +1627,6 @@ READ_TOOLS: dict[str, Tool] = {
                         "fragment of their display name (optional)",
                     },
                 },
-                "required": ["query"],
                 "additionalProperties": False,
             },
         ),
@@ -1514,7 +1635,8 @@ READ_TOOLS: dict[str, Tool] = {
     "get_recent_messages": Tool(
         ToolSpec(
             "get_recent_messages",
-            "Latest N messages of a chat (oldest first). Use for 'what's new / latest posts'.",
+            "Latest N messages of a chat (oldest first). Use for 'what's new / latest posts'. "
+            "With `from_user` it lists only that person's latest messages.",
             {
                 "type": "object",
                 "properties": {
@@ -1524,6 +1646,11 @@ READ_TOOLS: dict[str, Tool] = {
                         "minimum": 1,
                         "maximum": RECENT_LIMIT_MAX,
                         "default": 30,
+                    },
+                    "from_user": {
+                        "type": "string",
+                        "description": "Only messages from one sender: @username or a "
+                        "fragment of their display name (optional)",
                     },
                 },
                 "additionalProperties": False,
@@ -1556,8 +1683,10 @@ READ_TOOLS: dict[str, Tool] = {
     "get_window_digest": Tool(
         ToolSpec(
             "get_window_digest",
-            "Compact per-day digests of a chat for the last N days (cached, cheap). Use for "
-            "summaries and 'what happened this week/month' instead of reading raw messages.",
+            "Compact per-day digests of a chat (cached, cheap). Use for summaries and 'what "
+            "happened this week/month' instead of reading raw messages. Either the last "
+            "`days` days, or an explicit period with `since`/`until` (for 'in July', 'between "
+            "March and April'); the dates win when both are given.",
             {
                 "type": "object",
                 "properties": {
@@ -1568,6 +1697,8 @@ READ_TOOLS: dict[str, Tool] = {
                         "maximum": WINDOW_DAYS_MAX,
                         "default": 7,
                     },
+                    "since": _SINCE_ARG,
+                    "until": _UNTIL_ARG,
                 },
                 "additionalProperties": False,
             },
@@ -1649,9 +1780,6 @@ _FILTER_ARG = {
     "description": "Only messages of this kind (url = messages containing links, "
     "mentions = messages mentioning you, pinned = pinned ones)",
 }
-_SINCE_ARG = {"type": "string", "description": "Only messages from this date on (YYYY-MM-DD)"}
-_UNTIL_ARG = {"type": "string", "description": "Only messages up to this date (YYYY-MM-DD)"}
-
 READ_TOOLS["search_telegram"] = Tool(
     ToolSpec(
         "search_telegram",
@@ -1660,7 +1788,9 @@ READ_TOOLS["search_telegram"] = Tool(
         "(it is ranked and understands meaning); use this when search_messages finds nothing, "
         "when the chat is not synced yet, or when you need older history. Narrow it instead of "
         "guessing more words: `from_user` for one author, `topic_id` for one forum topic (see "
-        "list_forum_topics), `filter` for links/photos/files, `since`/`until` for a period.",
+        "list_forum_topics), `filter` for links/photos/files, `since`/`until` for a period. "
+        "`query` may be omitted when `from_user` or `filter` is given — then it returns "
+        "everything matching that narrowing, newest first.",
         {
             "type": "object",
             "properties": {
@@ -1679,7 +1809,6 @@ READ_TOOLS["search_telegram"] = Tool(
                 "since": _SINCE_ARG,
                 "until": _UNTIL_ARG,
             },
-            "required": ["query"],
             "additionalProperties": False,
         },
     ),

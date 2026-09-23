@@ -366,7 +366,10 @@ async def server_search_chat(
     from telethon.tl import functions as tlf
     from telethon.tl import types as tlt
 
-    if not (query or "").strip():
+    # `q=""` Telegram uchun xato emas — `from_id` yoki `filter` bilan birga u
+    # "shu muallifning / shu turdagi hamma xabari" degani. Yolg'iz bo'sh so'rov
+    # esa butun tarixni tortib olardi, shuning uchun u rad etiladi.
+    if not (query or "").strip() and not (from_peer is not None or from_user or filter):
         return ServerHits(error_text="error: `query` is required")
     if (err := _guard(account_id, BUCKET_SEARCH)) is not None:
         return _rate_limited(BUCKET_SEARCH, err)
@@ -478,7 +481,9 @@ async def server_search_global(
     from telethon.tl import functions as tlf
     from telethon.tl import types as tlt
 
-    if not (query or "").strip():
+    # `SearchGlobal` da `from_id` yo'q — bo'sh so'rov faqat `filter` bilan
+    # ma'noli ("hamma joydagi havolalar/fayllar").
+    if not (query or "").strip() and not filter:
         return ServerHits(error_text="error: `query` is required")
     flags = GLOBAL_SCOPES.get(scope.strip().lower())
     if flags is None:

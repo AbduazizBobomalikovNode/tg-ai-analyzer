@@ -344,7 +344,12 @@ def check_turn(
                 ok = str(hint).lower()[:10] in only or only.isdigit()
             add("scope", ok, f"refs={sorted(refs)}, chatless={chatless}, hint={hint!r}")
         elif scope == "account":
-            ok = bool(executed) and (chatless > 0 or len(refs) >= 2)
+            # `list_chats` **o'zi** akkaunt qamrovi: u chat argumentisiz butun
+            # ro'yxatni qaytaradi. `_chat_refs` uni ataylab hisobga olmaydi
+            # (na `refs`, na `chatless`), shuning uchun "eng faol chatlarim"
+            # kabi turn'da yagona to'g'ri tool ishlatilsa ham qamrov yiqilardi
+            # — senariyning o'z `tools_any: [list_chats]` kutilmasiga zid.
+            ok = bool(executed) and (chatless > 0 or len(refs) >= 2 or "list_chats" in names_exec)
             add("scope", ok, f"refs={sorted(refs)}, chatless={chatless}")
 
     if want := expect.get("keywords_any"):
@@ -642,6 +647,13 @@ async def run_scenario(
                 # ishlagan-ishlamagani hisobotdan ko'rinmaydi.
                 "calls_executed": ctx.get("calls_executed"),
                 "stop_reason": ctx.get("stop_reason"),
+                # Suhbat bo'yicha tool keshi (`agent.py` `tool_cache`): takroriy
+                # savolda qidiruv ikkinchi marta yugurmasligi shu yerda ko'rinadi.
+                "cache_hits": ctx.get("cache_hits"),
+                # Provider'ning to'xtash sababi — bizning `stop_reason` emas.
+                # `length` bo'lsa javob jumla o'rtasida kesilgan.
+                "finish_reason": ctx.get("finish_reason"),
+                "truncated_answer": bool(ctx.get("truncated_answer")),
                 "strategy": ctx.get("strategy"),
                 "degraded": ctx.get("degraded") or False,
                 "actions": len(actions),
@@ -743,6 +755,18 @@ def render_md(result: dict[str, Any]) -> str:
             f"max ${costs[-1]:.4f}; >$0.05 bo'lgan turn: {sum(1 for x in costs if x > 0.05)}"
         )
         out.append(f"- degraded turn: {sum(1 for t in all_turns if t.get('degraded'))}")
+        fins: dict[str, int] = defaultdict(int)
+        for t in all_turns:
+            fins[str(t.get("finish_reason") or "—")] += 1
+        hits = [int(t.get("cache_hits") or 0) for t in all_turns]
+        out.append(f"- `finish_reason`: {dict(sorted(fins.items()))}")
+        out.append(
+            f"- `truncated_answer`: {sum(1 for t in all_turns if t.get('truncated_answer'))} turn"
+        )
+        out.append(
+            f"- `cache_hits`: jami {sum(hits)}, keshdan foydalangan turn: "
+            f"{sum(1 for x in hits if x > 0)}/{len(hits)}"
+        )
         out.append("")
 
     out.append("## Yiqilgan turn'lar")

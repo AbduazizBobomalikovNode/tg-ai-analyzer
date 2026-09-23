@@ -820,3 +820,96 @@ async def test_message_id_is_required(monkeypatch: pytest.MonkeyPatch) -> None:
         res = await tool(_ctx(), {"chat": "Blog"})
         assert not res.ok and "message_id" in res.text
     assert not client.seen
+
+
+# ─── havolalar va bo'sh so'rov (conv-20260918-111653) ────────────────────────
+#
+# Jonli yugurishda server topilmalari **havolasiz** qator bo'lib berilardi
+# (`_hit_line(..., with_link=False)`), model esa havolani o'zi yasardi:
+# `https://t.me/c/<lokal DB id>/<msg>` — bunday URL mavjud emas. `ServerHit`
+# da haqiqiy havola allaqachon bor, shuning uchun u har doim chiqadi.
+
+
+def _hit(**kw: Any) -> Any:
+    from app.services import tg_search as TS
+
+    base = {
+        "tg_msg_id": 7,
+        "tg_peer_id": 100,
+        "date": datetime(2026, 8, 18, 12, 0, tzinfo=UTC),
+        "sender": "Ali",
+        "text": "promo post",
+        "chat_title": "IELTS",
+        "chat_id": 3830,  # lokal DB id — javobga ham, havolaga ham tushmaydi
+        "link": "https://t.me/ielts/7",
+    }
+    return TS.ServerHit(**{**base, **kw})
+
+
+def test_hit_line_carries_the_real_link_and_never_the_db_id() -> None:
+    line = T._hit_line(_hit(), with_chat=True)
+    assert "https://t.me/ielts/7" in line
+    assert "3830" not in line, "lokal DB id modelga havola sifatida ko'rinmaydi"
+
+
+def test_rendered_server_hits_are_linked_by_default() -> None:
+    from app.services import tg_search as TS
+
+    opts = {"q": "promo", "filter_name": "", "limit": 5, "min_date": None, "max_date": None}
+    res = T._render_hits(TS.ServerHits(hits=[_hit()], calls=1), opts, 'chat="IELTS"')
+
+    assert res.ok and "https://t.me/ielts/7" in res.text
+    assert "3830" not in res.text
+
+
+async def test_search_global_hits_come_back_with_links(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _Client(
+        {
+            "SearchGlobalRequest": _messages(
+                [_msg(7, "promo post", channel_id=100)],
+                users=[_entity(1, first="Ali")],
+                chats=[_entity(100, title="IELTS", username="ielts")],
+            )
+        }
+    )
+    _patch_pool(monkeypatch, client)
+
+    res = await T.search_global(_ctx(), {"query": "promo"})
+
+    assert "https://t.me/ielts/7" in res.text
+
+
+async def test_search_telegram_accepts_an_empty_query_with_from_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ "Shu odam nima yozdi" — so'zsiz so'rov `from_id` bilan ma'noli."""
+    client = _Client({"SearchRequest": _messages([_msg(3)], users=[_entity(1, first="Ali")])})
+    _patch_pool(monkeypatch, client, chat=_chat())
+
+    res = await T.search_telegram(_ctx(), {"query": "", "from_user": "@ali"})
+
+    assert res.ok, res.text
+    req = _req(client, "SearchRequest")
+    assert req.q == "" and req.from_id is not None
+    assert 'query=""' not in res.text and "from=@ali" in res.text
+
+
+async def test_search_telegram_accepts_an_empty_query_with_a_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _Client({"SearchRequest": _messages([_msg(3)], users=[_entity(1, first="Ali")])})
+    _patch_pool(monkeypatch, client, chat=_chat())
+
+    res = await T.search_telegram(_ctx(), {"filter": "url"})
+
+    assert res.ok and _req(client, "SearchRequest").q == ""
+
+
+async def test_empty_query_without_any_narrowing_is_still_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _Client()
+    _patch_pool(monkeypatch, client, chat=_chat())
+    res = await T.search_telegram(_ctx(), {"query": "  "})
+    assert not res.ok and "query" in res.text
+    assert not client.requests

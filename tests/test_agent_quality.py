@@ -1017,3 +1017,199 @@ async def test_discover_rung_reports_why_it_found_nothing(
     assert cov.server_notes == out.notes
     text = DS.render_coverage(cov, locale="uz")
     assert "bepul limit tugagan" in text
+
+
+# ─── 6. conv-20260918-111653 / -112226 dan keyingi tuzatishlar ───────────────
+#
+#   * javobda "id: 3830" — lokal DB id foydalanuvchiga ko'rindi va model undan
+#     `t.me/c/3830/…` havola to'qidi;
+#   * `from_user` bilan bo'sh `query` rad etilardi ("Nurbek nima yozdi?");
+#   * "iyulda nima bo'ldi" savoli `days` ga aylantirilardi;
+#   * so'z salatiga javoban `search_global` chaqirilardi.
+
+
+def _chat_index_row(**kw: Any) -> Chat:
+    base: dict[str, Any] = {
+        "id": 3830,
+        "account_id": 1,
+        "tg_peer_id": 99,
+        "type": ChatType.CHANNEL,
+        "title": "IELTS Uzbekistan",
+        "username": "ielts",
+        "synced_total": 120,
+        "last_message_at": NOW,
+    }
+    return Chat(**{**base, **kw})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("compact", [True, False])
+async def test_chat_index_labels_chats_by_title_and_hides_the_id(compact: bool) -> None:
+    session = _SqlSession([_chat_index_row()])
+    lines = await T.chat_index(session, 1, compact=compact)  # type: ignore[arg-type]
+
+    line = lines[0]
+    assert line.startswith('"IELTS Uzbekistan" @ielts'), line
+    assert "id=3830" not in line, "xom `id=` prefiksi qaytib kelmasin"
+    assert "[id:3830]" in line, "ichki id aniq belgilangan maydonda qoladi"
+
+
+def test_agent_prompt_marks_chat_ids_as_internal() -> None:
+    from app.services.prompts import AGENT_SYSTEM_PROMPT
+
+    lowered = AGENT_SYSTEM_PROMPT.lower()
+    assert "chat ids in tool results are internal" in lowered
+    assert "never show them to the user" in lowered
+    assert "[id:123]" in AGENT_SYSTEM_PROMPT
+
+
+def test_agent_prompt_asks_instead_of_searching_for_nonsense() -> None:
+    """So'z salati → bitta savol yoki hazil, tool YO'Q (ayniqsa `search_global`)."""
+    from app.services.prompts import AGENT_SYSTEM_PROMPT
+
+    lowered = AGENT_SYSTEM_PROMPT.lower()
+    assert "clarify first" in lowered
+    for token in ("gibberish", "one short clarifying question", "call no tools"):
+        assert token in lowered, token
+    assert "discover_channels" in AGENT_SYSTEM_PROMPT and "search_global" in AGENT_SYSTEM_PROMPT
+
+
+def test_agent_prompt_points_a_named_month_at_since_until() -> None:
+    from app.services.prompts import AGENT_SYSTEM_PROMPT
+
+    assert "`since`/`until` to `get_window_digest`" in AGENT_SYSTEM_PROMPT
+
+
+def _wire_chat(monkeypatch: pytest.MonkeyPatch, chat: Chat) -> None:
+    async def fake_resolve(ctx: Any, args: Any) -> Chat:
+        return chat
+
+    monkeypatch.setattr(T, "_resolve_chat", fake_resolve)
+
+
+@pytest.mark.asyncio
+async def test_search_messages_lists_recent_messages_when_only_from_user_is_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = [_msg(i, 5) for i in range(1, 4)]
+
+    async def senders(session: Any, account_id: int, needle: str) -> list[int]:
+        return [5]
+
+    async def names(session: Any, account_id: int, ids: Any) -> dict[int, str]:
+        return {5: "Nurbek (@nurbek)"}
+
+    async def boom(*a: Any, **kw: Any) -> Any:  # pragma: no cover
+        raise AssertionError("bo'sh so'rovda `hybrid_search` chaqirilmaydi")
+
+    _wire_chat(monkeypatch, _chat_row())
+    monkeypatch.setattr(T, "resolve_senders", senders)
+    monkeypatch.setattr(T, "sender_names", names)
+    monkeypatch.setattr(S, "hybrid_search", boom)
+
+    session = _SqlSession(rows)
+    ctx = T.ToolContext(session=session, account_id=1, now=NOW)  # type: ignore[arg-type]
+    res = await T.search_messages(ctx, {"query": "", "from_user": "@nurbek", "days": 7})
+
+    assert res.ok and res.meta["hits"] == 3
+    assert "Nurbek (@nurbek)" in res.text
+    sql = "\n".join(session.sql)
+    assert "messages.sender_id IN" in sql
+    assert "messages.published_at >=" in sql, "`days` shu yo'lda ham SQL ichida"
+    assert "ORDER BY messages.tg_msg_id DESC" in sql, "eng yangisidan olinadi"
+
+
+@pytest.mark.asyncio
+async def test_search_messages_without_a_query_or_a_sender_is_an_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _wire_chat(monkeypatch, _chat_row())
+    ctx = T.ToolContext(session=_SqlSession(), account_id=1, now=NOW)  # type: ignore[arg-type]
+    res = await T.search_messages(ctx, {"query": "   "})
+    assert not res.ok and "query" in res.text and "from_user" in res.text
+
+
+@pytest.mark.asyncio
+async def test_get_recent_messages_narrows_to_one_sender(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def senders(session: Any, account_id: int, needle: str) -> list[int]:
+        return [5]
+
+    async def names(session: Any, account_id: int, ids: Any) -> dict[int, str]:
+        return {5: "Nurbek (@nurbek)"}
+
+    _wire_chat(monkeypatch, _chat_row())
+    monkeypatch.setattr(T, "resolve_senders", senders)
+    monkeypatch.setattr(T, "sender_names", names)
+
+    session = _SqlSession([_msg(1, 5), _msg(2, 5)])
+    ctx = T.ToolContext(session=session, account_id=1, now=NOW)  # type: ignore[arg-type]
+    res = await T.get_recent_messages(ctx, {"from_user": "@nurbek", "limit": 10})
+
+    assert res.ok and res.meta["n"] == 2 and 'from="@nurbek"' in res.text
+    assert "messages.sender_id IN" in "\n".join(session.sql)
+    assert "from_user" in T.READ_TOOLS["get_recent_messages"].spec.parameters["properties"]
+
+
+@pytest.mark.asyncio
+async def test_get_window_digest_takes_an_explicit_period(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services.digests import DayDigest
+
+    seen: dict[str, Any] = {}
+
+    async def fake_digests(
+        session: Any, chat: Any, *, since: Any, until: Any, llm: Any = None
+    ) -> list[Any]:
+        seen.update(since=since, until=until)
+        return [DayDigest(day=since, text="iyul xulosasi", msg_count=9, cached=True)]
+
+    _wire_chat(monkeypatch, _chat_row())
+    monkeypatch.setattr(T, "digests_for_window", fake_digests)
+    ctx = T.ToolContext(session=_SqlSession(), account_id=1, now=NOW)  # type: ignore[arg-type]
+
+    res = await T.get_window_digest(ctx, {"since": "2026-07-01", "until": "2026-07-31"})
+
+    assert res.ok and "2026-07-01" in res.text and "2026-07-31" in res.text
+    assert seen["since"].date().isoformat() == "2026-07-01"
+    assert seen["until"].date().isoformat() == "2026-07-31"
+    assert res.meta["since"] == "2026-07-01" and res.meta["until"] == "2026-07-31"
+    props = T.READ_TOOLS["get_window_digest"].spec.parameters["properties"]
+    assert "since" in props and "until" in props
+
+
+@pytest.mark.asyncio
+async def test_get_window_digest_still_defaults_to_days(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services.digests import DayDigest
+
+    seen: dict[str, Any] = {}
+
+    async def fake_digests(
+        session: Any, chat: Any, *, since: Any, until: Any, llm: Any = None
+    ) -> list[Any]:
+        seen.update(since=since, until=until)
+        return [DayDigest(day=since, text="hafta", msg_count=4, cached=True)]
+
+    _wire_chat(monkeypatch, _chat_row())
+    monkeypatch.setattr(T, "digests_for_window", fake_digests)
+    ctx = T.ToolContext(session=_SqlSession(), account_id=1, now=NOW)  # type: ignore[arg-type]
+
+    res = await T.get_window_digest(ctx, {"days": 7})
+
+    assert seen["since"] == NOW - timedelta(days=7) and seen["until"] == NOW
+    assert "last 7 days" in res.text
+
+
+@pytest.mark.asyncio
+async def test_get_window_digest_rejects_a_broken_date(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def boom(*a: Any, **kw: Any) -> Any:  # pragma: no cover
+        raise AssertionError("noto'g'ri sanada digest hisoblanmaydi")
+
+    _wire_chat(monkeypatch, _chat_row())
+    monkeypatch.setattr(T, "digests_for_window", boom)
+    ctx = T.ToolContext(session=_SqlSession(), account_id=1, now=NOW)  # type: ignore[arg-type]
+
+    res = await T.get_window_digest(ctx, {"since": "iyul"})
+    assert not res.ok and "ISO date" in res.text
