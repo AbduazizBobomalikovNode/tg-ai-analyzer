@@ -23,6 +23,10 @@ Invariantlar (CLAUDE.md):
 * **Stars hech qachon sarflanmaydi** — `server_discover` `allow_paid_stars`
   ni yubormaydi; avval `CheckSearchPostsFlood`, bepul slot bo'lmasa faqat
   hashtag rejimi yoki tushuntiruvchi matn.
+* **Premium yo'q bo'lsa kashfiyot to'xtamaydi** — `SearchPosts` Premium
+  talab qilsa (`note_code="premium_required"`) tekin yo'l ishlaydi:
+  `contacts.Search` (nom) + topilgan ochiq kanallarda `messages.Search`
+  (`server_discover_by_name`). Yangi TL metod qo'shilmagan.
 * **Telefon raqami qaytarilmaydi** — `ServerHit` da bunday maydon yo'q va
   entity'dan faqat nom/username o'qiladi.
 * **`get_sender()` / `get_chat()` chaqirilmaydi** — muallif va chat nomi
@@ -65,6 +69,7 @@ __all__ = [
     "server_calendar",
     "server_channel_search",
     "server_discover",
+    "server_discover_by_name",
     "server_search_chat",
     "server_search_global",
 ]
@@ -150,8 +155,15 @@ class ServerHits:
     # `note` sababi mashina o'qiy oladigan shaklda: hozircha faqat
     # `"post_search_flood"` (bepul slot tugagan) — qamrov hisoboti shu
     # bo'yicha halol sabab yozadi, matnni qayta tahlil qilmasdan.
+    #: `"post_search_flood"` (bepul slot tugagan) yoki `"premium_required"`
+    #: (`channels.SearchPosts` Telegram Premium talab qildi) — ikkalasi ham
+    #: xato emas, **holat**: chaqiruvchi nom bo'yicha zaxira yo'lga tushadi.
     note_code: str = ""
     retry_at: str = ""  # `note_code` bilan birga: "YYYY-MM-DD HH:MM UTC" yoki ""
+    #: Nom bo'yicha kashfiyot (`server_discover_by_name`): topilgan ochiq
+    #: kanallar (`contacts.Search`) va ulardan **haqiqatan** o'qilganlari.
+    channels: list[dict[str, Any]] = field(default_factory=list)
+    searched: list[str] = field(default_factory=list)
 
 
 # ─── entity yordamchilari (qo'shimcha RPC yo'q) ──────────────────────────────
@@ -620,6 +632,26 @@ def flood_reset_at(flood: Any) -> str:
     return datetime.fromtimestamp(int(wait_till), tz=UTC).strftime("%Y-%m-%d %H:%M UTC")
 
 
+#: Premium'i yo'q akkauntlar — jarayon xotirasida, akkaunt bo'yicha bir marta.
+#: `users.GetFullUser(self).is_premium` bilan **oldindan** tekshirish mumkin
+#: emas edi: bu ortiqcha RPC va baribir har chaqiruvda xato ushlash kerak.
+#: Shuning uchun xatoning o'zi signal — ikkinchi marta so'ralmaydi.
+PREMIUM_MISSING: set[int] = set()
+
+
+def is_premium_error(err: str | None) -> bool:
+    """`channels.SearchPosts` / `CheckSearchPostsFlood` Premium talab qildimi?"""
+    return bool(err) and "PremiumAccountRequired" in str(err)
+
+
+def premium_note() -> str:
+    return (
+        "public post search (channels.SearchPosts) requires Telegram Premium on this "
+        "account; falling back to name search (contacts.Search) + messages.Search in "
+        "the public channels it finds"
+    )
+
+
 def flood_note(flood: Any) -> str:
     when = flood_reset_at(flood) or "unknown time"
     return (
@@ -643,6 +675,10 @@ async def server_discover(account_id: int, query: str, *, limit: int = 10) -> Se
     query = (query or "").strip()
     if not query:
         return ServerHits(error_text="error: `query` is required")
+    # Premium'siz akkauntda bu pog'ona **umuman** ishlamaydi — bir marta
+    # bilib olgandan keyin RPC ham, bucket tokeni ham sarflanmaydi.
+    if account_id in PREMIUM_MISSING:
+        return ServerHits(calls=0, note=premium_note(), note_code="premium_required")
     if (err := _guard(account_id, BUCKET_DISCOVER)) is not None:
         return _rate_limited(BUCKET_DISCOVER, err)
 
@@ -650,6 +686,9 @@ async def server_discover(account_id: int, query: str, *, limit: int = 10) -> Se
         account_id, tlf.channels.CheckSearchPostsFloodRequest(query=query)
     )
     if err is not None:
+        if is_premium_error(err):
+            PREMIUM_MISSING.add(account_id)
+            return ServerHits(calls=1, note=premium_note(), note_code="premium_required")
         return ServerHits(error_text=err, calls=1)
     free = bool(getattr(flood, "query_is_free", False))
     remains = int(getattr(flood, "remains", 0) or 0)
@@ -683,6 +722,9 @@ async def server_discover(account_id: int, query: str, *, limit: int = 10) -> Se
 
     res, err = await send_request(account_id, request)
     if err is not None:
+        if is_premium_error(err):
+            PREMIUM_MISSING.add(account_id)
+            return ServerHits(calls=2, note=premium_note(), note_code="premium_required")
         return ServerHits(error_text=err, calls=2)
     index = entity_index(res)
     hits = [
@@ -735,9 +777,137 @@ async def server_channel_search(account_id: int, query: str, *, limit: int = 10)
                 "username": username,
                 "members": getattr(ch, "participants_count", None),
                 "broadcast": bool(getattr(ch, "broadcast", False)),
+                "megagroup": bool(getattr(ch, "megagroup", False)),
+                # `InputPeerChannel` uchun — `get_entity()` / `get_input_entity()`
+                # chaqirilmaydi (ular allowlist'da yo'q metodlarga borishi mumkin):
+                # access hash javob bilan **birga** keladi.
+                "id": int(getattr(ch, "id", 0) or 0),
+                "access_hash": getattr(ch, "access_hash", None),
             }
         )
     return ChannelHits(channels=out[:limit], calls=1)
+
+
+# ─── 4b. Premium'siz kashfiyot: nom → o'sha kanalda messages.Search ──────────
+
+DISCOVER_NAME_CANDIDATES = 5  # `contacts.Search` dan olinadigan nomzodlar
+DISCOVER_NAME_TOP_K = 3  # ulardan nechtasida post o'qiladi
+
+
+async def local_peer_ids(account_id: int) -> set[int]:
+    """Akkauntning lokal `chats` dagi peer id'lari — ularni qayta kashf qilmaymiz."""
+    from app.db.base import session_scope
+
+    stmt = select(Chat.tg_peer_id).where(Chat.account_id == account_id)
+    async with session_scope() as db:
+        rows = (await db.execute(stmt)).all()
+    return {int(p) for (p,) in rows if p}
+
+
+def _peer_of_found(ch: dict[str, Any], tlt: Any) -> Any | None:
+    """`contacts.Search` qatoridan `InputPeerChannel` — qo'shimcha RPC yo'q."""
+    ident, access = int(ch.get("id") or 0), ch.get("access_hash")
+    if not ident or access is None:
+        return None
+    if not (ch.get("broadcast") or ch.get("megagroup")):
+        return None  # ochiq kanal/supergruh emas
+    if not str(ch.get("username") or "").strip():
+        return None  # yopiq (username yo'q) — havola ham, o'qish ham yo'q
+    return tlt.InputPeerChannel(channel_id=ident, access_hash=int(access))
+
+
+async def server_discover_by_name(
+    account_id: int,
+    query: str,
+    *,
+    top_k: int = DISCOVER_NAME_TOP_K,
+    candidates: int = DISCOVER_NAME_CANDIDATES,
+    limit: int = 10,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    known_peer_ids: set[int] | None = None,
+) -> ServerHits:
+    """Premium'siz "ochiq kanallar" yo'li: nom bo'yicha topib, ichidan o'qish.
+
+    `channels.SearchPosts` Telegram Premium talab qiladi (jonli `global-04`
+    da aynan shu chiqdi: `PremiumAccountRequiredError`). Tekin muqobil ikki
+    qadam, ikkalasi ham allowlist'da READ:
+
+    1. `contacts.Search` — nomi/username'i so'rovga mos **ochiq** kanal va
+       supergruhlar (≤`candidates`). Lokal `chats` da bori tashlanadi —
+       ular allaqachon indeksda, bu esa "men a'zo emasman" savoli.
+    2. Top `top_k` kanalda `messages.Search` — ochiq kanal tarixi a'zo
+       bo'lmasdan o'qiladi. `InputPeer` **javob bilan kelgan** access hash'dan
+       yasaladi (`get_entity()` chaqirilmaydi).
+
+    Natija odatdagi `ServerHits`: `chat_id=None` → quyi oqimda tashqi
+    (`[server external]`, manfiy sintetik id, `t.me/<username>/<id>` havolasi).
+    Har `messages.Search` **search** bucket'idan o'tadi; `FloodWaitError`
+    retry qilinmaydi — matn bo'lib qaytadi va pog'ona to'xtaydi.
+    """
+    from telethon.tl import types as tlt
+
+    query = (query or "").strip()
+    if not query:
+        return ServerHits(error_text="error: `query` is required")
+
+    found = await server_channel_search(account_id, query, limit=max(1, int(candidates)))
+    out = ServerHits(calls=found.calls, mode="by name", note_code="discover_by_name")
+    if found.rate_limited:
+        out.rate_limited = found.rate_limited
+        out.error_text = found.error_text
+        out.note = f"channel name search skipped: {found.rate_limited} quota is full"
+        return out
+    if found.error_text is not None:
+        out.error_text = found.error_text
+        out.note = f"channel name search failed ({found.error_text}); no retry"
+        return out
+
+    out.channels = list(found.channels)
+    pool_ = [(ch, _peer_of_found(ch, tlt)) for ch in found.channels]
+    usable = [(ch, peer) for ch, peer in pool_ if peer is not None]
+    if not usable:
+        out.note = f'no public channels outside your chats match "{query}"'
+        return out
+
+    known = known_peer_ids if known_peer_ids is not None else await local_peer_ids(account_id)
+    fresh = [(ch, peer) for ch, peer in usable if int(ch["id"]) not in known][: max(0, int(top_k))]
+    if not fresh:
+        out.note = f'every public channel matching "{query}" is already in your chats'
+        return out
+
+    for ch, peer in fresh:
+        res = await server_search_chat(
+            account_id,
+            None,
+            query,
+            peer=peer,
+            chat_title=str(ch.get("title") or ch.get("username") or ""),
+            since=since,
+            until=until,
+            limit=limit,
+        )
+        out.calls += res.calls
+        if res.rate_limited:
+            out.rate_limited = res.rate_limited
+            break
+        if res.error_text is not None:
+            log.info(
+                "tg_search.discover_by_name_skipped",
+                channel=str(ch.get("username") or ""),
+                reason=res.error_text[:120],
+            )
+            continue
+        out.searched.append(str(ch.get("username") or ""))
+        out.hits.extend(res.hits)
+    names = ", ".join(f"@{u}" for u in out.searched)
+    out.note = (
+        f"name search (contacts.Search) + messages.Search in {len(out.searched)} "
+        f"public channel(s): {names}"
+        if out.searched
+        else f'found public channels for "{query}" but could not read their posts'
+    )
+    return out
 
 
 # ─── 5. Saqlash — faqat ma'lum chatlar ───────────────────────────────────────

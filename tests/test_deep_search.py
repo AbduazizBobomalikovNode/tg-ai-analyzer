@@ -591,7 +591,7 @@ def test_person_username_only_for_person_intent() -> None:
 
 def _fake_tg(monkeypatch: pytest.MonkeyPatch, **answers: Any) -> dict[str, list[Any]]:
     """`tg_search` server funksiyalarini soxtalashtiradi (MTProto yo'q)."""
-    seen: dict[str, list[Any]] = {"chat": [], "global": [], "discover": []}
+    seen: dict[str, list[Any]] = {"chat": [], "global": [], "discover": [], "by_name": []}
 
     def _answer(key: str, default: Any) -> Any:
         found = answers.get(key, default)
@@ -609,12 +609,17 @@ def _fake_tg(monkeypatch: pytest.MonkeyPatch, **answers: Any) -> dict[str, list[
         seen["discover"].append({"query": query, **kw})
         return _answer("discover", DS.TG.ServerHits(calls=1))
 
+    async def by_name(account_id: int, query: str, **kw: Any) -> Any:
+        seen["by_name"].append({"query": query, **kw})
+        return _answer("by_name", DS.TG.ServerHits(calls=1))
+
     async def persist(session: Any, account_id: int, hits: Any) -> int:
         return 0
 
     monkeypatch.setattr(DS.TG, "server_search_chat", chat)
     monkeypatch.setattr(DS.TG, "server_search_global", glob)
     monkeypatch.setattr(DS.TG, "server_discover", discover)
+    monkeypatch.setattr(DS.TG, "server_discover_by_name", by_name)
     monkeypatch.setattr(DS.TG, "persist_server_hits", persist)
     return seen
 
@@ -767,6 +772,104 @@ async def test_escalate_marks_unknown_chats_as_external(monkeypatch: pytest.Monk
     assert out.external_links[external_id] == "https://t.me/ielts/12"
 
 
+def _premium_blocked() -> Any:
+    """`channels.SearchPosts` Premium talab qildi — xato emas, **holat**."""
+    return DS.TG.ServerHits(calls=1, note="needs Premium", note_code="premium_required")
+
+
+def _by_name_found() -> Any:
+    return DS.TG.ServerHits(
+        hits=[_server_hit(77, peer=999)],
+        calls=2,
+        mode="by name",
+        note_code="discover_by_name",
+        channels=[{"title": "IT Park", "username": "itpark_uz"}],
+        searched=["itpark_uz"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_escalate_discovers_by_name_without_premium(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Premium yo'q → nom bo'yicha yo'l yuguradi va tashqi topilma beradi.
+
+    Jonli `global-04`: `PremiumAccountRequiredError` xato bo'lib logda qolar,
+    zaxira yo'l esa faqat `post_search_flood` da ishlardi — javobda tashqi
+    manba umuman yo'q edi.
+    """
+    seen = _fake_tg(monkeypatch, discover=_premium_blocked, by_name=_by_name_found)
+
+    out = await DS.escalate(
+        factory,
+        account_id=1,
+        plan=_plan(server_scope="discover"),
+        gap_chats=[],
+        chats_by_id={},
+        events=None,
+        max_calls=6,
+    )
+
+    assert out.rungs[:3] == ["discover", "channels", "channel_posts"]
+    assert "global" in out.rungs  # zaxira qoldirildi — o'z arxivi ham qaraldi
+    assert seen["by_name"][0]["top_k"] == 3
+    assert out.external == 1
+    external_id = next(i for i in out.server_ids if i < 0)
+    assert out.external_links[external_id] == "https://t.me/ielts/77"
+    assert any("Premium" in n for n in out.notes)
+    assert any("messages.Search" in n and "@itpark_uz" in n for n in out.notes)
+
+
+@pytest.mark.asyncio
+async def test_escalate_by_name_budget_leaves_calls_for_other_rungs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nom bo'yicha yo'l byudjetni yeb qo'ymaydi: `SERVER_OTHER_RESERVE` qoladi."""
+    seen = _fake_tg(
+        monkeypatch,
+        discover=_premium_blocked,
+        by_name=DS.TG.ServerHits(calls=1, note_code="discover_by_name"),
+    )
+
+    out = await DS.escalate(
+        factory,
+        account_id=1,
+        plan=_plan(server_scope="discover"),
+        gap_chats=[],
+        chats_by_id={},
+        events=None,
+        max_calls=3,
+    )
+
+    assert seen["by_name"][0]["top_k"] == 0  # 3 - 1 (discover) - 1 (zaxira) - 1 (nom)
+    assert out.calls == 3 and "global" in out.rungs
+
+
+@pytest.mark.asyncio
+async def test_escalate_by_name_also_runs_when_free_quota_is_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen = _fake_tg(
+        monkeypatch,
+        discover=DS.TG.ServerHits(calls=1, note="no free slots", note_code="post_search_flood"),
+        by_name=_by_name_found,
+    )
+
+    out = await DS.escalate(
+        factory,
+        account_id=1,
+        plan=_plan(server_scope="discover"),
+        gap_chats=[],
+        chats_by_id={},
+        events=None,
+        max_calls=6,
+    )
+
+    assert len(seen["by_name"]) == 1
+    assert any("bepul limit tugagan" in n for n in out.notes)
+    assert out.external == 1
+
+
 @pytest.mark.asyncio
 async def test_escalate_emits_server_search_events(monkeypatch: pytest.MonkeyPatch) -> None:
     _fake_tg(monkeypatch)
@@ -847,6 +950,31 @@ async def test_run_discover_puts_external_hits_into_evidence(
     assert cov.server_rungs_used is True and cov.external_hits == 1
     # Tashqi topilma dalilga tushdi va **haqiqiy** havola bilan sitata bo'ldi.
     assert any(c["link"] == "https://t.me/ielts/77" for c in result.citations)
+
+
+@pytest.mark.asyncio
+async def test_run_discover_without_premium_still_cites_public_channels(
+    monkeypatch: pytest.MonkeyPatch, wired: dict[str, Any]
+) -> None:
+    """Uchdan-uchgacha, Premium'siz: nom bo'yicha topilgan kanal sitata bo'ladi."""
+    seen = _fake_tg(monkeypatch, discover=_premium_blocked, by_name=_by_name_found)
+    monkeypatch.setattr(DS, "escalate", _REAL_ESCALATE)
+    use_multi(monkeypatch, lambda q: [_hit(1)])
+    llm = FakeLLM(synth="Ochiq kanallarda shunday deyishdi #x1.")
+
+    result = await DS.run_deep_search(
+        factory,  # type: ignore[arg-type]
+        1,
+        10,
+        "Men a'zo bo'lmagan kanallarda IELTS haqida nima yozishyapti?",
+        locale="uz",
+        llm=llm,
+    )
+
+    assert seen["by_name"], "nom bo'yicha zaxira yo'l chaqirilmadi"
+    assert result.coverage.external_hits == 1
+    assert any(c["link"] == "https://t.me/ielts/77" for c in result.citations)
+    assert any("messages.Search" in n for n in result.coverage.server_notes)
 
 
 @pytest.mark.asyncio

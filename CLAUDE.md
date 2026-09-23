@@ -162,6 +162,17 @@ bitta akkaunt kvotasini bo'lishadi).
   qolgan ikki pog'onani **butunlay o'chirardi** — bitta noto'g'ri `discover`
   butun server qamrovini yo'q qilardi. Jami `DEEP_SERVER_MAX_CALLS` (6)
   chaqiruv.
+- **`channels.SearchPosts` Telegram Premium talab qiladi.** Premium'siz
+  akkauntda u `PremiumAccountRequiredError` beradi → `note_code="premium_required"`
+  (xato emas, holat; `tg_search.PREMIUM_MISSING` da akkaunt bo'yicha bir marta
+  eslab qolinadi) va **tekin zaxira yo'l** ishga tushadi:
+  `tg_search.server_discover_by_name` = `contacts.Search` (nom bo'yicha ochiq
+  kanallar, lokal `chats` dagilari tashlanadi) + top 3 kanalda `messages.Search`.
+  Peer javob bilan kelgan access hash'dan yasaladi (`get_entity()` yo'q), natija
+  tashqi (`[server external]`, `t.me/<username>/<id>`). Bitta implementatsiya —
+  `tools.discover_channels` ham, `deep_search.escalate` ham shuni chaqiradi.
+  Byudjet: 1 flood/premium tekshiruvi + 1 `contacts.Search` + ≤3 `messages.Search`,
+  `SERVER_OTHER_RESERVE=1` esa gap-chat/global pog'onalariga qoladi.
 - To'lgan bucket — xato emas: pog'ona **o'tkazib yuboriladi** va
   `coverage.server_skipped` ga yoziladi. Kutish yo'q, retry yo'q.
 - Server hitlari alohida RRF ro'yxati (og'irlik 0.9). Lokal `chats` da bor
@@ -316,7 +327,11 @@ yugurtiring, bitta yugurish hech narsani isbotlamaydi).
   bloklanadi — foydalanuvchi ochiq-oydin chuqurroq/qayta qidirishni
   so'ramasa (`agent.wants_deeper_search`). Bloklangan chaqiruv ham
   `calls_log` ga `blocked="repeat_guard"` bilan tushadi, `context_used.
-  repeat_guard` ham belgilanadi.
+  repeat_guard` ham belgilanadi. Suhbatning so'nggi user turn'idan biriga
+  aynan/deyarli aynan mos savol (`agent.is_repeat_turn` — fold qilingan aynan
+  moslik yoki Jaccard ≥0.9, kamida 3 token, "chuqurroq" so'ralmagan bo'lsa)
+  server tool'larini **birinchi chaqiruvdanoq** to'sadi, bajariladigan
+  chaqiruvlar qopqog'ini 2 taga tushiradi va `runtime_note`ga qator qo'shadi.
 - **Suhbat keshi (`services/tool_cache.py`)** — `seen_calls` bitta yugurish
   ichida ishlaydi, bu esa **turn'lar orasida**: kalit `(conversation_id, tool,
   buklangan args)`, TTL 10 daqiqa, Redis (yo'q bo'lsa kesh ham yo'q). Faqat

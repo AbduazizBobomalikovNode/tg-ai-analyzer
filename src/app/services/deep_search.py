@@ -166,6 +166,13 @@ SERVER_MAX_CALLS = 6  # `.env` bekor qiladi: DEEP_SERVER_MAX_CALLS
 SERVER_RRF_WEIGHT = 0.9  # lokal kanal 1.0 — server reytingsiz, faqat kalit so'z
 SERVER_SUBQUERIES_PER_CHAT = 2
 SERVER_GAP_CHATS_MAX = 3
+# Premium'siz kashfiyot (`tg_search.server_discover_by_name`) byudjeti:
+# 1 ta `contacts.Search` + ≤3 ta `messages.Search`. Qolgan pog'onalarga
+# (bo'shliqli chatlar, global) **kamida** shuncha chaqiruv qoldiriladi.
+# `DEEP_SERVER_MAX_CALLS=6` da: 1 flood/premium tekshiruvi + 1 nom qidiruvi +
+# ≤3 kanal = ≤5, ya'ni ≥1 chaqiruv egasining o'z arxiviga qoladi.
+SERVER_DISCOVER_NAME_TOP_K = 3
+SERVER_OTHER_RESERVE = 1
 SERVER_LIMIT = 20
 # Tashqi (lokal `chats` da yo'q) hit uchun sintetik, **manfiy** `message_id`:
 # lokal id fazasiga urilmaydi va `_hydrate` uni DB'dan topmaydi.
@@ -1561,6 +1568,20 @@ def _discover_skip_note(retry_at: str) -> str:
     return f"ommaviy qidiruv: bepul limit tugagan{when}, Stars sarflanmaydi"
 
 
+def _premium_skip_note() -> str:
+    """`channels.SearchPosts` Premium talab qildi — sabab foydalanuvchi tilida."""
+    return "ommaviy post qidiruvi: Telegram Premium kerak, shuning uchun nom bo'yicha qidirildi"
+
+
+def _by_name_note(searched: Sequence[str]) -> str:
+    """Nom bo'yicha kashfiyot **rost** hisobi: nechta kanal haqiqatan o'qildi."""
+    names = ", ".join(f"@{u}" for u in searched if u)
+    return (
+        f"discover: nom bo'yicha (contacts.Search) + {len(searched)} kanalda "
+        f"messages.Search: {names}"
+    )
+
+
 def _channels_note(channels: Sequence[dict[str, Any]]) -> str:
     """`contacts.Search` topgan ochiq kanallar — post matni emas, nomlar."""
     names = []
@@ -1592,8 +1613,10 @@ async def escalate(
     pog'onalari **butunlay o'chirilardi** — natijada bitta noto'g'ri
     `discover` butun server qamrovini yo'q qilar, to'g'risi esa o'z
     chatlaridagi kontekstdan mahrum bo'lardi. Endi discover o'ziga kerakli
-    chaqiruvni **zaxiralab** oladi (1 ta, bepul slot tugasa +2 tekin zaxira
-    yo'l), qolgani odatdagidek pastga oqadi.
+    chaqiruvni **zaxiralab** oladi (1 ta; bepul slot tugagan yoki Premium
+    talab qilingan bo'lsa +1 `contacts.Search` va ≤`SERVER_DISCOVER_NAME_TOP_K`
+    `messages.Search`, `SERVER_OTHER_RESERVE` chaqiruv esa baribir qolgan
+    pog'onalarga qoladi), qolgani odatdagidek pastga oqadi.
     """
     outcome = ServerOutcome()
     if max_calls <= 0 or not plan.subqueries:
@@ -1642,17 +1665,45 @@ async def escalate(
         # bo'lmagan**. Buni jim o'tkazib yuborish yolg'on bo'lardi: sabab
         # qamrovga yoziladi va tekin zaxira yo'l sinab ko'riladi (Stars
         # hech qachon emas).
-        if res.note_code == "post_search_flood":
-            outcome.notes.append(_discover_skip_note(res.retry_at))
+        if res.note_code in ("post_search_flood", "premium_required"):
+            outcome.notes.append(
+                _discover_skip_note(res.retry_at)
+                if res.note_code == "post_search_flood"
+                else _premium_skip_note()
+            )
             if budget_left():
-                chans = await TG.server_channel_search(account_id, subqueries[0])
-                outcome.calls += chans.calls
-                if chans.rate_limited and chans.rate_limited not in outcome.skipped:
-                    outcome.skipped.append(chans.rate_limited)
+                # Byudjet taqsimoti: nom bo'yicha yo'l 1 ta `contacts.Search` +
+                # ≤`top_k` ta `messages.Search` yeydi, lekin gap-chat/global
+                # pog'onalariga **kamida** `SERVER_OTHER_RESERVE` chaqiruv
+                # qoldiradi (aks holda bitta discover butun byudjetni yeb,
+                # egasining o'z arxivi qaralmay qolardi).
+                allow = max_calls - outcome.calls - SERVER_OTHER_RESERVE
+                top_k = max(0, min(SERVER_DISCOVER_NAME_TOP_K, allow - 1))
+                chans = await TG.server_discover_by_name(
+                    account_id,
+                    subqueries[0],
+                    top_k=top_k,
+                    since=plan.since,
+                    until=plan.until,
+                    limit=SERVER_LIMIT,
+                )
+                got = await _absorb(session_factory, account_id, chans, outcome)
+                outcome.hits.extend(got)
                 if chans.channels:
                     outcome.rungs.append("channels")
                     outcome.notes.append(_channels_note(chans.channels))
-                _log_rung("channels", chans.calls, len(chans.channels), chans.error_text)
+                if chans.searched:
+                    outcome.rungs.append("channel_posts")
+                    outcome.notes.append(_by_name_note(chans.searched))
+                _log_rung("channels", chans.calls, len(got), chans.note or chans.error_text)
+                await _emit(
+                    events,
+                    "search",
+                    subquery=subqueries[0],
+                    hits=len(got),
+                    level="server",
+                    rung="channels",
+                )
 
     # ── 1-pog'ona: bo'shliqli chatlar ichida (messages.Search) ──────────────
     if budget_left():

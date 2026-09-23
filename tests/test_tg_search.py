@@ -25,6 +25,7 @@ from telethon.tl import types as tlt
 from app.config import get_settings
 from app.mtproto import allowlist as A
 from app.mtproto.ratelimit import BucketSpec, MethodBuckets
+from app.services import tg_search as TS
 from app.services import tools as T
 
 
@@ -575,6 +576,173 @@ async def test_discover_channels_hashtag_still_works_without_quota(
     posts = _req(client, "SearchPostsRequest")
     assert posts.hashtag == "ielts" and posts.query is None
     assert getattr(posts, "allow_paid_stars", None) is None
+
+
+# ─── Premium'siz kashfiyot: nom bo'yicha + kanal ichida messages.Search ──────
+
+
+class PremiumAccountRequiredError(Exception):
+    """Telethon xatosining nusxasi — aniqlash sinf **nomi** bo'yicha ketadi."""
+
+
+def _key(request: Any) -> str:
+    mod = (getattr(type(request), "__module__", "") or "").rsplit(".", 1)[-1]
+    return f"{mod}.{type(request).__name__}"
+
+
+class _NsClient(_Client):
+    """`contacts.Search` va `messages.Search` bir xil sinf nomida — kalit modul bilan."""
+
+    async def __call__(self, request: Any) -> Any:
+        self.requests.append(request)
+        if self.raise_ is not None:
+            raise self.raise_
+        reply = self.replies.get(_key(request), self.replies.get(type(request).__name__))
+        if isinstance(reply, Exception):
+            raise reply
+        return reply if reply is not None else _messages([])
+
+    @property
+    def ns(self) -> list[str]:
+        return [_key(r) for r in self.requests]
+
+    def first(self, key: str) -> Any:
+        return next(r for r in self.requests if _key(r) == key)
+
+
+def _chan(ident: int, username: str, title: str, *, access_hash: int | None = 7, **kw: Any) -> Any:
+    base = {"broadcast": True, "megagroup": False, "participants_count": 500}
+    return SimpleNamespace(
+        id=ident, title=title, username=username, access_hash=access_hash, **{**base, **kw}
+    )
+
+
+@pytest.fixture(autouse=True)
+def _forget_premium(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Premium holati jarayon xotirasida — testlar orasida oqib ketmasin."""
+    monkeypatch.setattr(TS, "PREMIUM_MISSING", set())
+
+
+async def test_discover_by_name_reads_public_channels(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`contacts.Search` → topilgan kanalda `messages.Search`, natija tashqi."""
+    client = _NsClient(
+        {
+            "contacts.SearchRequest": _messages(
+                [], chats=[_chan(100, "ielts", "IELTS"), _chan(200, "mine", "Mening kanalim")]
+            ),
+            "messages.SearchRequest": _messages(
+                [_msg(11, "post matni", channel_id=100)],
+                chats=[_entity(100, title="IELTS", username="ielts")],
+            ),
+        }
+    )
+    _patch_pool(monkeypatch, client)
+
+    out = await TS.server_discover_by_name(1, "ielts", known_peer_ids={200})
+
+    assert out.searched == ["ielts"]  # lokal `chats` dagi kanal tashlandi
+    assert [h.link for h in out.hits] == ["https://t.me/ielts/11"]
+    assert all(h.chat_id is None for h in out.hits)  # tashqi — saqlanmaydi
+    assert [h.peer_kind for h in out.hits] == ["channel"]
+    assert client.ns.count("messages.SearchRequest") == 1
+    assert out.calls == 2 and out.mode == "by name"
+    peer = client.first("messages.SearchRequest").peer
+    assert isinstance(peer, tlt.InputPeerChannel)
+    assert (peer.channel_id, peer.access_hash) == (100, 7)  # access hash javobdan
+    assert "@ielts" in (out.note or "")
+
+
+async def test_discover_by_name_caps_the_number_of_channels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chans = [_chan(100 + i, f"c{i}", f"Kanal {i}") for i in range(5)]
+    client = _NsClient({"contacts.SearchRequest": _messages([], chats=chans)})
+    _patch_pool(monkeypatch, client)
+
+    out = await TS.server_discover_by_name(1, "ielts", known_peer_ids=set())
+
+    assert client.ns.count("messages.SearchRequest") == TS.DISCOVER_NAME_TOP_K == 3
+    assert len(out.channels) == 5 and len(out.searched) == 3
+
+
+async def test_discover_by_name_skips_private_and_local_channels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _NsClient(
+        {
+            "contacts.SearchRequest": _messages(
+                [],
+                chats=[
+                    _chan(100, "", "Yopiq kanal"),  # username yo'q — o'qib bo'lmaydi
+                    _chan(101, "nohash", "Hash yo'q", access_hash=None),
+                    _chan(102, "local", "Lokal"),  # allaqachon bizda
+                ],
+            )
+        }
+    )
+    _patch_pool(monkeypatch, client)
+
+    out = await TS.server_discover_by_name(1, "ielts", known_peer_ids={102})
+
+    assert "messages.SearchRequest" not in client.ns
+    assert out.searched == [] and out.calls == 1
+    assert "already in your chats" in (out.note or "")
+
+
+async def test_discover_by_name_flood_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    err = tg_errors.FloodWaitError(request=None)
+    err.seconds = 30
+    client = _NsClient({"contacts.SearchRequest": err})
+    _patch_pool(monkeypatch, client)
+
+    out = await TS.server_discover_by_name(1, "ielts", known_peer_ids=set())
+
+    assert client.ns == ["contacts.SearchRequest"]  # bitta urinish, retry yo'q
+    assert out.hits == [] and "flood_wait 30s" in (out.error_text or "")
+    assert "no retry" in (out.note or "")
+
+
+async def test_discover_channels_falls_back_when_premium_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`PremiumAccountRequiredError` → tekin nom yo'li (jonli `global-04`)."""
+    client = _NsClient(
+        {
+            "channels.CheckSearchPostsFloodRequest": PremiumAccountRequiredError(),
+            "contacts.SearchRequest": _messages([], chats=[_chan(100, "ielts", "IELTS")]),
+            "messages.SearchRequest": _messages(
+                [_msg(11, "post matni", channel_id=100)],
+                chats=[_entity(100, title="IELTS", username="ielts")],
+            ),
+        }
+    )
+    _patch_pool(monkeypatch, client)
+
+    async def no_local(account_id: int) -> set[int]:
+        return set()
+
+    monkeypatch.setattr(TS, "local_peer_ids", no_local)
+
+    res = await T.discover_channels(_ctx(), {"query": "ielts"})
+
+    assert res.ok and "Premium" in res.text
+    assert "https://t.me/ielts/11" in res.text
+    assert client.ns.count("contacts.SearchRequest") == 1
+    assert client.ns.count("messages.SearchRequest") == 1
+    assert "channels.SearchPostsRequest" not in client.ns  # Premium yo'q — yuborilmadi
+
+
+async def test_premium_state_is_remembered_per_account(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bir marta bilingan Premium yo'qligi qayta so'ralmaydi (RPC ham, token ham)."""
+    client = _NsClient({"channels.CheckSearchPostsFloodRequest": PremiumAccountRequiredError()})
+    _patch_pool(monkeypatch, client)
+
+    first = await TS.server_discover(1, "ielts")
+    second = await TS.server_discover(1, "ielts")
+
+    assert first.note_code == second.note_code == "premium_required"
+    assert first.calls == 1 and second.calls == 0
+    assert client.ns == ["channels.CheckSearchPostsFloodRequest"]  # ikkinchi marta yo'q
 
 
 async def test_discover_channels_similar_to(monkeypatch: pytest.MonkeyPatch) -> None:

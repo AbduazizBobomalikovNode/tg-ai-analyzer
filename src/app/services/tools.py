@@ -1551,6 +1551,19 @@ async def discover_channels(ctx: ToolContext, args: dict[str, Any]) -> ToolResul
             return ToolResult(found.error_text, ok=False)
         if found.note is not None:
             blocks.append(found.note)
+            # Bepul slot tugagan yoki akkauntda Premium yo'q — tekin zaxira
+            # yo'l: nom bo'yicha topib (`contacts.Search`), topilgan ochiq
+            # kanallarda `messages.Search`. Yangi TL metod yo'q, Stars yo'q.
+            if found.note_code in ("post_search_flood", "premium_required"):
+                by_name = await TS.server_discover_by_name(ctx.account_id, query, limit=limit)
+                if by_name.note:
+                    blocks.append(by_name.note)
+                if by_name.hits:
+                    lines = [_hit_line(h, with_chat=True, with_link=True) for h in by_name.hits]
+                    blocks.append(
+                        f'posts from public channels named like "{query}" '
+                        f"({len(lines)}):\n" + "\n".join(lines)
+                    )
         else:
             posts = [_hit_line(h, with_chat=True, with_link=True) for h in found.hits]
             blocks.append(
