@@ -118,7 +118,7 @@ async def _finish(request: Request, response: Response, flow_id: str) -> dict[st
         raise _auth_http(exc) from exc
     finally:
         del result  # session string RAM'da qolmasin
-    set_session_cookie(request, response, linked.user_id)
+    await set_session_cookie(request, response, linked.user_id)
     await _kick_sync(linked.account_id)
     return {"flow_id": flow_id, "status": "done", "account_id": linked.account_id}
 
@@ -429,6 +429,6 @@ async def auth_telegram(body: InitDataIn, request: Request, response: Response) 
             log.info("auth.miniapp_unlinked", tg_user_id=tg_user_id)
             raise HTTPException(status_code=403, detail={"code": "auth.err.not_linked"})
         user_id = int(user.id)
-    set_session_cookie(request, response, user_id)
+    await set_session_cookie(request, response, user_id)
     log.info("auth.miniapp_ok", user_id=user_id)
     return {"status": "done", "user_id": user_id}

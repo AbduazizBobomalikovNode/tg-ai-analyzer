@@ -51,6 +51,96 @@ def test_rate_limiter() -> None:
     assert rl.check("other")
 
 
+class _FakeRedis:
+    """Minimal `redis.asyncio` o'rnini bosuvchi (faqat `set`/`get`/`aclose`)."""
+
+    def __init__(self) -> None:
+        self.data: dict[str, str] = {}
+
+    async def set(self, key: str, value: str, ex: int | None = None) -> None:
+        self.data[key] = value
+
+    async def get(self, key: str) -> str | None:
+        return self.data.get(key)
+
+    async def aclose(self) -> None:
+        pass
+
+
+async def test_issue_session_after_revoke_same_second_is_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regressiya: `revoke_sessions` bilan bir xil (muzlatilgan) soniyada
+    berilgan yangi cookie rad etilmasligi kerak — `issue_session_async`
+    chegarani o'qib `iat`ni undan kattaroq qo'yadi. Eski cookie esa hali ham
+    rad etiladi."""
+    fake = _FakeRedis()
+
+    async def _get_fake() -> _FakeRedis:
+        return fake
+
+    monkeypatch.setattr(sec, "_redis", _get_fake)
+    frozen = 1_800_000_000.0
+    monkeypatch.setattr(time, "time", lambda: frozen)
+
+    # logout'dan oldin berilgan cookie
+    old_token = sec.issue_session(7)
+    old_ident = sec.read_session(old_token)
+    assert old_ident is not None and old_ident.issued_at == int(frozen)
+
+    assert await sec.revoke_sessions(7) is True
+    assert await sec.is_revoked(old_ident) is True  # eski cookie hamon rad etiladi
+
+    # bir xil (muzlatilgan) soniyada qayta login
+    new_token = await sec.issue_session_async(7)
+    new_ident = sec.read_session(new_token)
+    assert new_ident is not None
+    assert new_ident.issued_at > old_ident.issued_at
+    assert await sec.is_revoked(new_ident) is False  # yangi cookie darhol amal qiladi
+
+    # boshqa foydalanuvchiga ta'sir qilmaydi
+    other_token = await sec.issue_session_async(8)
+    other_ident = sec.read_session(other_token)
+    assert other_ident is not None and await sec.is_revoked(other_ident) is False
+
+
+async def test_issue_session_async_fails_open_without_redis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Redis yo'q/xato bo'lsa `issue_session_async` sinxron `issue_session`
+    bilan bir xil xulq-atvorga tushadi (fail-open, hujjatlashtirilgan)."""
+
+    async def _boom() -> Any:
+        raise ConnectionError("no redis")
+
+    monkeypatch.setattr(sec, "_redis", _boom)
+    token = await sec.issue_session_async(9)
+    ident = sec.read_session(token)
+    assert ident is not None and ident.user_id == 9
+
+
+@pytest.fixture(autouse=True)
+async def _isolate_session_revocations():
+    """`test_logout_clears_cookie` / yozish tool'i testlari haqiqiy Redis'ga
+    `web:sess:revoked:7` yozadi (`client` fixture Redis'ni soxtalamaydi).
+    Kalit sessiya TTL'idan uzoq yashaydi (`REVOKE_TTL_EXTRA`) va keyingi
+    testlar bir xil uid (7) bilan `sec.issue_session(7)` chaqirsa, agar bu
+    aynan o'sha soniyada bo'lsa — noto'g'ri bekor qilingan ko'rinardi. Har
+    testdan keyin tozalab, testlar orasidagi izolyatsiyani ta'minlaymiz
+    (koddagi tuzatish — `issue_session_async` — bilan **qo'shimcha**, uning
+    o'rniga emas: bu yerda haqiqiy Redis, u yerda esa production yo'li)."""
+    yield
+    try:
+        r = await sec._redis()
+        try:
+            async for key in r.scan_iter(match=sec.REVOKE_PREFIX + "*"):
+                await r.delete(key)
+        finally:
+            await r.aclose()
+    except Exception as exc:  # Redis lokal yo'q bo'lishi mumkin — testlar shunda ham yugursin
+        print(f"[_isolate_session_revocations] tozalab bo'lmadi: {exc}")
+
+
 # ─── chat servisi (sof funksiyalar) ─────────────────────────────────────────
 
 

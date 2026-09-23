@@ -10,6 +10,11 @@
   cookie'lar rad etiladi. Redis yo'q bo'lsa **fail-open** (ogohlantirish
   log'i bilan): web umuman ishlamay qolgandan ko'ra eski cookie bir muddat
   yashagani afzal, imzo va TTL baribir kuchda.
+* `set_session_cookie` `issue_session_async` orqali beradi: bekor qilish
+  chegarasini o'qib `iat`ni undan kattaroq qiladi, aks holda logout bilan
+  **bir xil soniyada** qayta login qilingan cookie ham (noto'g'ri) darhol
+  rad etilardi. To'g'ridan-to'g'ri sinxron `issue_session` (testlar, ichki
+  chaqiruvlar) Redis'ga tegmaydi — eski xulq-atvor.
 * CSRF — barcha o'zgartiruvchi API'lar `X-Requested-With: fetch` header'ini
   talab qiladi (oddiy forma/`<img>` orqali yuborib bo'lmaydi), cookie SameSite=Lax.
 * Locale — `?lang=` → `lang` cookie → `Accept-Language` → uz.
@@ -57,8 +62,15 @@ def _serializer() -> URLSafeSerializer:
     return URLSafeSerializer(key, salt="tgai.web.session")
 
 
-def issue_session(user_id: int) -> str:
-    return _serializer().dumps({"uid": int(user_id), "iat": int(time.time()), "v": SESSION_VERSION})
+def issue_session(user_id: int, *, min_iat: int | None = None) -> str:
+    """`min_iat` — `iat` shundan kichik bo'lmasligi kerak (`set_session_cookie`
+    orqali `issue_session_async` beradi: logout chegarasidan bir soniya katta).
+    To'g'ridan-to'g'ri chaqirilganda (testlar, ichki xizmatlar) `None` — eski
+    xulq-atvor, Redis'ga umuman tegilmaydi."""
+    iat = int(time.time())
+    if min_iat is not None and min_iat > iat:
+        iat = min_iat
+    return _serializer().dumps({"uid": int(user_id), "iat": iat, "v": SESSION_VERSION})
 
 
 def read_session(token: str | None) -> WebIdentity | None:
@@ -109,24 +121,62 @@ async def revoke_sessions(user_id: int, *, at: int | None = None) -> bool:
     return True
 
 
-async def is_revoked(ident: WebIdentity) -> bool:
-    """`iat <= chegara` bo'lsa — bekor qilingan. Redis yo'q → **fail-open**."""
+async def _revoke_threshold(user_id: int) -> int | None:
+    """Shu foydalanuvchi uchun joriy bekor qilish chegarasi (bo'lsa).
+
+    `is_revoked` va `issue_session_async` ikkalasi ham shu bitta o'qishdan
+    foydalanadi — chegara "hozir bekor qilinganmi" (o'qish) va "yangi cookie
+    yetarlicha yangimi" (berish) savollarining ikkalasiga ham javob beradi.
+    Xato/Redis yo'q → `None`, **fail-open** (chaqiruvchi buni "bekor
+    qilinmagan"/"cheklov yo'q" deb talqin qiladi).
+    """
     try:
         r = await _redis()
         try:
-            raw = await r.get(REVOKE_PREFIX + str(ident.user_id))
+            raw = await r.get(REVOKE_PREFIX + str(int(user_id)))
         finally:
             await r.aclose()
     except Exception as exc:
         log.warning("web.session_revoke_check_failed", error=str(exc)[:200])
-        return False
+        return None
     if raw is None:
-        return False
+        return None
     try:
-        threshold = int(raw.decode() if isinstance(raw, bytes) else raw)
+        return int(raw.decode() if isinstance(raw, bytes) else raw)
     except (ValueError, AttributeError):
+        return None
+
+
+async def is_revoked(ident: WebIdentity) -> bool:
+    """`iat <= chegara` bo'lsa — bekor qilingan. Redis yo'q → **fail-open**."""
+    threshold = await _revoke_threshold(ident.user_id)
+    if threshold is None:
         return False
     return ident.issued_at <= threshold
+
+
+async def issue_session_async(user_id: int) -> str:
+    """`issue_session`ning production yo'li (`set_session_cookie`).
+
+    Bug: `issue_session` `iat = now()` (butun soniya) qo'yardi, `is_revoked`
+    esa `iat <= chegara` bilan rad etardi. Logout (`revoke_sessions`) ham
+    xuddi shu soniyalik `now()`ni chegara qilib yozadi — demak, logout bilan
+    **bir xil soniyada** qayta kirilsa, yangi cookie'ning `iat`i chegaraga
+    teng chiqib, o'zi ham rad etilardi (401). Productionda bu ham haqiqiy:
+    logout → darhol qayta login = "ishlamayapti" bo'lib ko'rinardi.
+
+    Yechim: chegarani shu yerda o'qib, `iat`ni undan **kamida bitta soniya
+    katta** qilib beramiz (`min_iat = chegara + 1`). Shu bilan:
+      * logout'dan **oldin** berilgan cookie'lar (`iat <= chegara`) hali ham
+        rad etiladi — `is_revoked` o'zgarmagan;
+      * logout'dan **keyin** (hatto bir xil soniyada) berilgan cookie har
+        doim `iat > chegara` bilan chiqadi — hech qachon rad etilmaydi.
+    Redis yo'q/xato → `_revoke_threshold` `None` qaytaradi → `min_iat=None`,
+    ya'ni sinxron `issue_session` bilan bir xil fail-open xulq-atvor.
+    """
+    threshold = await _revoke_threshold(user_id)
+    min_iat = None if threshold is None else threshold + 1
+    return issue_session(user_id, min_iat=min_iat)
 
 
 def is_https(request: Request) -> bool:
@@ -134,16 +184,20 @@ def is_https(request: Request) -> bool:
     return proto == "https" or request.url.scheme == "https"
 
 
-def set_session_cookie(request: Request, response: Response, user_id: int) -> None:
+async def set_session_cookie(request: Request, response: Response, user_id: int) -> None:
     """`Secure` — so'rov HTTPS bo'lsa (yoki config HTTPS'ni talab qilsa).
 
     Lokal http://localhost'da Secure qo'yilmaydi, aks holda brauzer cookie'ni
     saqlamaydi va login "ishlamaydi" bo'lib ko'rinadi.
+
+    `issue_session_async` (Redis'dagi bekor qilish chegarasini hisobga
+    oladi) chaqiriladi — sinxron `issue_session` emas: logout bilan bir xil
+    soniyada qayta login qilingan cookie ham darhol amal qilishi kerak.
     """
     s = get_settings()
     response.set_cookie(
         SESSION_COOKIE,
-        issue_session(user_id),
+        await issue_session_async(user_id),
         max_age=s.web_session_ttl_hours * 3600,
         httponly=True,
         secure=is_https(request) or (s.web_secure_cookies and s.is_prod),
