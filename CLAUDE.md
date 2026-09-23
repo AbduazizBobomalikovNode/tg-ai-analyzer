@@ -95,6 +95,13 @@ synth → qamrov. Web: `POST /api/conversations/{id}/messages` `mode="deep"`
   `synced_min_id != 1` chatlar; `server_rungs_used` / `server_calls` /
   `server_hits` / `server_skipped` / `external_hits` — server pog'onalarining
   **rost** hisobi. "Hamma xabarlarni ko'rdim" degan gap chiqmasin.
+- **Tashqi manba da'vosi kod bilan qo'riqlanadi.** Sintez turn'iga
+  `deep_search.external_fact()` bitta fakt satri qo'yadi
+  (`external_evidence: none` / `N hit(s) from @a, @b`) va prompt "tashqi
+  kanaldan" deyishni faqat shunda ruxsat etadi. Sitata validatsiyasi bilan
+  bir joyda `external_claim_note()` post-tekshiruvi: javob da'vo qilib,
+  tashqi dalil bo'lmasa javob **qayta yozilmaydi**, oxiriga halol callout
+  qo'shiladi va `deep.external_claim_unbacked` log'ga tushadi.
 - **Yagona yozuvchi — `deep_search._persist`.** User turn + assistant turn +
   `agent_runs` bitta joyda yoziladi; boshqa joydan `conversation_messages`
   ga deep natijasini yozmang. Rejim `context.mode = "deep"` da.
@@ -173,6 +180,11 @@ bitta akkaunt kvotasini bo'lishadi).
   `tools.discover_channels` ham, `deep_search.escalate` ham shuni chaqiradi.
   Byudjet: 1 flood/premium tekshiruvi + 1 `contacts.Search` + ≤3 `messages.Search`,
   `SERVER_OTHER_RESERVE=1` esa gap-chat/global pog'onalariga qoladi.
+  `contacts.Search` **o'z bucket'ida** (`BUCKET_CONTACTS`, 3/min burst 2) —
+  `BUCKET_DISCOVER` (burst 1) da probe yagona tokenni yeb, zaxira yo'l hech
+  qachon ishga tushmasdi (jonli: `server_skipped=["discover"]`,
+  `external_hits=0`). `PREMIUM_MISSING` — **jarayon xotirasida**: har
+  restartdan keyingi birinchi yugurish bitta probe to'laydi.
 - To'lgan bucket — xato emas: pog'ona **o'tkazib yuboriladi** va
   `coverage.server_skipped` ga yoziladi. Kutish yo'q, retry yo'q.
 - Server hitlari alohida RRF ro'yxati (og'irlik 0.9). Lokal `chats` da bor

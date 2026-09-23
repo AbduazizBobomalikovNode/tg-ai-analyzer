@@ -27,7 +27,7 @@ from telethon import errors as tg_errors
 from telethon.tl import types as tlt
 
 from app.config import get_settings
-from app.mtproto.ratelimit import BucketSpec, MethodBuckets
+from app.mtproto.ratelimit import BUCKETS, BucketSpec, MethodBuckets
 from app.services import tg_search as TS
 from app.services import tools as T
 
@@ -95,7 +95,7 @@ def _req(client: _Client, name: str) -> Any:
 def _buckets(rate: int, burst: int | None = None) -> MethodBuckets:
     specs = {
         name: BucketSpec(name, rate, burst if burst is not None else rate)
-        for name in ("history", "search", "resolve", "discover")
+        for name in BUCKETS  # yangi bucket qo'shilsa test helperi ortda qolmasin
     }
     return MethodBuckets(specs, jitter=0.0)
 
@@ -195,6 +195,7 @@ async def test_discover_uses_its_own_bucket(monkeypatch: pytest.MonkeyPatch) -> 
             "search": BucketSpec("search", 0, 0),
             "resolve": BucketSpec("resolve", 50, 50),
             "discover": BucketSpec("discover", 50, 50),
+            "contacts": BucketSpec("contacts", 50, 50),
         },
         jitter=0.0,
     )
@@ -205,6 +206,107 @@ async def test_discover_uses_its_own_bucket(monkeypatch: pytest.MonkeyPatch) -> 
     assert (await TS.server_search_global(1, "x")).rate_limited == TS.BUCKET_SEARCH
     found = await TS.server_discover(1, "x")
     assert found.rate_limited is None and "CheckSearchPostsFloodRequest" in client.seen
+
+
+# ─── Premium'siz kashfiyot: probe zaxira yo'lni ochlikda qoldirmasin ─────────
+
+
+class PremiumAccountRequiredError(Exception):
+    """Nomi muhim: `tg_search.is_premium_error` xato **klassi nomiga** qaraydi."""
+
+
+class _TwoSearchClient:
+    """`contacts.Search` va `messages.Search` klass nomi bir xil — modulga qaraymiz."""
+
+    def __init__(self, found: Any, posts: Any) -> None:
+        self.found, self.posts = found, posts
+        self.requests: list[Any] = []
+
+    @property
+    def seen(self) -> list[str]:
+        return [
+            f"{type(r).__module__.rsplit('.', 1)[-1]}.{type(r).__name__}" for r in self.requests
+        ]
+
+    async def __call__(self, request: Any) -> Any:
+        self.requests.append(request)
+        if type(request).__name__ == "CheckSearchPostsFloodRequest":
+            raise PremiumAccountRequiredError("PREMIUM_ACCOUNT_REQUIRED")
+        if "contacts" in type(request).__module__:
+            return self.found
+        return self.posts
+
+
+def _public_channel() -> Any:
+    return SimpleNamespace(
+        id=555,
+        access_hash=7,
+        title="AI kanal",
+        username="ai_uz",
+        broadcast=True,
+        megagroup=False,
+        participants_count=1200,
+        phone=PHONE,
+    )
+
+
+async def test_premium_fallback_reaches_contacts_search(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Jonli regressiya: probe `discover` burst'ini yeb, zaxira yo'lni o'ldirardi.
+
+    **Soxta bucket yo'q** — `.env` dagi haqiqiy tezliklar bilan, bitta soniya
+    ichida: `CheckSearchPostsFlood` (probe) → Premium xatosi →
+    `contacts.Search` → topilgan kanalda `messages.Search`.
+    """
+    TS.PREMIUM_MISSING.discard(1)
+    monkeypatch.setattr(T, "_buckets", MethodBuckets.from_settings(get_settings(), jitter=0.0))
+    client = _TwoSearchClient(
+        found=SimpleNamespace(chats=[_public_channel()], users=[]),
+        posts=_messages([_msg(3, channel_id=555)], chats=[_entity(555, title="AI kanal")]),
+    )
+    _patch_pool(monkeypatch, client)
+
+    probe = await TS.server_discover(1, "sun'iy intellekt")
+    assert probe.note_code == "premium_required" and not probe.hits
+
+    res = await TS.server_discover_by_name(1, "sun'iy intellekt", known_peer_ids=set())
+
+    assert "contacts.SearchRequest" in client.seen  # ← aynan shu bajarilmasdi
+    assert res.rate_limited is None and res.error_text is None
+    assert res.searched == ["ai_uz"] and res.hits
+    assert res.hits[0].chat_id is None  # tashqi: lokal `chats` da yo'q
+    assert PHONE not in str(res.channels)
+    TS.PREMIUM_MISSING.discard(1)
+
+
+async def test_contacts_search_never_draws_from_the_discover_bucket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`discover` butunlay o'chiq bo'lsa ham nom qidiruvi ishlaydi (va aksincha)."""
+    buckets = MethodBuckets(
+        {
+            "history": BucketSpec("history", 50, 50),
+            "search": BucketSpec("search", 50, 50),
+            "resolve": BucketSpec("resolve", 50, 50),
+            "discover": BucketSpec("discover", 0, 0),
+            "contacts": BucketSpec("contacts", 50, 50),
+        },
+        jitter=0.0,
+    )
+    monkeypatch.setattr(T, "_buckets", buckets)
+    TS.PREMIUM_MISSING.discard(1)
+    client = _TwoSearchClient(
+        found=SimpleNamespace(chats=[_public_channel()], users=[]), posts=None
+    )
+    _patch_pool(monkeypatch, client)
+
+    found = await TS.server_channel_search(1, "ai")
+    assert found.rate_limited is None and found.channels
+
+    assert (await TS.server_discover(1, "ai")).rate_limited == TS.BUCKET_DISCOVER
+
+    buckets.specs["contacts"] = BucketSpec("contacts", 0, 0)
+    blocked = await TS.server_channel_search(1, "ai")
+    assert blocked.rate_limited == TS.BUCKET_CONTACTS
 
 
 async def test_disabled_by_zero_rate(monkeypatch: pytest.MonkeyPatch) -> None:

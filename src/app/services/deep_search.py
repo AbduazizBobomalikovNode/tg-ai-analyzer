@@ -2026,6 +2026,104 @@ def validate_citations(
     return cited, invalid
 
 
+def external_channels(evidence: Sequence[DeepEvidence]) -> list[str]:
+    """Tashqi dalillar kelgan kanal `@username`lari — havoladan, modeldan emas."""
+    out: list[str] = []
+    for e in evidence:
+        if not e.external:
+            continue
+        name = ""
+        link = (e.link or "").strip()
+        if "t.me/" in link and "t.me/c/" not in link:
+            tail = link.split("t.me/", 1)[1].strip("/")
+            head = tail.split("/", 1)[0].strip()
+            if head and not head.isdigit():
+                name = f"@{head}"
+        if not name:
+            name = (e.chat_title or "").strip()
+        if name and name not in out:
+            out.append(name)
+    return out
+
+
+def external_fact(evidence: Sequence[DeepEvidence]) -> str:
+    """Sintez prompt'iga tushadigan **kod hisoblagan** fakt satri.
+
+    Jonli regressiya: javob "ochiq kanallardan" deb yozardi, holbuki
+    `external_hits=0` va har sitata lokal chatdan edi. Model qamrovni
+    ko'rmaydi — shuning uchun tashqi dalil bor-yo'qligi unga aniq aytiladi.
+    """
+    count = sum(1 for e in evidence if e.external)
+    if not count:
+        return "external_evidence: none"
+    names = external_channels(evidence)[:5]
+    tail = f" from {', '.join(names)}" if names else ""
+    return f"external_evidence: {count} hit(s){tail}"
+
+
+#: Javobda "tashqi/ochiq/boshqa kanallardan" degan da'vo — uch tilda.
+#: Faqat **da'vo** shakllari: "topilmadi" degan halol jumla tushmasin, shuning
+#: uchun inkor yaqinida tekshiriladi (`_EXTERNAL_DENIAL_RE`).
+_EXTERNAL_CLAIM_RE = re.compile(
+    r"tashqi\s+(?:ochiq\s+)?kanal"
+    r"|ochiq\s+kanallar(?:dan|da|ga|ning)"
+    r"|boshqa\s+kanallar(?:dan|da)"
+    r"|tashqi\s+manba"
+    r"|внешн\w*\s+канал"
+    r"|публичн\w*\s+канал"
+    r"|других\s+канал"
+    r"|внешн\w*\s+источник"
+    r"|public\s+channel"
+    r"|other\s+channels"
+    r"|external\s+(?:channel|source)",
+    re.IGNORECASE,
+)
+
+#: Inkor — "topilmadi / не найдено / no evidence". Shu bo'lsa da'vo emas.
+_EXTERNAL_DENIAL_RE = re.compile(
+    r"topilmadi|yo'q|emas|qidirilmadi"
+    r"|не\s+найден|нет\s+|не\s+искал|отсутств"
+    r"|\bno\b|\bnot\b|\bnone\b|\bwithout\b",
+    re.IGNORECASE,
+)
+
+_EXTERNAL_NOTE: dict[str, str] = {
+    "uz": (
+        "> [!NOTE]\n"
+        "> Aniqlik uchun: bu javobdagi dalillarning hammasi sizning o'z "
+        "chatlaringizdan. Sizning chatlaringizdan tashqaridagi ochiq "
+        "kanallardan hech qanday dalil topilmadi."
+    ),
+    "ru": (
+        "> [!NOTE]\n"
+        "> Уточнение: все доказательства в этом ответе — из ваших собственных "
+        "чатов. Из внешних публичных каналов ничего не найдено."
+    ),
+    "en": (
+        "> [!NOTE]\n"
+        "> To be precise: every piece of evidence in this answer comes from your "
+        "own chats. Nothing was found in public channels outside them."
+    ),
+}
+
+
+def external_claim_note(answer: str, external_hits: int, *, locale: str = "uz") -> str:
+    """Javob tashqi kanalni da'vo qildi-yu, tashqi dalil yo'q — halol izoh.
+
+    Javob **qayta yozilmaydi** (sitatalar va shakl buzilmasin): oxiriga qisqa
+    callout qo'shiladi. Tashqi dalil bo'lsa yoki da'vo bo'lmasa — bo'sh satr.
+    """
+    if external_hits > 0 or not answer:
+        return ""
+    for line in answer.splitlines():
+        if not _EXTERNAL_CLAIM_RE.search(line):
+            continue
+        if _EXTERNAL_DENIAL_RE.search(line):
+            continue  # "tashqi kanallardan topilmadi" — bu halol jumla
+        return _EXTERNAL_NOTE.get(locale, _EXTERNAL_NOTE["en"])
+    return ""
+
+
 async def synthesize(
     meter: _Meter,
     question: str,
@@ -2055,7 +2153,10 @@ async def synthesize(
     hist = render_history(history)
     head = f"{hist}\n\n" if hist else ""
     tail = f"\nfollow-up: {follow_up}" if follow_up and follow_up != "none" else ""
-    user_turn = f"{head}{envelope}\n\nQuestion: {U.neutralize(question)}\n{note}{tail}"
+    # Fakt satri **kodda** hisoblanadi (qamrov bilan bir mantiq): modelning
+    # o'zi tashqi dalil bor-yo'qligini dalil satrlaridan taxmin qilmasin.
+    fact = external_fact(kept)
+    user_turn = f"{head}{envelope}\n\nQuestion: {U.neutralize(question)}\n{note}\n{fact}{tail}"
     task = Task.DEEP if deep else Task.SEARCH
     messages = [Msg.system(DEEP_SYNTH_PROMPT), Msg.user(user_turn)]
     try:
@@ -3083,6 +3184,21 @@ async def _run_pipeline(
         log.warning("deep.answer_truncated", chars=len(answer), finish_reason=finish_reason)
 
     citations, invalid = validate_citations(answer, kept)
+    # Sitatalar bilan bir joyda: javob "ochiq/tashqi kanallardan" deb da'vo
+    # qildi-yu, `external_hits == 0` bo'lsa — qayta yozmaymiz, qisqa halol
+    # izoh qo'shamiz (sitatalar va shakl buzilmasin).
+    # Qamrovdagi `external_hits` emas, **javobga tushgan** dalillar: model
+    # faqat shularni ko'rdi, da'vo ham faqat shularga tayanishi mumkin.
+    shown_external = sum(1 for e in kept if e.external)
+    ext_note = external_claim_note(answer, shown_external, locale=locale)
+    if ext_note:
+        log.warning(
+            "deep.external_claim_unbacked",
+            external_hits=server_out.external,
+            shown_external=shown_external,
+        )
+        answer = f"{answer}\n\n{ext_note}"
+        state["answer"] = answer
     # `chat_id=None` — tashqi (server/discover) topilma: lokal chat qatori yo'q.
     # `sorted()` aralash to'plamda `int < None` bilan yiqilardi.
     searched_chats = [
@@ -3305,6 +3421,9 @@ __all__ = [
     "earliest_synced_at",
     "escalate",
     "evidence_refs",
+    "external_channels",
+    "external_claim_note",
+    "external_fact",
     "fan_out",
     "global_scope_for",
     "load_history",

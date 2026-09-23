@@ -191,6 +191,8 @@ class Settings(BaseSettings):
     tg_rate_resolve_per_day: int = Field(default=60, ge=0, le=100_000)
     tg_rate_discover_per_min: int = Field(default=3, ge=0, le=600)
     tg_rate_discover_per_day: int = Field(default=30, ge=0, le=100_000)
+    tg_rate_contacts_per_min: int = Field(default=3, ge=0, le=600)
+    tg_rate_contacts_per_day: int = Field(default=30, ge=0, le=100_000)
 
     # --- phase2/C ---
     # Real-time updates listener (`app/worker/updates.py`, arxitektura v2 §8.3).

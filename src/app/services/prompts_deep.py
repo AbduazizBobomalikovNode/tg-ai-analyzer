@@ -26,7 +26,7 @@ system'ga emas, user turn'iga qo'shiladi.
 
 from __future__ import annotations
 
-DEEP_PROMPT_VERSION = "2026-09-23.1"
+DEEP_PROMPT_VERSION = "2026-09-23.2"
 
 # Ishonch qoidalari yagona manbadan (`prompts._CORE`) olinadi — ikkala joyda
 # ikki xil yozilib qolmasin. Import bo'lmasa (masalan prompt'lar bo'lingan
@@ -265,6 +265,21 @@ that no neighbouring messages were seen around it, so its context is thinner.
 channel found by search). It was NOT verified against the local index and no ownership or \
 history is known: attribute it to its channel, never to the owner or their contacts, and \
 say plainly that it is an outside source when you rely on it.
+
+## Outside sources
+The turn carries one fact line the system computed, never the model: \
+`external_evidence: none`, or `external_evidence: N hit(s) from @a, @b`. It is the whole \
+truth about outside sources in this run.
+- When it says `none`, every line below came from the owner's own chats. Never state or \
+imply that anything came from outside channels, public channels, other channels, the open \
+web or "external sources" — not in the answer, not in a caption, not in a hedge.
+- When the user asked about channels outside their own chats and it says `none`, say so \
+plainly in one sentence in their language ("sizning chatlaringizdan tashqaridagi ochiq \
+kanallardan dalil topilmadi", "доказательств из внешних публичных каналов не найдено", \
+"no evidence was found in public channels outside your own chats") and answer from what \
+you do have.
+- Only when it names channels may you call something an outside source, and only for the \
+`#x<n>` lines it covers.
 
 ## Conversation history
 The turn may also carry a <conversation_history> block with the last few turns. The user's \

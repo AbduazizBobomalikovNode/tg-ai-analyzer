@@ -24,7 +24,7 @@ from telethon.tl import types as tlt
 
 from app.config import get_settings
 from app.mtproto import allowlist as A
-from app.mtproto.ratelimit import BucketSpec, MethodBuckets
+from app.mtproto.ratelimit import BUCKETS, BucketSpec, MethodBuckets
 from app.services import tg_search as TS
 from app.services import tools as T
 
@@ -127,7 +127,7 @@ def _reset_rate(monkeypatch: pytest.MonkeyPatch) -> Any:
 def _buckets(rate: int, burst: int | None = None) -> MethodBuckets:
     specs = {
         name: BucketSpec(name, rate, burst if burst is not None else rate)
-        for name in ("history", "search", "resolve", "discover")
+        for name in BUCKETS  # yangi bucket qo'shilsa test helperi ortda qolmasin
     }
     return MethodBuckets(specs, jitter=0.0)
 

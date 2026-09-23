@@ -1,6 +1,6 @@
 """Metod sinflari bo'yicha token bucket'lar — akkauntning MTProto kvotasi.
 
-Nega bitta emas, to'rtta: bitta `TG_SEARCH_RATE_PER_MINUTE` shifti ostida
+Nega bitta emas, beshta: bitta `TG_SEARCH_RATE_PER_MINUTE` shifti ostida
 arzon `GetHistory` ham, qimmat `SearchPosts` ham bir xil kvotani yeydi —
 natijada yo tarix o'qish keraksiz to'siladi, yo global qidiruv juda erkin
 qoladi. Telegram ham ularni boshqacha o'lchaydi.
@@ -11,6 +11,15 @@ qoladi. Telegram ham ularni boshqacha o'lchaydi.
 | `search`   | 12/min | 4     | —      | Search, SearchGlobal, Calendar          |
 | `resolve`  | 4/min  | 2     | 60     | contacts.ResolveUsername (cache-first)  |
 | `discover` | 3/min  | 1     | 30     | ChannelRecommendations, SearchPosts     |
+| `contacts` | 3/min  | 2     | 30     | contacts.Search (nom bo'yicha kashfiyot) |
+
+Nega `contacts` alohida: `contacts.Search` — **boshqa va arzonroq** metod,
+`channels.SearchPosts` emas. Premium'siz akkauntda kashfiyot yo'li
+`CheckSearchPostsFlood` (probe) → `PremiumAccountRequiredError` → nom bo'yicha
+zaxira (`contacts.Search`) ko'rinishida boradi; ikkalasi bitta `burst=1`
+bucket'ni bo'lishganda probe yagona tokenni yeb qo'yar va zaxira yo'l
+**hech qachon** ishga tushmasdi (`server_skipped=["discover"]`,
+`external_hits=0`). Shuning uchun `burst=2` — probe va zaxira bir soniyada.
 
 `try_acquire()` **bloklamaydi** — bo'sh bucket modelga matn bo'lib qaytadi
 (`rate_limited:<bucket>`), u esa lokal qidiruvga tushadi. Kutish yo'q, chunki
@@ -48,7 +57,7 @@ __all__ = [
     "specs_from_settings",
 ]
 
-BUCKETS: tuple[str, ...] = ("history", "search", "resolve", "discover")
+BUCKETS: tuple[str, ...] = ("history", "search", "resolve", "discover", "contacts")
 
 # `TG_SEARCH_RATE_PER_MINUTE` ning tarixiy sukut qiymati. Foydalanuvchi uni
 # o'zgartirgan bo'lsa — eski nom yangi `search` bucket'ini boshqaradi.
@@ -70,6 +79,10 @@ DEFAULT_SPECS: dict[str, BucketSpec] = {
     "search": BucketSpec("search", 12, 4),
     "resolve": BucketSpec("resolve", 4, 2, per_day=60),
     "discover": BucketSpec("discover", 3, 1, per_day=30),
+    # `contacts.Search` — nom bo'yicha qidiruv, `channels.SearchPosts` dan
+    # arzonroq va **boshqa** metod. `burst=2`: Premium probe'i bilan nom
+    # bo'yicha zaxira yo'li bir soniyada ketma-ket ishlashi kerak.
+    "contacts": BucketSpec("contacts", 3, 2, per_day=30),
 }
 
 
@@ -147,6 +160,16 @@ def specs_from_settings(settings: Any | None = None) -> dict[str, BucketSpec]:
                 getattr(settings, "tg_rate_discover_per_day", DEFAULT_SPECS["discover"].per_day)
             ),
         ),
+        "contacts": BucketSpec(
+            "contacts",
+            int(
+                getattr(settings, "tg_rate_contacts_per_min", DEFAULT_SPECS["contacts"].per_minute)
+            ),
+            DEFAULT_SPECS["contacts"].burst,
+            per_day=int(
+                getattr(settings, "tg_rate_contacts_per_day", DEFAULT_SPECS["contacts"].per_day)
+            ),
+        ),
     }
 
 
@@ -155,7 +178,7 @@ class UnknownBucket(KeyError):
 
 
 class MethodBuckets:
-    """Akkaunt bo'yicha to'rtta token bucket, bloklamaydigan `try_acquire`."""
+    """Akkaunt bo'yicha metod sinfi bucket'lari, bloklamaydigan `try_acquire`."""
 
     def __init__(
         self,

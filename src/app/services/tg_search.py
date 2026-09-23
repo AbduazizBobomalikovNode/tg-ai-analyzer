@@ -55,6 +55,7 @@ from app.services import search as S
 log = get_logger(__name__)
 
 __all__ = [
+    "BUCKET_CONTACTS",
     "BUCKET_DISCOVER",
     "BUCKET_HISTORY",
     "BUCKET_RESOLVE",
@@ -80,6 +81,11 @@ BUCKET_HISTORY = "history"
 BUCKET_SEARCH = "search"
 BUCKET_RESOLVE = "resolve"
 BUCKET_DISCOVER = "discover"
+#: `contacts.Search` uchun **alohida** bucket: u `channels.SearchPosts` emas,
+#: arzonroq nom qidiruvi. Premium probe'i (`CheckSearchPostsFlood`) bilan bitta
+#: `burst=1` bucket'ni bo'lishganda probe yagona tokenni yer va Premium'siz
+#: akkauntda nom bo'yicha zaxira yo'l **hech qachon** ishga tushmasdi.
+BUCKET_CONTACTS = "contacts"
 
 SERVER_LIMIT_MAX = 20  # server qidiruvi DB'dan qimmatroq — qattiqroq qopqoq
 SNIPPET_CHARS = 400
@@ -750,14 +756,17 @@ async def server_channel_search(account_id: int, query: str, *, limit: int = 10)
     `channels.SearchPosts` bepul sloti tugaganda yagona qolgan tekin yo'l:
     post matnini bermaydi, lekin "bu mavzuda qanday ochiq kanallar bor" degan
     savolga rost javob beradi. Stars sarflanmaydi, natija saqlanmaydi.
+
+    Shift **`BUCKET_CONTACTS`** dan, `BUCKET_DISCOVER` dan emas: `SearchPosts`
+    probe'i (burst 1) bu yo'lni ochlikda qoldirardi.
     """
     from telethon.tl import functions as tlf
 
     query = (query or "").strip()
     if not query:
         return ChannelHits(error_text="error: `query` is required")
-    if (err := _guard(account_id, BUCKET_DISCOVER)) is not None:
-        return ChannelHits(rate_limited=BUCKET_DISCOVER, error_text=err)
+    if (err := _guard(account_id, BUCKET_CONTACTS)) is not None:
+        return ChannelHits(rate_limited=BUCKET_CONTACTS, error_text=err)
 
     res, err = await send_request(
         account_id,

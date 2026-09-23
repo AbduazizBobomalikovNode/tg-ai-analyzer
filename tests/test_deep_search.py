@@ -1943,6 +1943,55 @@ async def test_synthesize_reports_a_still_truncated_answer() -> None:
     assert res is not None and DS.is_length_finish(res.finish_reason) is True
 
 
+# ─── tashqi manba da'vosi — fakt satri + post-tekshiruv ─────────────────────
+
+
+def test_external_fact_is_computed_from_the_evidence_not_the_model() -> None:
+    local = DS.to_evidence([_hit(1)], [], link_prefixes={1: "https://t.me/c/1/"})
+    assert DS.external_fact(local) == "external_evidence: none"
+
+    ext = DS.to_evidence(
+        [_hit(2, chat_id=0)],
+        [],
+        server_ids={2},
+        external_links={2: "https://t.me/ai_uz/9"},
+    )
+    fact = DS.external_fact(ext)
+    assert fact.startswith("external_evidence: 1 hit(s)") and "@ai_uz" in fact
+    assert DS.external_channels(ext) == ["@ai_uz"]
+
+
+@pytest.mark.asyncio
+async def test_synthesis_turn_carries_the_external_fact_line() -> None:
+    llm = _TruncatingLLM()
+    meter = DS._Meter(llm)  # type: ignore[arg-type]
+    await DS.synthesize(meter, "savol?", DS.to_evidence([_hit(1)], []), [], locale="uz", deep=True)
+    assert "external_evidence: none" in llm.calls[0][-1].content
+
+
+def test_synth_prompt_forbids_unbacked_outside_claims() -> None:
+    assert "external_evidence: none" in DEEP_SYNTH_PROMPT
+    assert "Outside sources" in DEEP_SYNTH_PROMPT
+
+
+def test_external_claim_note_fires_only_without_external_evidence() -> None:
+    claim_uz = "Ma'lumot ochiq kanallardan olindi #c1m101."
+    assert DS.external_claim_note(claim_uz, 0, locale="uz").startswith("> [!NOTE]")
+    assert "o'z" in DS.external_claim_note(claim_uz, 0, locale="uz")
+    # Tashqi dalil bor — izoh yo'q.
+    assert DS.external_claim_note(claim_uz, 2, locale="uz") == ""
+    # Da'vo yo'q — izoh yo'q.
+    assert DS.external_claim_note("Faqat sizning chatlaringizdan #c1m101.", 0) == ""
+    # Halol inkor ("topilmadi") da'vo emas.
+    assert DS.external_claim_note("Tashqi ochiq kanallardan dalil topilmadi.", 0) == ""
+
+
+def test_external_claim_note_speaks_ru_and_en() -> None:
+    assert "внешних" in DS.external_claim_note("Взято из публичных каналов.", 0, locale="ru")
+    assert "own chats" in DS.external_claim_note("Taken from public channels.", 0, locale="en")
+    assert DS.external_claim_note("Ничего не найдено во внешних каналах.", 0, locale="ru") == ""
+
+
 def test_synth_token_budget_leaves_room_for_thinking() -> None:
     """Jonli regressiya: 4000 byudjetda `tokens_out=2677` + MAX_TOKENS."""
     assert DS.SYNTH_MAX_TOKENS == 8_000
@@ -2242,8 +2291,11 @@ def test_deep_prompts_describe_the_follow_up_contract() -> None:
     # Versiya scale prompt'lari (korpus kaskadi) va javob shakli ko'rsatmasi
     # (GFM jadval / ```chart / callout / :::details) qo'shilganda ko'tarildi;
     # 2026-09-23.1 — `chats` maydoni "all" ga qaratildi (jonli regressiya:
-    # "barcha chatlar bo'yicha" savolida reja bitta chat qaytargan edi).
-    assert DEEP_PROMPT_VERSION == "2026-09-23.1"
+    # "barcha chatlar bo'yicha" savolida reja bitta chat qaytargan edi);
+    # 2026-09-23.2 — `external_evidence` fakt satri va "tashqi kanal deb
+    # aytma" qoidasi (jonli regressiya: javob `external_hits=0` bo'lsa ham
+    # "ochiq kanallardan" degan edi).
+    assert DEEP_PROMPT_VERSION == "2026-09-23.2"
     for field_name in ("standalone_question", "intent_follow_up", "needs_retrieval"):
         assert field_name in DEEP_PLAN_PROMPT
     for label in DS.FOLLOW_UPS:
