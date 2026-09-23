@@ -676,7 +676,8 @@ def test_estimate_is_pure_arithmetic_and_grows_with_the_corpus() -> None:
     big = SC.estimate(_buckets(400), mode="deep", prices=prices)
     # Kichik rejada nomzod sanog'i pastki chegarada (`ELBOW_MIN`), xom
     # `bucket x k` da emas — aks holda baho har doim qopqoqqa to'yinardi.
-    assert small.est_messages == SC.ELBOW_MIN
+    # Pol hovuzning jismoniy kattaligidan oshmaydi: 10 x 30 = 300 < 500.
+    assert small.est_messages == min(SC.ELBOW_MIN, 10 * SC.PER_BUCKET_K)
     assert big.est_cost_usd > small.est_cost_usd > 0
     assert big.ceiling_usd == SC.COST_CEILING["deep"]
     assert small.to_dict()["mode"] == "deep"
@@ -688,20 +689,28 @@ def test_estimate_scales_with_the_bucket_count_and_never_saturates_early() -> No
     Endi u bucket soniga qarab o'sadi va faqat haqiqiy qopqoqda to'yinadi.
     """
     prices = dict.fromkeys(("filter", "map", "reduce", "synth"), (1.0, 1.0))
-    seen = [
-        SC.estimate(_buckets(n), mode="deep", prices=prices).est_messages for n in (20, 60, 150)
-    ]
+    sizes = (10, 60, 150)
+    seen = [SC.estimate(_buckets(n), mode="deep", prices=prices).est_messages for n in sizes]
     assert seen == sorted(seen)
     assert len(set(seen)) == 3, f"baho bucket soniga befarq qoldi: {seen}"
-    for n, value in zip((20, 60, 150), seen, strict=True):
+    for n, value in zip(sizes, seen, strict=True):
+        raw = n * SC.PER_BUCKET_K
         expected = min(
-            SC.FILTER_MAX["deep"], max(SC.ELBOW_MIN, int(n * SC.PER_BUCKET_K * SC.EST_PULL_YIELD))
+            SC.FILTER_MAX["deep"],
+            max(min(SC.ELBOW_MIN, raw), int(raw * SC.EST_PULL_YIELD)),
         )
         assert value == expected
-    # Qopqoq: `deep` ning xom ko'paytmasi 2100 bo'lsa ham `FILTER_MAX` da to'xtaydi.
+    # Qopqoq baribir `FILTER_MAX`: yetarlicha katta rejada baho unda to'xtaydi.
+    huge = math.ceil(SC.FILTER_MAX["deep"] / (SC.PER_BUCKET_K * SC.EST_PULL_YIELD)) + 10
     assert (
-        SC.estimate(_buckets(400), mode="deep", prices=prices).est_messages
+        SC.estimate(_buckets(huge), mode="deep", prices=prices).est_messages
         == (SC.FILTER_MAX["deep"])
+    )
+    # Va haqiqiy `deep` qopqog'ida (`BUCKET_MAX_DEEP`) baho unga **yetmaydi** —
+    # kalibratsiyadan keyin 200 bucket ≈ 900 nomzod, 2000 emas.
+    assert (
+        SC.estimate(_buckets(SC.BUCKET_MAX_DEEP), mode="deep", prices=prices).est_messages
+        < SC.FILTER_MAX["deep"]
     )
 
 
@@ -934,8 +943,11 @@ async def test_exhaustive_plans_the_full_range_when_the_window_is_open() -> None
         mode="exhaustive",
         **kwargs,
     )
-    # `deep`: tuguni bor chat zaxira yo'liga **tushmaydi** → bitta bucket.
-    assert len(deep) == 1 and deep[0].source == "node"
+    # `deep`: 2026-09 oyida tugun bor, ya'ni faqat **o'sha oy** zaxiradan
+    # chiqariladi. 2025 ning 12 oyi baribir bucket oladi — aks holda bitta
+    # hafta tuguni butun chatni ko'rinmas qilardi (3810 regressiyasi).
+    assert deep[0].source == "node"
+    assert len(deep) == 1 + len(months)
     # `exhaustive`: o'sha tugun + butun sinxronlangan oraliq oyma-oy.
     assert len(full) == 1 + len(months)
     assert len(full) >= len(deep), "exhaustive deep'dan kam rejalashtirmaydi"
@@ -1213,3 +1225,542 @@ def test_cluster_helpers_stay_off_the_hot_path() -> None:
     """Kosinus/klaster faqat filtrdan keyingi to'plamda yuguradi."""
     assert SC.CLUSTER_INPUT_MAX <= SC.SOFT_MAX_EVIDENCE
     assert SC.POOL_MAX > C.MAX_CLUSTER_INPUT * 10
+
+
+# ─── kaskad ↔ server pog'onalari (global-04, conv-20260918-112226) ───────────
+#
+# Jonli yugurishda `mode=deep` savoli "men obuna bo'lmagan kanallarda nima
+# bor" edi, javob esa faqat akkaunt chatlaridan yig'ildi — **eslatmasiz**.
+# Ildiz sabab: `_run_pipeline` kaskad shoxida `maybe_escalate` umuman
+# chaqirilmasdi (u faqat fan-out yo'lida bor edi), ya'ni `discover` pog'onasi
+# ham, "bepul limit tugadi" eslatmasi ham quvurga kirmasdi.
+
+_DISCOVER_PLAN = (
+    '{"intent":"lookup","window":null,"chats":[1],'
+    '"subqueries":["IT ta\'lim","IT obrazovanie"],"entities":[],"levels":[0,1],'
+    '"use_hyde":false,"server_scope":"discover"}'
+)
+_DISCOVER_NOTE = "ommaviy qidiruv: bepul limit tugagan — 2026-09-19 12:00 UTC gacha"
+
+
+def _server_outcome() -> DS.ServerOutcome:
+    """Bitta tashqi topilma + halol eslatma bilan `discover` natijasi."""
+    out = DS.ServerOutcome()
+    out.calls = 2
+    out.external = 1
+    out.rungs.append("discover")
+    out.notes.append(_DISCOVER_NOTE)
+    hit = _hit(9001, chat_id=None, text="Ochiq kanaldagi IT ta'lim haqida post")
+    hit.source = "server"
+    out.hits.append(hit)
+    out.server_ids.add(9001)
+    return out
+
+
+def _spy_escalate(monkeypatch: pytest.MonkeyPatch, outcome: DS.ServerOutcome | None) -> list[Any]:
+    seen: list[Any] = []
+
+    async def fake_escalate(_factory: Any, **kw: Any) -> DS.ServerOutcome:
+        seen.append(kw)
+        return outcome if outcome is not None else DS.ServerOutcome()
+
+    monkeypatch.setattr(DS, "escalate", fake_escalate)
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_cascade_runs_the_server_rungs_and_reports_the_note(
+    wired: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`server_scope=discover` → kaskad ham pog'onaga chiqadi, eslatma javobda."""
+    seen = _spy_escalate(monkeypatch, _server_outcome())
+    llm = FakeLLM(filter=KEEP_ALL, plan=_DISCOVER_PLAN)
+
+    result = await DS.run_deep_search(
+        factory,  # type: ignore[arg-type]
+        1,
+        10,
+        "Ochiq kanallarda IT ta'lim haqida nima bor? Obuna bo'lmaganlarini ham ko'r.",
+        locale="uz",
+        llm=llm,  # type: ignore[arg-type]
+        mode="deep",
+    )
+
+    assert len(seen) == 1, "kaskad shoxida eskalatsiya bir marta chaqiriladi"
+    assert seen[0]["plan"].server_scope == "discover"
+    assert seen[0]["max_calls"] > 0, "byudjet yugurish qopqog'idan olinadi"
+    cov = result.coverage
+    assert cov.server_rungs_used and cov.server_calls == 2 and cov.external_hits == 1
+    assert _DISCOVER_NOTE in cov.server_notes
+    # Javob matnining o'zi tashqi manba qidirilgani/qidirilmaganini **aytadi**.
+    assert _DISCOVER_NOTE in result.answer
+
+
+@pytest.mark.asyncio
+async def test_cascade_merges_server_hits_into_the_evidence(
+    wired: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _spy_escalate(monkeypatch, _server_outcome())
+    llm = FakeLLM(filter=KEEP_ALL, plan=_DISCOVER_PLAN)
+
+    result = await DS.run_deep_search(
+        factory,  # type: ignore[arg-type]
+        1,
+        10,
+        "Obuna bo'lmagan kanallarda IT ta'lim",
+        locale="uz",
+        llm=llm,  # type: ignore[arg-type]
+        mode="deep",
+    )
+
+    evidence = llm.user_turn(DEEP_SYNTH_PROMPT)
+    assert "Ochiq kanaldagi IT ta'lim" in evidence, "server topilmasi dalilga qo'shilmadi"
+    assert result.coverage.server_hits == 1
+
+
+@pytest.mark.asyncio
+async def test_cascade_skips_the_server_rungs_when_they_are_not_needed(
+    wired: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`server_scope=none` (sukut reja) — bitta ham MTProto so'rovi yo'q."""
+
+    async def boom(_factory: Any, **kw: Any) -> DS.ServerOutcome:  # pragma: no cover
+        raise AssertionError("kerak bo'lmaganda server pog'onasi chaqirilmaydi")
+
+    monkeypatch.setattr(DS, "escalate", boom)
+    llm = FakeLLM(filter=KEEP_ALL)
+
+    result = await DS.run_deep_search(
+        factory,  # type: ignore[arg-type]
+        1,
+        10,
+        "Nurbek bilan to'lov haqida nima kelishgandik?",
+        locale="uz",
+        llm=llm,  # type: ignore[arg-type]
+        mode="deep",
+    )
+    assert result.coverage.server_rungs_used is False
+    assert result.coverage.server_calls == 0 and not result.coverage.server_notes
+
+
+# ─── (i) rejalashtiruvchi tuzatishlari — jonli qayta sinovdan ────────────────
+#
+# To'rtta regressiya, akkaunt 2, `main` 33a4f3c ustidagi jonli yugurishdan:
+#
+#   1. bitta tugun haftasi butun chatni "qoplangan" deb belgilardi;
+#   2. "barcha chatlar bo'yicha" savolida reja bitta chat qaytardi;
+#   3. baho ~2.2 barobar oshirib hisoblardi (1 bucket'da 29 barobar);
+#   4. "chuqurroq qidir" aynan o'sha bucket'larni qayta rejalashtirardi.
+
+
+def _node_month_handler(node_rows: list[Any], month_rows: list[Any]) -> Any:
+    """`date_trunc` so'roviga oy qatorlarini, qolganiga tugun qatorlarini beradi."""
+
+    def handler(sql: str) -> list[Any]:
+        if "set_config" in sql:
+            return []
+        if "date_trunc" in sql:
+            return list(month_rows)
+        return list(node_rows)
+
+    return handler
+
+
+@pytest.mark.asyncio
+async def test_one_node_week_does_not_hide_the_rest_of_the_chat() -> None:
+    """3810 regressiyasi: 2 tugun (bitta hafta) → uch oylik savol 1 bucket edi.
+
+    Chat 3810 da ~174k xabar bor edi, tugun esa faqat 2026-09-16/17 da.
+    `covered` chat darajasida hisoblangani uchun zaxira `(chat, oy)` yo'li
+    butun chatni chetlab o'tardi va reja bitta bucket / 28 xabar bilan
+    yugurdi. Endi faqat **tugun turgan oy** chiqariladi.
+    """
+    week = datetime(2026, 9, 14, tzinfo=UTC)  # 2026-09 — tugun shu oyda
+    months = [datetime(2026, m, 1, tzinfo=UTC) for m in (7, 8, 9)]
+    handler = _node_month_handler(
+        node_rows=[(3810, week, 28, 0.3)],
+        month_rows=[(3810, m, 58_000) for m in months],
+    )
+    buckets = await SC.plan_buckets(
+        FakeSession(handler),  # type: ignore[arg-type]
+        2,
+        plan=DS.DeepPlan(
+            subqueries=["a"],
+            chats=[3810],
+            since=datetime(2026, 7, 1, tzinfo=UTC),
+            until=datetime(2026, 10, 1, tzinfo=UTC),
+        ),
+        vectors=[[0.1] * 8],
+        chat_titles={3810: "Katta chat"},
+        limit=SC.bucket_max_for("deep"),
+        mode="deep",
+    )
+    assert len(buckets) >= 3, [b.to_dict() for b in buckets]
+    labels = {b.label for b in buckets}
+    assert SC.iso_label(week) in labels  # tugun bucket'i saqlandi
+    # Tugun turgan oy ikkinchi marta qo'shilmadi, qolgan ikki oy qo'shildi.
+    assert {"2026-07", "2026-08"} <= labels
+    assert "2026-09" not in labels
+    assert sum(1 for b in buckets if b.source == "month") == 2
+
+
+@pytest.mark.asyncio
+async def test_month_fallback_is_per_chat_month_not_per_chat() -> None:
+    """Ikki chat, ikkalasida bittadan tugun — har biri qolgan oylarni oladi."""
+    week = datetime(2026, 9, 14, tzinfo=UTC)
+    months = [datetime(2026, m, 1, tzinfo=UTC) for m in (7, 8, 9)]
+    handler = _node_month_handler(
+        node_rows=[(1, week, 10, 0.3), (2, week, 10, 0.4)],
+        month_rows=[(cid, m, 900) for cid in (1, 2) for m in months],
+    )
+    buckets = await SC.plan_buckets(
+        FakeSession(handler),  # type: ignore[arg-type]
+        2,
+        plan=DS.DeepPlan(subqueries=["a"]),
+        vectors=[[0.1] * 8],
+        mode="deep",
+    )
+    by_chat = {cid: {b.label for b in buckets if b.chat_id == cid} for cid in (1, 2)}
+    for cid in (1, 2):
+        assert {"2026-07", "2026-08"} <= by_chat[cid], by_chat
+        assert "2026-09" not in by_chat[cid]
+
+
+# ─── "barcha chatlar bo'yicha" ───────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Barcha chatlar bo'yicha to'lov haqida nima bor?",
+        "hamma chatlarda qidirib ko'r",
+        "Butun arxiv bo'ylab statistika ber",
+        "Барча чатлар бўйича нима бор?",  # noqa: RUF001 — o'zbek kirill namunasi
+        "Посмотри во всех чатах про оплату",
+        "по всем чатам найди счёт",
+        "Search all my chats for the invoice",
+        "look across all chats",
+        "what does my entire archive say about it",
+    ],
+)
+def test_force_all_chats_recognises_the_whole_corpus_phrases(question: str) -> None:
+    assert SC.force_all_chats(question) is True
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Ish chatida to'lov haqida nima bor?",
+        "Nurbek bilan nima kelishgandik?",
+        "Что решили по срокам в рабочем чате?",
+        "What did Aziz say about the invoice?",
+        "",
+    ],
+)
+def test_force_all_chats_stays_quiet_on_ordinary_questions(question: str) -> None:
+    assert SC.force_all_chats(question) is False
+
+
+@pytest.mark.asyncio
+async def test_all_chats_question_ignores_the_planners_shortlist() -> None:
+    """Jonli regressiya: "barcha chatlar bo'yicha" → reja `chats:[3810]`.
+
+    Reja qisqa ro'yxat bersa ham savol butun korpusni so'rayapti — bucket
+    rejasi `plan.chats` ni e'tiborsiz qoldiradi va grid **hamma** chat
+    uchun quriladi.
+    """
+    week = datetime(2026, 9, 14, tzinfo=UTC)
+    month = datetime(2026, 8, 1, tzinfo=UTC)
+    seen: list[str] = []
+
+    def handler(sql: str) -> list[Any]:
+        seen.append(sql)
+        if "set_config" in sql:
+            return []
+        if "date_trunc" in sql:
+            return [(cid, month, 500) for cid in (3810, 42, 7)]
+        return [(3810, week, 28, 0.3)]
+
+    plan = DS.DeepPlan(subqueries=["a"], chats=[3810])
+    plan.standalone_question = "Barcha chatlar bo'yicha eng ko'p nima muhokama qilingan?"
+    buckets = await SC.plan_buckets(
+        FakeSession(handler),  # type: ignore[arg-type]
+        2,
+        plan=plan,
+        vectors=[[0.1] * 8],
+        limit=SC.bucket_max_for("deep"),
+        mode="deep",
+    )
+    assert {b.chat_id for b in buckets} == {3810, 42, 7}
+    # Reja chatiga bonus ham berilmadi — ro'yxat butunlay e'tiborsiz qoldi.
+    node = next(b for b in buckets if b.source == "node")
+    assert node.score == pytest.approx(0.7)
+
+
+@pytest.mark.asyncio
+async def test_named_chat_question_keeps_the_shortlist() -> None:
+    """Aksincha yo'nalish: savol chat nomlasa ro'yxat **saqlanadi**."""
+    week = datetime(2026, 9, 14, tzinfo=UTC)
+
+    def handler(sql: str) -> list[Any]:
+        if "set_config" in sql or "date_trunc" in sql:
+            return []
+        return [(3810, week, 28, 0.3), (42, week, 10, 0.9)]
+
+    plan = DS.DeepPlan(subqueries=["a"], chats=[3810])
+    plan.standalone_question = "Ish chatida to'lov haqida nima kelishgandik?"
+    buckets = await SC.plan_buckets(
+        FakeSession(handler),  # type: ignore[arg-type]
+        2,
+        plan=plan,
+        vectors=[[0.1] * 8],
+        mode="deep",
+    )
+    # Soxta sessiya SQL shartini bajarmaydi, lekin bonus faqat rejadagi
+    # chatga tushadi — ya'ni ro'yxat e'tiborsiz qolmadi.
+    by_chat = {b.chat_id: b.score for b in buckets}
+    assert by_chat[3810] == pytest.approx(0.7 + SC.PLAN_CHAT_BONUS)
+    assert by_chat[42] == pytest.approx(0.1)
+
+
+# ─── "chuqurroq qidir" skanni kengaytiradi ───────────────────────────────────
+
+
+def test_deeper_raises_the_bucket_and_filter_caps() -> None:
+    assert SC.bucket_max_for("deep") == SC.BUCKET_MAX_DEEP
+    assert SC.bucket_max_for("deep", "deeper") == SC.BUCKET_MAX_DEEPER
+    assert SC.BUCKET_MAX_DEEPER > SC.BUCKET_MAX_DEEP
+    # `exhaustive` allaqachon eng katta qopqoqda — `deeper` uni o'zgartirmaydi.
+    assert SC.bucket_max_for("exhaustive", "deeper") == SC.BUCKET_MAX
+    assert SC.filter_max_for("deep", "deeper") == int(
+        SC.FILTER_MAX["deep"] * SC.DEEPER_FILTER_BOOST
+    )
+    assert SC.filter_max_for("deep") == SC.FILTER_MAX["deep"]
+    # Boshqa follow-up turlari hech narsani ko'tarmaydi.
+    for follow in ("none", "repeat", "correction", "context_switch"):
+        assert SC.bucket_max_for("deep", follow) == SC.BUCKET_MAX_DEEP
+        assert SC.filter_max_for("deep", follow) == SC.FILTER_MAX["deep"]
+
+
+def test_deeper_window_doubles_backwards_only() -> None:
+    since = datetime(2026, 9, 1, tzinfo=UTC)
+    until = datetime(2026, 10, 1, tzinfo=UTC)
+    wide_since, wide_until = SC.deeper_window(since, until, "deeper")
+    assert wide_until == until  # oldinga cho'zilmaydi
+    assert wide_since == until - (until - since) * SC.DEEPER_WINDOW_FACTOR
+    assert wide_since < since
+    # Oynasiz savol yoki boshqa follow-up — o'zgarishsiz.
+    assert SC.deeper_window(since, until, "none") == (since, until)
+    assert SC.deeper_window(None, None, "deeper") == (None, None)
+    assert SC.deeper_window(None, until, "deeper") == (None, until)
+
+
+@pytest.mark.asyncio
+async def test_deeper_plan_yields_more_buckets_than_the_base_plan() -> None:
+    """Jonli regressiya: `deeper` da ham aynan o'sha 99 bucket rejalashtirilgan."""
+    start = datetime(2025, 1, 6, tzinfo=UTC)
+    node_rows = [
+        (cid, start + timedelta(days=7 * i), 40, 0.5)
+        for cid in (1, 2)
+        for i in range(160)  # 320 tugun bucket'i — ikkala qopqoqdan ham katta
+    ]
+    handler = _node_month_handler(node_rows=node_rows, month_rows=[])
+    plan = DS.DeepPlan(subqueries=["a"])
+    deeper = DS.DeepPlan(subqueries=["a"])
+    deeper.intent_follow_up = "deeper"
+
+    async def run(p: DS.DeepPlan) -> list[SC.Bucket]:
+        return await SC.plan_buckets(
+            FakeSession(handler),  # type: ignore[arg-type]
+            1,
+            plan=p,
+            vectors=[[0.1] * 8],
+            limit=SC.bucket_max_for("deep", p.intent_follow_up),
+            mode="deep",
+        )
+
+    base = await run(plan)
+    wide = await run(deeper)
+    assert len(base) == SC.BUCKET_MAX_DEEP
+    assert len(wide) == SC.BUCKET_MAX_DEEPER
+    assert len(wide) > len(base)
+
+
+@pytest.mark.asyncio
+async def test_deeper_extends_the_window_back_in_the_plan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Oyna ham kengayadi — zaxira grid eski oylarni ham ko'radi."""
+    got: dict[str, Any] = {}
+    real = SC._month_buckets
+
+    async def spy(session: Any, account_id: int, **kw: Any) -> list[SC.Bucket]:
+        got.update(kw)
+        return await real(session, account_id, **kw)
+
+    monkeypatch.setattr(SC, "_month_buckets", spy)
+    plan = DS.DeepPlan(
+        subqueries=["a"],
+        since=datetime(2026, 9, 1, tzinfo=UTC),
+        until=datetime(2026, 10, 1, tzinfo=UTC),
+    )
+    plan.intent_follow_up = "deeper"
+    await SC.plan_buckets(
+        FakeSession(_node_month_handler(node_rows=[], month_rows=[])),  # type: ignore[arg-type]
+        1,
+        plan=plan,
+        vectors=[[0.1] * 8],
+        mode="deep",
+    )
+    # Oyna 30 kun edi → 60 kun bo'ldi (kalendar oyga emas, davomiylikka nisbatan).
+    assert got["since"] == datetime(2026, 8, 2, tzinfo=UTC)
+    assert plan.until is not None and got["since"] == plan.until - timedelta(days=60)
+    assert got["until"] == plan.until
+    assert plan.since == datetime(2026, 9, 1, tzinfo=UTC), "reja o'zgartirilmaydi"
+
+
+# ─── baho: jonli o'lchovlar bilan ±40% ───────────────────────────────────────
+
+#: Jonli qayta sinov (akkaunt 2). Har qator: nomi, bucket soni, rejim,
+#: haqiqiy funnel (pull → tirsak → filtr → kept) va haqiqiy to'liq narx.
+MEASURED = [
+    ("deep", 99, "deep", (1855, 543, 467, 78), 0.096),
+    ("exhaustive", 200, "exhaustive", (3580, 999, 864, 215), 0.154),
+]
+
+
+@pytest.mark.parametrize(("name", "n", "mode", "funnel", "actual"), MEASURED)
+def test_estimate_lands_within_40_percent_of_the_measured_runs(
+    name: str, n: int, mode: str, funnel: tuple[int, int, int, int], actual: float
+) -> None:
+    est = SC.estimate(_buckets(n), mode=mode)
+    low, high = actual * 0.6, actual * 1.4
+    assert low <= est.est_total_usd <= high, (
+        f"{name}: baho {est.est_total_usd} o'lchangan {actual} dan ±40% tashqarida"
+        f" ({est.breakdown})"
+    )
+    # Nomzod sanog'i ham funnel'ning filtr bosqichiga yaqin bo'lsin.
+    _pull, _elbow, filter_total, _kept = funnel
+    assert 0.6 * filter_total <= est.est_messages <= 1.4 * filter_total, est.est_messages
+
+
+def test_estimate_scales_down_for_a_single_bucket_plan() -> None:
+    """Jonli o'lchov: 1 bucket / 28 xabar ≈ $0.0017, eski baho $0.049 edi."""
+    est = SC.estimate(_buckets(1), mode="deep")
+    assert est.est_messages == SC.PER_BUCKET_K  # 500 (`ELBOW_MIN`) emas
+    assert 0.001 <= est.est_cost_usd <= 0.0024, est.breakdown
+    # Map/reduce umuman yugurmaydi (kept < `MAP_SKIP_TOTAL`) — narx ham yo'q.
+    assert est.breakdown["map"] == 0.0 and est.breakdown["reduce"] == 0.0
+
+
+def test_estimate_never_exceeds_the_ceiling_for_a_full_deep_plan() -> None:
+    for follow in ("none", "deeper"):
+        est = SC.estimate(
+            _buckets(SC.bucket_max_for("deep", follow)), mode="deep", follow_up=follow
+        )
+        assert 0 < est.est_cost_usd <= SC.COST_CEILING["deep"], (follow, est.breakdown)
+
+
+def test_estimate_is_monotonic_in_the_bucket_count() -> None:
+    prices = dict.fromkeys(("filter", "map", "reduce", "synth"), (1.0, 1.0))
+    totals = [
+        SC.estimate(_buckets(n), mode="deep", prices=prices).est_total_usd
+        for n in (1, 5, 25, 100, 200)
+    ]
+    assert totals == sorted(totals), totals
+
+
+def test_estimate_output_tokens_are_measured_not_the_caps() -> None:
+    """Chiqish qopqog'i (`max_tokens`) baho emas — aks holda sintez $0.14."""
+    assert SC.EST_SYNTH_OUT_TOKENS < DS.SYNTH_MAX_TOKENS
+    assert SC.EST_MAP_OUT_TOKENS < SC.MAP_MAX_TOKENS
+    assert SC.EST_REDUCE_OUT_TOKENS < SC.REDUCE_MAX_TOKENS
+    est = SC.estimate(_buckets(99), mode="deep")
+    assert 0.02 <= est.breakdown["synth"] <= 0.06, est.breakdown
+
+
+# ─── qamrov funnel'i — bitta kanonik ketma-ketlik ────────────────────────────
+
+
+def test_scan_stats_exposes_the_whole_funnel() -> None:
+    data = SC.ScanStats().to_dict()
+    for field_name in ("pulled", "elbow", "candidates", "filter_total", "filter_done", "kept"):
+        assert field_name in data, field_name
+    # Eski nom ham qoldi (`deep_search.Coverage.filtered` shundan o'qiydi).
+    assert "filtered" in data and "evidence" in data
+
+
+def test_funnel_numbers_never_grow_down_the_pipeline() -> None:
+    st = SC.ScanStats()
+    st.pulled, st.elbow = 1855, 543
+    st.candidates, st.filter_total, st.filter_done = 517, 467, 467
+    st.kept = 78
+    st.evidence = 78
+    data = st.to_dict()
+    funnel = [
+        data["pulled"],
+        data["elbow"],
+        data["filter_total"],
+        data["filter_done"],
+        data["kept"],
+        data["evidence"],
+    ]
+    assert funnel == sorted(funnel, reverse=True), funnel
+    assert data["filtered"] == data["filter_done"]
+
+
+@pytest.mark.asyncio
+async def test_filter_batched_fills_filter_total_and_done() -> None:
+    """`filter_total` — filtrga kirgani, `filter_done` — ko'rib chiqilgani."""
+    pool = [_hit(i) for i in range(1, 61)]
+    llm = FakeLLM(filter='{"keep": [[0, 3]]}')
+    meter = _meter(llm)
+    st = SC.ScanStats()
+    await SC.filter_batched(
+        session_factory_of(FakeSession()),
+        account_id=1,
+        question="to'lov",
+        pool=pool,
+        bucket_of=dict.fromkeys((h.message_id for h in pool), "c1|2026-W37"),
+        meter=meter,
+        budget=_budget(meter),
+        taint=DS._Taint(),
+        mode="deep",
+        stats=st,
+    )
+    assert st.filter_total == len(pool)
+    assert st.filter_done == len(pool)
+    assert st.filtered == st.filter_done
+    assert st.filter_total >= st.filter_done >= st.kept
+
+
+@pytest.mark.asyncio
+async def test_filter_cap_is_wider_for_a_deeper_turn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`deeper` da filtr qopqog'i 50% kengroq — hovuz kamroq kesiladi."""
+    monkeypatch.setitem(SC.FILTER_MAX, "deep", 20)
+    pool = [_hit(i) for i in range(1, 41)]
+    llm = FakeLLM(filter='{"keep": []}')
+
+    async def run(follow: str) -> SC.ScanStats:
+        meter = _meter(llm)
+        st = SC.ScanStats()
+        await SC.filter_batched(
+            session_factory_of(FakeSession()),
+            account_id=1,
+            question="to'lov",
+            pool=pool,
+            bucket_of=dict.fromkeys((h.message_id for h in pool), "c1|2026-W37"),
+            meter=meter,
+            budget=_budget(meter),
+            taint=DS._Taint(),
+            mode="deep",
+            stats=st,
+            follow_up=follow,
+        )
+        return st
+
+    base = await run("none")
+    wide = await run("deeper")
+    assert base.filter_total == 20
+    assert wide.filter_total == 30  # 20 x `DEEPER_FILTER_BOOST`
+    assert wide.filter_total > base.filter_total

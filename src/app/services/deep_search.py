@@ -967,6 +967,16 @@ def parse_plan(
         ]
         plan.chats = sorted(set(picked)) or None
 
+    # Savol butun korpusni so'rasa, modelning pinlagan `chats` ro'yxati
+    # e'tiborsiz qoldiriladi — aks holda fan-out/kaskad/server pog'onasi
+    # baribir bitta chat bilan cheklanib qoladi (`scale_search.force_all_chats`
+    # docstring'idagi TODO).
+    from app.services import scale_search as SC
+
+    if SC.force_all_chats(plan.standalone_question or question):
+        plan.chats = None
+        log.info("deep.plan_all_chats")
+
     subs = _clean_terms(data.get("subqueries"), limit=MAX_SUBQUERIES)
     plan.subqueries = subs or [plan.standalone_question[:200]]
 
@@ -2076,7 +2086,11 @@ def build_coverage(
     if scan:
         cov.buckets_planned = int(scan.get("buckets_planned") or 0)
         cov.buckets_scanned = int(scan.get("buckets_scanned") or 0)
-        cov.filtered = int(scan.get("filtered") or 0)
+        # Kanonik funnel (`scale_search.ScanStats` docstring): `filtered` →
+        # `filter_done`, "ko'rilgan xabarlar" → `pulled`. `kept`/`evidence`
+        # o'zgarishsiz qoladi — ular allaqachon shu funnel'dan keladi.
+        cov.filtered = int(scan.get("filter_done") or 0)
+        cov.messages_scanned = int(scan.get("pulled") or 0)
         cov.kept = int(scan.get("kept") or 0)
         cov.stopped_by = str(scan.get("stopped_by") or "")
         cov.pull_stopped_by = str(scan.get("pull_stopped_by") or "")
@@ -2674,6 +2688,12 @@ async def _run_pipeline(
         for bucket in out.skipped:
             if bucket not in server_out.skipped:
                 server_out.skipped.append(bucket)
+        # Eslatmalar ("bepul limit tugagan", topilgan kanal nomlari) —
+        # qamrovning **yagona** manbasi. Ular ko'chirilmasa javob tashqi
+        # manba qidirilmaganini jimgina yashirardi.
+        for note in out.notes:
+            if note not in server_out.notes:
+                server_out.notes.append(note)
         if not out.hits:
             return current
         async with session_factory() as session:
@@ -2773,6 +2793,21 @@ async def _run_pipeline(
                 claims_block = SC.render_claims_block(
                     outcome.claims, outcome.contradictions, outcome.timeline
                 )
+                # Kaskad korpusni tugatgunicha aylanadi, lekin **akkaunt
+                # ichida**: "obuna bo'lmagan kanallarda nima bor" savoliga u
+                # ta'rifan javob bera olmaydi va jimgina o'z chatlarini
+                # ko'rsatardi. Shuning uchun fan-out yo'lidagi **o'sha**
+                # pog'ona shu yerda ham chaqiriladi — shart `needs_server`
+                # (bo'shliq, kam topilma, oyna, `server_scope`), byudjet esa
+                # yugurishning umumiy server qopqog'idan yeyiladi. Natijada
+                # `coverage.server_notes` javobga tushadi: tashqi manba
+                # qidirilmagan bo'lsa buni **aytish** kerak.
+                merged = await maybe_escalate(deduped)
+                if merged is not deduped:
+                    seen_ids = {h.message_id for h in candidates}
+                    candidates.extend(h for h in merged if h.message_id not in seen_ids)
+                    deduped = merged
+                    ranked = list(merged[: SC.SYNTH_EVIDENCE_LINES])
             else:
                 subqueries = list(plan.subqueries)
                 if plan.hyde_text:
@@ -2915,8 +2950,12 @@ async def _run_pipeline(
         log.warning("deep.answer_truncated", chars=len(answer), finish_reason=finish_reason)
 
     citations, invalid = validate_citations(answer, kept)
+    # `chat_id=None` — tashqi (server/discover) topilma: lokal chat qatori yo'q.
+    # `sorted()` aralash to'plamda `int < None` bilan yiqilardi.
     searched_chats = [
-        chats_by_id[cid] for cid in sorted({h.chat_id for h in deduped}) if cid in chats_by_id
+        chats_by_id[cid]
+        for cid in sorted({h.chat_id for h in deduped if h.chat_id is not None})
+        if cid in chats_by_id
     ]
     if not searched_chats and candidates:
         # Nomzod bor, lekin `deduped` chat id'siz (server/tashqi topilma) —

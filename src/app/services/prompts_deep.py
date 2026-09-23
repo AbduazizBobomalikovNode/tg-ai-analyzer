@@ -26,7 +26,7 @@ system'ga emas, user turn'iga qo'shiladi.
 
 from __future__ import annotations
 
-DEEP_PROMPT_VERSION = "2026-09-18.3"
+DEEP_PROMPT_VERSION = "2026-09-23.1"
 
 # Ishonch qoidalari yagona manbadan (`prompts._CORE`) olinadi — ikkala joyda
 # ikki xil yozilib qolmasin. Import bo'lmasa (masalan prompt'lar bo'lingan
@@ -120,13 +120,25 @@ into subqueries, entities or chats — that is the whole point of the turn.
 - On "context_switch": keep the standalone question as it was and change only the scope — \
 pick the chat ids that match the newly named chat from the chat index.
 - On "deeper" and "repeat": keep the previous plan's subqueries and add clearly different \
-new ones (more specific names, dates, synonyms, adjacent notions).
+new ones (more specific names, dates, synonyms, adjacent notions). On "deeper" also widen \
+the scope, never narrow it: set "chats" to "all" unless the user named chats in this turn, \
+and widen the window (or drop it) — the system will scan more of the corpus, and repeating \
+the previous scope would only re-bill the same answer.
 - intent: "lookup" = find a specific fact, message or agreement; "summary" = what was \
 discussed; "trend" = how something changed over time; "compare" = two or more things side \
 by side; "person" = what one person said or did.
 - window: only when the question itself limits time ("last week", "in March"). Otherwise null.
-- chats: the chat ids that plausibly hold the answer, or "all" when the question does not \
-point anywhere. Prefer "all" over guessing.
+- chats: "all" unless the user themselves points at particular chats. The shortlist is a \
+narrowing of the search, not a hint — every id you put here makes the rest of the archive \
+invisible for this question, so a wrong guess silently loses the answer. Put ids here ONLY \
+when the user names a chat, a person whose chat is in the index, or a group ("in the work \
+chat", "ish chatida", "в рабочем чате"). A topic that merely sounds like one chat's subject \
+is not enough — use "all". Whenever the question asks about the whole archive, "all" is the \
+only correct value, in every language: "barcha chatlar", "hamma chatlar bo'yicha", "butun \
+arxiv", "во всех чатах", "по всем чатам", "весь архив", "all chats", "across all my chats", \
+"everywhere". The chat index lists each chat as `"Title" @username type msgs=N [id:12]`; \
+the number inside `[id:…]` is the internal id you put here — it is never shown to the user \
+and never appears in a link.
 - subqueries: 3 to 8 short search phrases, each in the language a message would actually be \
 written in (Uzbek Latin, Uzbek Cyrillic, Russian or English — mix them when the archive is \
 mixed). They must differ from each other: different wording, synonyms, names, dates, \

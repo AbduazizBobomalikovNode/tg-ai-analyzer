@@ -116,6 +116,19 @@ BUCKET_MAX = 400  # chat x hafta bo'laklarining qattiq qopqog'i (`exhaustive`)
 #: katta chatlarning bir nechta oyi butun vaqtni yeydi, shuning uchun
 #: 100 va 200 orasida farq deyarli yo'q.
 BUCKET_MAX_DEEP = 200
+#: "Chuqurroq qidir" (`intent_follow_up == "deeper"`) — **kengroq** skan.
+#: Jonli sinovda `deeper` aynan o'sha 99 bucket'ni qayta rejalashtirgan edi:
+#: `_apply_follow_up` faqat subquery/level/server_scope ni kengaytiradi,
+#: korpus bo'lagi esa o'sha-o'sha qolardi, ya'ni foydalanuvchi "chuqurroq"
+#: deganida **bir xil** javobni qayta to'lardi. Qopqoq `BUCKET_MAX` (400)
+#: dan past: `deeper` `deep` rejimida ham yuguradi va pull byudjeti 70 s.
+BUCKET_MAX_DEEPER = 300
+#: `deeper` da filtr qopqog'i ham 50% ga kengayadi (qopqoq baribir
+#: `COST_CEILING` — narx chegarasi kodda qoladi).
+DEEPER_FILTER_BOOST = 1.5
+#: `deeper` da oyna orqaga **ikki barobar** cho'ziladi: javob topilmagan
+#: bo'lsa ko'pincha hodisa so'ralgan oynadan oldinroq bo'lgan.
+DEEPER_WINDOW_FACTOR = 2
 BUCKET_NODE_LEVELS = (2, 3)  # kun va hafta tugunlari (epizod juda mayda)
 BUCKET_NODE_FETCH = 3 * BUCKET_MAX  # har vektor uchun olinadigan tugun soni
 BUCKET_FALLBACK_CHATS = 40  # tugunsiz chatlar uchun (chat, oy) zaxira yo'li
@@ -244,12 +257,31 @@ EVENT_MIN_INTERVAL_S = 1.0  # `pull`/`filter` hodisalari shundan tez-tez kelmayd
 #: Baho ilgari **har doim** `FILTER_MAX` ga to'yinardi (`est_messages` =
 #: bucket x k), ya'ni 5 ta bucket ham, 200 ta ham bir xil 0.1124 ni ko'rsatardi
 #: va foydalanuvchi "nima to'layapman" degan savolga javob olmasdi.
-#: `EST_PULL_YIELD` — bucket x k dan dedup va tirsakdan keyin hovuzda
-#: qoladigan ulush; `EST_KEEP_RATE` — filtrdan o'tish ulushi (o'lchangan
-#: 0.05-0.11 oralig'ining o'rtasi). Baho baribir yuqoridan: pastki chegara
-#: `ELBOW_MIN`, yuqorigisi `FILTER_MAX`.
-EST_PULL_YIELD = 0.35
-EST_KEEP_RATE = 0.08
+#: `EST_PULL_YIELD` — bucket x k dan dedup va tirsakdan keyin **filtrga**
+#: yetib keladigan ulush; `EST_KEEP_RATE` — filtrdan o'tish ulushi.
+#:
+#: **Ikkinchi kalibratsiya** (akkaunt 2, jonli qayta sinov). O'lchangan
+#: ikki to'liq yugurish funneli:
+#:
+#:     deep (99 bucket):        pull 1855 → tirsak 543 → filtr 467 → 78 kept
+#:     exhaustive (~400):       pull 3580 → tirsak 999 → filtr 864 → 215 kept
+#:
+#: ya'ni `filtr / (bucket x k)` = 467/2970 = **0.157** va 864/12000 =
+#: **0.072** (bucket'lar to'lmagan holda ~0.14). Eski 0.35 bahoni **2.2
+#: barobar** shishirardi: `est_total` 0.2124 ko'rsatib, haqiqiy yugurish
+#: 0.096 turardi. Keep-rate esa aksincha **past** edi: 78/467 = 0.167 va
+#: 215/864 = 0.249, o'rtasi ~0.18 (0.08 emas) — ya'ni map/reduce qismi
+#: kam baholanardi.
+EST_PULL_YIELD = 0.15
+EST_KEEP_RATE = 0.18
+
+#: Chiqish tokenlari — `max_tokens` **qopqog'i** emas, o'lchangan o'rtacha.
+#: Eski baho har bosqichda qopqoqni to'liq sarflangan deb hisoblardi;
+#: sintezda bu yolg'iz o'zi $0.096 berardi (8000 tok x $12/M), holbuki
+#: jonli yugurishda butun sintez $0.02-0.04 turgan.
+EST_MAP_OUT_TOKENS = 700  # ~12 da'vo x ~55 token
+EST_REDUCE_OUT_TOKENS = 1_200  # birlashtirilgan da'volar + timeline
+EST_SYNTH_OUT_TOKENS = 2_000  # to'liq markdown javob (qopqoq 8000)
 
 
 def elbow_hi_for(mode: str) -> int:
@@ -263,9 +295,81 @@ def elbow_hi_for(mode: str) -> int:
     return min(POOL_MAX, max(ELBOW_MAX, FILTER_MAX.get(mode, ELBOW_MAX)))
 
 
-def bucket_max_for(mode: str) -> int:
-    """Rejim bo'yicha bucket qopqog'i — `BUCKET_MAX_DEEP` izohidagi o'lchovdan."""
-    return BUCKET_MAX if mode == "exhaustive" else BUCKET_MAX_DEEP
+def bucket_max_for(mode: str, follow_up: str = "none") -> int:
+    """Rejim bo'yicha bucket qopqog'i — `BUCKET_MAX_DEEP` izohidagi o'lchovdan.
+
+    `follow_up == "deeper"` da qopqoq `BUCKET_MAX_DEEPER` ga ko'tariladi:
+    "chuqurroq qidir" degan turn **kengroq** korpus bo'lagini ko'rishi kerak,
+    aks holda u aynan o'sha bucket'larni qayta to'laydi (jonli regressiya:
+    `deeper` da ham 99 bucket).
+    """
+    base = BUCKET_MAX if mode == "exhaustive" else BUCKET_MAX_DEEP
+    if follow_up == "deeper":
+        return max(base, BUCKET_MAX_DEEPER) if mode != "exhaustive" else base
+    return base
+
+
+def filter_max_for(mode: str, follow_up: str = "none") -> int:
+    """Filtr qopqog'i — `deeper` da 50% kengroq (narx qopqog'i o'z joyida)."""
+    base = FILTER_MAX.get(mode, FILTER_MAX["deep"])
+    if follow_up == "deeper":
+        return int(base * DEEPER_FILTER_BOOST)
+    return base
+
+
+#: Butun korpusni talab qiladigan iboralar — uz (lotin/kirill), ru, en.
+#: `parse_plan` modeldan `"chats": "all"` so'raydi, lekin jonli sinovda
+#: model "barcha chatlar bo'yicha" degan savolga ham `chats:[3810]`
+#: (pinned/oxirgi chat) qaytardi va reja bitta chat bilan chegaralanib
+#: qoldi. Shuning uchun qoida **kodda**: savolning o'zi "hammasi" desa,
+#: reja bergan qisqa ro'yxat e'tiborsiz qoladi.
+_ALL_CHATS_RE = re.compile(
+    r"(?:"
+    r"barcha\s+(?:chat|guruh|kanal)|hamma\s+(?:chat|guruh|kanal)"
+    r"|butun\s+(?:arxiv|korpus|telegram|chat)"
+    r"|барча\s+чат|ҳамма\s+чат"
+    r"|во\s+всех\s+чат|по\s+всем\s+чат|все\s+чаты|всех\s+чатах"
+    r"|весь\s+архив|всему\s+архиву"
+    r"|all\s+(?:my\s+|the\s+)?(?:chats|groups|channels)"
+    r"|across\s+all|every\s+chat|entire\s+archive|whole\s+archive"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def force_all_chats(question: str) -> bool:
+    """Savol butun korpusni so'rayaptimi (`chats` ro'yxati bekor qilinsinmi)?
+
+    Ishlatilishi: `plan_buckets` / `run_scale` rejadagi `chats` ni **shu
+    yerda** e'tiborsiz qoldiradi.
+
+    TODO(deep_search): `deep_search.parse_plan` ham shu funksiyani chaqirib,
+    savol butun korpusni so'raganda `plan.chats = None` qilishi kerak — aks
+    holda fan-out va server pog'onasi baribir bitta chat bilan cheklanadi
+    (`_candidates`, `_scope_of`, `server_scope`). Bu fayl `deep_search` ga
+    tegmaydi, shuning uchun tuzatish faqat kaskad tomonida.
+    """
+    raw = question or ""
+    if not raw:
+        return False
+    # `uz_fold` kirillni **lotinga** o'giradi (ruschani ham: "во всех" →
+    # "vo vseh"), shuning uchun ikkala shakl ham ko'riladi: xom matn
+    # ruscha/kirill shoxini, fold esa o'zbek kirillini tutadi.
+    return bool(_ALL_CHATS_RE.search(raw) or _ALL_CHATS_RE.search(uz_fold(raw)))
+
+
+def deeper_window(
+    since: datetime | None, until: datetime | None, follow_up: str = "none"
+) -> tuple[datetime | None, datetime | None]:
+    """`deeper` da oynani orqaga `DEEPER_WINDOW_FACTOR` barobar cho'zadi.
+
+    Faqat oyna **bor** bo'lsa (ikkala chegara ham): oynasiz savolda reja
+    allaqachon butun sinxronlangan tarixni qamraydi.
+    """
+    if follow_up != "deeper" or since is None or until is None or until <= since:
+        return since, until
+    span = until - since
+    return until - span * DEEPER_WINDOW_FACTOR, until
 
 
 _JSON_RE = re.compile(r"\{.*\}", re.S)
@@ -358,15 +462,29 @@ class Claim:
 
 @dataclass(slots=True)
 class ScanStats:
-    """Halol qamrov raqamlari — `Coverage` va `scan_runs` shulardan to'ladi."""
+    """Halol qamrov raqamlari — `Coverage` va `scan_runs` shulardan to'ladi.
+
+    Funnel **bitta kanonik ketma-ketlik**, va u kamaymaydigan bo'lishi
+    kerak::
+
+        pulled ≥ elbow ≥ candidates ≥ filter_total ≥ filter_done ≥ kept ≥ evidence
+
+    Nega alohida yozib qo'yilgan: jonli hisobotda `filtered` 467, filtr
+    hodisasidagi `total` 517 va qamrovdagi `messages_scanned` 492 edi —
+    uchtasi uch xil bosqichni o'lchardi va foydalanuvchi qaysi biri
+    "ko'rilgan xabarlar" ekanini bilmasdi. Endi har bosqich o'z maydoniga
+    yozadi, `to_dict()` hammasini beradi va UI bitta funnel chizadi.
+    """
 
     buckets_planned: int = 0
     buckets_scanned: int = 0
     #: Tirsakdan **oldingi** birlashtirilgan hovuz — "nechta nomzod ko'rildi"
     #: degan savolning halol javobi (`scan_runs.candidates` shundan yoziladi).
     pulled: int = 0
+    elbow: int = 0  # tirsak kesgandan keyingi hovuz (dedupdan oldin)
     candidates: int = 0  # dedupdan keyingi hovuz
-    filtered: int = 0  # modelga (yoki keshga) ko'rsatilgani
+    filter_total: int = 0  # filtrga **kirgan** (rejim qopqog'i qo'llangandan keyin)
+    filter_done: int = 0  # filtr ko'rib chiqqani (model + kesh)
     kept: int = 0  # `FILTER_KEEP_MIN` dan o'tgani
     cache_hits: int = 0
     evidence: int = 0
@@ -384,6 +502,15 @@ class ScanStats:
     est_cost_usd: float = 0.0
     est_total_usd: float = 0.0
 
+    @property
+    def filtered(self) -> int:
+        """`filter_done` ning eski nomi — `Coverage.filtered` shundan o'qiydi.
+
+        Alias **maydon emas, xossa**: ikkita mustaqil son bo'lganida ular
+        bir-biridan uzilib qolardi (aynan shu hisobotdagi 467 vs 517 vs 492).
+        """
+        return self.filter_done
+
     def note_stop(self, stage: str, reason: str) -> None:
         """Bosqich sababini yozadi va umumiysini **qayta hisoblaydi**."""
         if not reason:
@@ -398,8 +525,17 @@ class ScanStats:
         return {
             "buckets_planned": self.buckets_planned,
             "buckets_scanned": self.buckets_scanned,
+            # ── funnel: bitta kanonik ketma-ketlik (docstring'ga qarang) ──
             "pulled": self.pulled,
+            "elbow": self.elbow,
             "candidates": self.candidates,
+            "filter_total": self.filter_total,
+            "filter_done": self.filter_done,
+            # TODO(deep_search): `Coverage.filtered` / `messages_scanned` shu
+            # funnel'dan to'lsin — `filtered` → `filter_done`, "ko'rilgan
+            # xabarlar" → `pulled`. Hozir `messages_scanned` fan-out
+            # nomzodlaridan hisoblanadi va kaskad raqamlari bilan mos
+            # kelmaydi. Bu fayl `deep_search.py` ga tegmaydi.
             "filtered": self.filtered,
             "kept": self.kept,
             "cache_hits": self.cache_hits,
@@ -572,6 +708,13 @@ async def plan_buckets(
     bazaviy ball oladi, ya'ni mos topilgan hafta tugunlaridan pastda turadi,
     lekin **yo'qolmaydi**.
 
+    Zaxira qamrovi **`(chat, oy)`** darajasida hisoblanadi, chat darajasida
+    emas. Jonli regressiya: chat 3810 ning bitta tugun bucket'i bor edi
+    (2026-W38) va shu sabab butun chat "qoplangan" deb belgilanardi — uch
+    oylik savol **bitta** bucket / 28 xabar bilan yugurdi, 174k xabarli
+    chatdan. Endi faqat tuguni bor **oy** chiqarib tashlanadi, qolgan oylar
+    zaxira bucket'ini oladi.
+
     `mode="exhaustive"` va oynasiz (`plan.since is None`) savolda zaxira grid
     **hamma** nishon chat uchun quriladi — tuguni borlari uchun ham — va
     sinxronlangan butun oraliqni (`min(published_at)` … hozir) qoplaydi.
@@ -584,19 +727,25 @@ async def plan_buckets(
         `score` bo'yicha kamayish tartibidagi ≤`limit` ta `Bucket`.
     """
     titles = dict(chat_titles or {})
-    plan_chats = set(plan.chats or [])
+    follow_up = getattr(plan, "intent_follow_up", "none")
+    # Savolning o'zi butun korpusni so'rasa reja bergan qisqa ro'yxat
+    # e'tiborsiz qoladi (`force_all_chats` izohi).
+    all_corpus = force_all_chats(plan.standalone_question or "")
+    chats = None if all_corpus else (list(plan.chats) if plan.chats else None)
+    since, until = deeper_window(plan.since, plan.until, follow_up)
+    plan_chats = set(chats or [])
     by_key: dict[tuple[int, str], Bucket] = {}
 
     conds: list[Any] = [
         RetrievalNode.account_id == account_id,
         RetrievalNode.level.in_(list(BUCKET_NODE_LEVELS)),
     ]
-    if plan.chats:
-        conds.append(RetrievalNode.chat_id.in_(list(plan.chats)))
-    if plan.since is not None:
-        conds.append(RetrievalNode.ends_at >= plan.since)
-    if plan.until is not None:
-        conds.append(RetrievalNode.starts_at < plan.until)
+    if chats:
+        conds.append(RetrievalNode.chat_id.in_(chats))
+    if since is not None:
+        conds.append(RetrievalNode.ends_at >= since)
+    if until is not None:
+        conds.append(RetrievalNode.starts_at < until)
 
     for vec in vectors:
         if not vec:
@@ -636,12 +785,18 @@ async def plan_buckets(
                 found.score = max(found.score, score)
                 found.est_messages = max(found.est_messages, int(msg_count or 0))
 
-    full_grid = mode == "exhaustive" and plan.since is None
-    covered = set() if full_grid else {cid for cid, _ in by_key}
+    full_grid = (mode == "exhaustive" and since is None) or all_corpus
+    # Qamrov **(chat, oy)** bo'yicha: bitta tugun haftasi butun chatni
+    # "qoplangan" deb belgilamaydi (jonli regressiya, docstring'ga qarang).
+    covered: set[tuple[int, str]] = (
+        set() if full_grid else {(b.chat_id, month_label(b.since)) for b in by_key.values()}
+    )
     fallback = await _month_buckets(
         session,
         account_id,
-        plan=plan,
+        chats=chats,
+        since=since,
+        until=until,
         exclude=covered,
         titles=titles,
         limit=BUCKET_FALLBACK_CHATS_FULL if full_grid else BUCKET_FALLBACK_CHATS,
@@ -661,6 +816,8 @@ async def plan_buckets(
         account_id=account_id,
         mode=mode,
         full_grid=full_grid,
+        all_corpus=all_corpus,
+        follow_up=follow_up,
         node=sum(1 for b in out if b.source == "node"),
         month=sum(1 for b in out if b.source == "month"),
         kept=min(len(out), limit),
@@ -672,24 +829,30 @@ async def _month_buckets(
     session: AsyncSession,
     account_id: int,
     *,
-    plan: DS.DeepPlan,
-    exclude: set[int],
+    chats: list[int] | None,
+    since: datetime | None,
+    until: datetime | None,
+    exclude: set[tuple[int, str]],
     titles: dict[int, str],
     limit: int,
 ) -> list[Bucket]:
-    """Tuguni yo'q chatlar uchun `(chat, oy)` bucket'lari — xabar sanog'idan.
+    """Tuguni yo'q `(chat, oy)` juftliklari uchun bucket — xabar sanog'idan.
 
     Nega oy, hafta emas: tugun yo'q degani odatda chat kichik yoki yangi
     sinxronlangan. Hafta darajasida bo'lish ularni yuzlab bo'sh bucket'ga
     aylantirardi va `BUCKET_MAX` ni haqiqiy nomzodsiz to'ldirardi.
+
+    `exclude` — **(chat_id, "YYYY-MM")** juftliklari, ya'ni tugun bucket'i
+    bor oy. Chatning bitta oyida tugun bo'lgani qolgan oylarni zaxiradan
+    mahrum qilmaydi (`plan_buckets` docstring'idagi 3810 regressiyasi).
     """
     conds: list[Any] = [Chat.account_id == account_id, *S._alive()]
-    if plan.chats:
-        conds.append(Message.chat_id.in_(list(plan.chats)))
-    if plan.since is not None:
-        conds.append(Message.published_at >= plan.since)
-    if plan.until is not None:
-        conds.append(Message.published_at < plan.until)
+    if chats:
+        conds.append(Message.chat_id.in_(list(chats)))
+    if since is not None:
+        conds.append(Message.published_at >= since)
+    if until is not None:
+        conds.append(Message.published_at < until)
 
     month = func.date_trunc("month", Message.published_at).label("m")
     stmt = (
@@ -710,12 +873,12 @@ async def _month_buckets(
     seen_chats: set[int] = set()
     for chat_id, start, n in rows:
         cid = int(chat_id)
-        if cid in exclude:
+        when = start if start.tzinfo else start.replace(tzinfo=UTC)
+        if (cid, month_label(when)) in exclude:
             continue
         if cid not in seen_chats and len(seen_chats) >= limit:
             continue
         seen_chats.add(cid)
-        when = start if start.tzinfo else start.replace(tzinfo=UTC)
         out.append(
             Bucket(
                 chat_id=cid,
@@ -922,6 +1085,7 @@ async def pull_candidates(
         # Tirsakdan **oldingi** hovuz: qamrov hisobotida "nechta nomzod
         # ko'rildi" degan raqam shu bo'lishi kerak, kesilganidan keyingisi emas.
         stats.pulled = len(fused)
+        stats.elbow = len(out)
     if events is not None:
         await DS._emit(
             events,
@@ -1157,6 +1321,7 @@ async def filter_batched(
     events: DS.EventSink | None = None,
     mode: str = "deep",
     stats: ScanStats | None = None,
+    follow_up: str = "none",
 ) -> list[tuple[S.Hit, int]]:
     """Hovuzni arzon model bilan elakdan o'tkazadi → `(hit, ball)` juftlari.
 
@@ -1169,7 +1334,8 @@ async def filter_batched(
     sarflaydi-yu, natijani o'zgartirmaydi.
     """
     st = stats or ScanStats()
-    limited = list(pool)[: FILTER_MAX.get(mode, FILTER_MAX["deep"])]
+    limited = list(pool)[: filter_max_for(mode, follow_up)]
+    st.filter_total = len(limited)
     if not limited:
         st.note_stop("filter", "complete")
         return []
@@ -1245,16 +1411,20 @@ async def filter_batched(
                 seen_buckets.add(bucket_of.get(hit.message_id, ""))
                 fresh.append((hit.chat_id, hit.tg_msg_id, scored.get(idx, 0)))
             keep_rates.append(kept_here / max(1, len(batch)))
-        st.filtered = processed + st.cache_hits
+        st.filter_done = processed + st.cache_hits
         st.kept = sum(1 for v in scored.values() if v >= FILTER_KEEP_MIN)
         if events is not None and throttle.ready(force=wave_at + FILTER_PARALLEL >= len(groups)):
             await DS._emit(
                 events,
                 "filter",
                 done=processed,
-                total=len(todo),
+                # `total` — filtrga **kirgan** hovuz, `todo` (kesh o'tkazib
+                # yuborganlardan keyin qolgani) emas: aks holda hodisadagi
+                # raqam `filtered` bilan mos kelmasdi (jonli: 467 vs 517).
+                total=st.filter_total,
+                todo=len(todo),
                 kept=st.kept,
-                keep_rate=round(st.kept / max(1, st.filtered), 4),
+                keep_rate=round(st.kept / max(1, st.filter_done), 4),
                 cost_usd=round(budget.spent, 6),
                 cached=st.cache_hits,
             )
@@ -1270,7 +1440,7 @@ async def filter_batched(
     # wall/ceiling yield/complete dan ustun turadi).
     st.note_stop("filter", stopped or "complete")
     st.truncated = st.truncated or bool(stopped) or len(pool) > len(limited)
-    st.filtered = processed + st.cache_hits
+    st.filter_done = processed + st.cache_hits
     st.scan_cost_usd = round(budget.spent, 6)
 
     if fresh:
@@ -1687,6 +1857,7 @@ def estimate(
     mode: str = "deep",
     per_bucket_k: int = PER_BUCKET_K,
     prices: dict[str, tuple[float, float]] | None = None,
+    follow_up: str = "none",
 ) -> Estimate:
     """Skan narxining **oldindan** bahosi: bucket sanog'i x k x narx jadvali.
 
@@ -1706,6 +1877,16 @@ def estimate(
     `bucket x k x EST_PULL_YIELD`, pastdan `ELBOW_MIN`, yuqoridan
     `FILTER_MAX` — ya'ni baho bucket soniga qarab **o'sadi** va qopqoqdan
     oshmaydi. Keep-rate ham o'lchovdan (`EST_KEEP_RATE`).
+
+    **Kichik reja uchun pastki chegara ham kichik.** `ELBOW_MIN` (500)
+    ni so'zsiz pol qilib olish bitta bucket'li rejani 500 nomzod deb
+    ko'rsatardi: jonli o'lchovda bu $0.049 vs haqiqiy $0.0017 edi (29
+    barobar). Pol endi `min(ELBOW_MIN, bucket x k)` — hovuz jismonan
+    500 ga yetolmasa, baho ham yetmaydi.
+
+    Chiqish tokenlari `max_tokens` qopqog'i emas, o'lchangan o'rtacha
+    (`EST_*_OUT_TOKENS`); sintez kirishi esa haqiqiy dalil satri soniga
+    bog'liq — 5 ta dalilli javob 150 satrlik konvert narxini to'lamaydi.
     """
     p = dict(
         prices
@@ -1717,11 +1898,15 @@ def estimate(
     )
     p.setdefault("synth", _price_for(Task.DEEP))
     planned = len(buckets)
-    expected = int(planned * per_bucket_k * EST_PULL_YIELD)
+    raw_pull = planned * per_bucket_k
+    expected = int(raw_pull * EST_PULL_YIELD)
+    # Pol hovuzning **jismoniy** kattaligidan oshmaydi: 1 bucket x 30 dan
+    # 500 nomzod chiqmaydi, ya'ni baho ham 500 deb hisoblamaydi.
+    floor = min(ELBOW_MIN, raw_pull)
     est_messages = min(
-        FILTER_MAX.get(mode, FILTER_MAX["deep"]),
+        filter_max_for(mode, follow_up),
         elbow_hi_for(mode),
-        max(ELBOW_MIN, expected),
+        max(floor, expected),
     )
     if not planned:
         est_messages = 0
@@ -1740,21 +1925,24 @@ def estimate(
         int(len(SCALE_MAP_PROMPT) / S.CHARS_PER_TOKEN)
         + int(MAP_CHUNK_MSGS * (MAP_LINE_CHARS + 45) / S.CHARS_PER_TOKEN)
     )
-    map_out = chunks * MAP_MAX_TOKENS
+    map_out = chunks * EST_MAP_OUT_TOKENS
 
-    claims_in = chunks * MAP_MAX_CLAIMS
+    claims_in = min(REDUCE_MAX_CLAIMS, chunks * MAP_MAX_CLAIMS)
     reduce_rubric = int(len(SCALE_REDUCE_PROMPT) / S.CHARS_PER_TOKEN)
     reduce_in = (reduce_rubric + claims_in * 60) if chunks else 0
-    reduce_out = REDUCE_MAX_TOKENS if chunks else 0
+    reduce_out = EST_REDUCE_OUT_TOKENS if chunks else 0
 
     # Sintez — bitta `Task.DEEP` chaqiruvi: rubrika + da'volar dayjesti +
-    # `SYNTH_EVIDENCE_LINES` ta dalil satri, chiqishi `SYNTH_MAX_TOKENS`.
+    # dalil satrlari. Satr soni **haqiqiy** dalildan (`kept`), qopqoqdan
+    # emas; dayjest ham `claims_in` dan, `REDUCE_DIGEST_TOKENS` qopqog'idan
+    # emas — aks holda 5 dalilli javob 150 satrlik konvert narxini to'lardi.
+    synth_lines = min(SYNTH_EVIDENCE_LINES, kept) if kept else 0
     synth_in = (
         int(len(DEEP_SYNTH_PROMPT) / S.CHARS_PER_TOKEN)
-        + int(SYNTH_EVIDENCE_LINES * (MAP_LINE_CHARS + 45) / S.CHARS_PER_TOKEN)
-        + (REDUCE_DIGEST_TOKENS if chunks else 0)
+        + int(synth_lines * (MAP_LINE_CHARS + 45) / S.CHARS_PER_TOKEN)
+        + (min(REDUCE_DIGEST_TOKENS, claims_in * 60) if chunks else 0)
     )
-    synth_out = DS.SYNTH_MAX_TOKENS
+    synth_out = EST_SYNTH_OUT_TOKENS
 
     def cost(stage: str, tin: int, tout: int) -> float:
         price_in, price_out = p[stage]
@@ -1829,6 +2017,9 @@ async def run_scale(
     wall = deadline if deadline is not None else started + EXHAUSTIVE_WALL_S
     budget = _Budget(meter, ceiling=ceiling, deadline=wall)
 
+    # "Chuqurroq qidir" bu yerda **kengroq skan** degani: bucket qopqog'i,
+    # oyna va filtr qopqog'i uchalasi ham ko'tariladi (`bucket_max_for`).
+    follow_up = getattr(plan, "intent_follow_up", "none")
     vectors = await query_vectors(meter, question=question, subqueries=plan.subqueries)
     async with session_factory() as session:
         buckets = await plan_buckets(
@@ -1837,13 +2028,13 @@ async def run_scale(
             plan=plan,
             vectors=vectors,
             chat_titles=chat_titles,
-            limit=bucket_max_for(mode),
+            limit=bucket_max_for(mode, follow_up),
             mode=mode,
         )
     outcome.buckets = buckets
     stats.buckets_planned = len(buckets)
 
-    est = estimate(buckets, mode=mode)
+    est = estimate(buckets, mode=mode, follow_up=follow_up)
     outcome.estimate = est
     stats.est_cost_usd = est.est_cost_usd
     stats.est_total_usd = est.est_total_usd
@@ -1903,7 +2094,10 @@ async def run_scale(
     taint.add_hits(pool)  # begona matn quvurga kirdi — reja/refleksiya uchun qopqoq
     pool = dedup_fast(pool)
     stats.candidates = len(pool)
+    # Funnel kamaymaydigan bo'lib qolsin: `pull_candidates` yozmagan bo'lsa
+    # (soxta/qisqa yo'l) hovuzning o'zi pol bo'ladi.
     stats.pulled = max(stats.pulled, len(pool))
+    stats.elbow = stats.elbow or len(pool)
     outcome.pool = pool
 
     # ── (d) filtr ───────────────────────────────────────────────────────────
@@ -1919,6 +2113,7 @@ async def run_scale(
         events=events,
         mode=mode,
         stats=stats,
+        follow_up=follow_up,
     )
     if not scored:
         return outcome
@@ -2001,11 +2196,17 @@ async def run_scale(
 __all__ = [
     "BUCKET_MAX",
     "BUCKET_MAX_DEEP",
+    "BUCKET_MAX_DEEPER",
     "COST_CEILING",
+    "DEEPER_FILTER_BOOST",
+    "DEEPER_WINDOW_FACTOR",
     "ELBOW_KEEP_MIN_FRAC",
     "ELBOW_MIN",
     "EST_KEEP_RATE",
+    "EST_MAP_OUT_TOKENS",
     "EST_PULL_YIELD",
+    "EST_REDUCE_OUT_TOKENS",
+    "EST_SYNTH_OUT_TOKENS",
     "EXHAUSTIVE_WALL_S",
     "FILTER_BATCH",
     "FILTER_KEEP_MIN",
@@ -2041,11 +2242,14 @@ __all__ = [
     "combine_stops",
     "dedup_banded",
     "dedup_fast",
+    "deeper_window",
     "elbow_cut",
     "elbow_hi_for",
     "estimate",
     "filter_batched",
     "filter_line",
+    "filter_max_for",
+    "force_all_chats",
     "iso_label",
     "map_chunks",
     "map_claims",

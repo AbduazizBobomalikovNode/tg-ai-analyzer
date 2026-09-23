@@ -1937,8 +1937,10 @@ def test_deep_prompts_describe_the_follow_up_contract() -> None:
     from app.services.prompts_deep import DEEP_PROMPT_VERSION
 
     # Versiya scale prompt'lari (korpus kaskadi) va javob shakli ko'rsatmasi
-    # (GFM jadval / ```chart / callout / :::details) qo'shilganda ko'tarildi.
-    assert DEEP_PROMPT_VERSION == "2026-09-18.3"
+    # (GFM jadval / ```chart / callout / :::details) qo'shilganda ko'tarildi;
+    # 2026-09-23.1 — `chats` maydoni "all" ga qaratildi (jonli regressiya:
+    # "barcha chatlar bo'yicha" savolida reja bitta chat qaytargan edi).
+    assert DEEP_PROMPT_VERSION == "2026-09-23.1"
     for field_name in ("standalone_question", "intent_follow_up", "needs_retrieval"):
         assert field_name in DEEP_PLAN_PROMPT
     for label in DS.FOLLOW_UPS:
@@ -2003,3 +2005,61 @@ async def test_run_marks_a_complete_answer_as_not_truncated(
     await DS.run_deep_search(factory, 1, 10, "to'lov?", locale="uz", llm=FakeLLM())  # type: ignore[arg-type]
     meta = wired["persisted"]["context_meta"]
     assert meta["truncated_answer"] is False
+
+
+# ─── 8. Butun korpus / kaskad qamrov (follow-up) ─────────────────────────────
+
+
+def test_parse_plan_forces_all_chats_when_question_asks_for_full_corpus() -> None:
+    """`scale_search.force_all_chats` "Barcha chatlar" desa model pinlagan
+    `chats` ro'yxatini bekor qiladi — aks holda fan-out/kaskad/server pog'onasi
+    baribir bitta chat bilan cheklanib qolardi."""
+    raw = '{"intent":"lookup","chats":[3810],"subqueries":["holat"]}'
+    plan = DS.parse_plan(raw, question="Barcha chatlar bo'yicha holat qanday?", known_chats=[3810])
+    assert plan.chats is None
+
+
+def test_parse_plan_keeps_pinned_chats_without_all_chats_phrase() -> None:
+    raw = '{"intent":"lookup","chats":[3810],"subqueries":["holat"]}'
+    plan = DS.parse_plan(raw, question="3810-chatda holat qanday?", known_chats=[3810])
+    assert plan.chats == [3810]
+
+
+def test_build_coverage_cascade_uses_pulled_and_filter_done() -> None:
+    """Kaskad rejimida `Coverage.filtered`/`messages_scanned` kanonik
+    funnel'dan (`ScanStats`) to'ladi — fan-out nomzod soni emas."""
+    scan = {
+        "buckets_planned": 10,
+        "buckets_scanned": 10,
+        "pulled": 517,
+        "elbow": 500,
+        "candidates": 480,
+        "filter_total": 480,
+        "filter_done": 467,
+        "filtered": 467,
+        "kept": 92,
+        "stopped_by": "complete",
+        "pull_stopped_by": "",
+        "filter_stopped_by": "",
+        "scan_cost_usd": 0.01,
+    }
+    cov = DS.build_coverage(
+        scanned_hits=[_hit(1)],
+        # Fan-out nomzod soni (99) — kaskad yo'lida e'tiborsiz qoldiriladi,
+        # `scan["pulled"]` ustun keladi.
+        messages_scanned=99,
+        chats_total=5,
+        searched_chats=[_chat(1, title="Ish")],
+        evidence=[],
+        clusters=[],
+        rounds=1,
+        truncated=False,
+        marginal_stop=False,
+        scan=scan,
+    )
+    assert cov.filtered == 467  # scan["filter_done"], scan["filtered"] emas
+    assert cov.messages_scanned == 517  # scan["pulled"]
+    assert cov.kept == 92
+
+    text = DS.render_coverage(cov, locale="uz")
+    assert "ko'rilgan xabarlar: 517" in text
