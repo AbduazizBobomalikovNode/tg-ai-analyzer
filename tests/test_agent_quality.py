@@ -1074,6 +1074,27 @@ def test_agent_prompt_asks_instead_of_searching_for_nonsense() -> None:
     assert "discover_channels" in AGENT_SYSTEM_PROMPT and "search_global" in AGENT_SYSTEM_PROMPT
 
 
+def test_agent_prompt_clarifies_underspecified_questions_before_any_tool() -> None:
+    """`absurd-01`: "Oyga qancha xabar yozdim?" da `get_chat_stats` → `search_global`.
+
+    Savolda uchta zarur parametrdan biri ham yo'q (qaysi chat, qaysi davr, kim
+    yozgan). Kod darajasidagi qo'riqchi bu yerda xavfli (noaniqlikni kod halol
+    o'lchay olmaydi) — shuning uchun qoida promptda, lekin **aniq**: qaysi
+    tool'lar birinchi chaqiruv bo'la olmasligi nomma-nom yozilgan.
+    """
+    from app.services.prompts import AGENT_SYSTEM_PROMPT
+
+    low = AGENT_SYSTEM_PROMPT.lower()
+    assert "underspecified" in low
+    assert "which chat, which period, or whose messages" in low
+    assert "2-3 concrete options" in low
+    assert "call no tools in that turn" in low
+    assert "are never the first call for an ambiguous question" in low
+    # Shaxsiy statistika savoli uchun to'g'ri asboblar ham aytilgan
+    assert "`get_chat_stats`" in AGENT_SYSTEM_PROMPT
+    assert "`get_recent_messages`" in AGENT_SYSTEM_PROMPT
+
+
 def test_agent_prompt_points_a_named_month_at_since_until() -> None:
     from app.services.prompts import AGENT_SYSTEM_PROMPT
 

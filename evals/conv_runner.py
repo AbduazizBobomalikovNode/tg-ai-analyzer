@@ -203,6 +203,11 @@ def _split_calls(
     seen: set[tuple[str, str]] = set()
     per_tool: dict[str, int] = defaultdict(int)
     for c in calls:
+        if c.get("blocked"):
+            # `agent.py` allaqachon to'sgan (masalan `repeat_guard`) — bu yerda
+            # qayta hisoblanmaydi, aks holda bajarilgan deb sanalib qolardi.
+            blocked.append({**c, "_block": c["blocked"]})
+            continue
         name = str(c.get("tool"))
         sig = _sig(c)
         if sig in seen:
@@ -650,6 +655,9 @@ async def run_scenario(
                 # Suhbat bo'yicha tool keshi (`agent.py` `tool_cache`): takroriy
                 # savolda qidiruv ikkinchi marta yugurmasligi shu yerda ko'rinadi.
                 "cache_hits": ctx.get("cache_hits"),
+                # Takror-qo'riqchisi (`agent.py`): keshdan kelgan qidiruvdan keyin
+                # kamida bitta server qidiruvi to'silganmi (eval `econ-01`).
+                "repeat_guard": bool(ctx.get("repeat_guard")),
                 # Provider'ning to'xtash sababi — bizning `stop_reason` emas.
                 # `length` bo'lsa javob jumla o'rtasida kesilgan.
                 "finish_reason": ctx.get("finish_reason"),
@@ -767,6 +775,8 @@ def render_md(result: dict[str, Any]) -> str:
             f"- `cache_hits`: jami {sum(hits)}, keshdan foydalangan turn: "
             f"{sum(1 for x in hits if x > 0)}/{len(hits)}"
         )
+        rg = sum(1 for t in all_turns if t.get("repeat_guard"))
+        out.append(f"- `repeat_guard`: ishlagan turn: {rg}/{len(all_turns)}")
         out.append("")
 
     out.append("## Yiqilgan turn'lar")
@@ -783,6 +793,8 @@ def render_md(result: dict[str, Any]) -> str:
             out.append(f"- **tool (bajarilgan):** `{t.get('tools_executed')}`")
             if t.get("tools_blocked"):
                 out.append(f"- **to'silgan:** `{t.get('tools_blocked')}`")
+            if t.get("repeat_guard"):
+                out.append("- 🛡️ **repeat_guard** ishladi")
             if t.get("degraded"):
                 out.append(f"- ⚠️ **degraded:** `{t.get('degraded')}`")
             for c in bad:

@@ -718,6 +718,9 @@ async def _send_via_agent(
         # shuning uchun "nechta bajarildi" va "nega to'xtadi" alohida yoziladi.
         "calls_executed": outcome.calls_executed,
         "stop_reason": outcome.stop_reason,
+        # Takror-qo'riqchisi (`agent.py`): keshdan kelgan qidiruvdan keyin
+        # kamida bitta server qidiruvi to'silganmi (eval `econ-01`).
+        "repeat_guard": outcome.repeat_guard,
         # Provider'ning "nega to'xtadi" i — `stop_reason` (bizning byudjet)
         # bilan **boshqa narsa**. `length`/`MAX_TOKENS` bo'lsa javob jumla
         # o'rtasida kesilgan va buni jim o'tkazish yaramaydi.

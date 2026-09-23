@@ -703,3 +703,116 @@ def test_agent_prompt_tells_the_model_to_answer_repeats_from_history() -> None:
     assert "repeats a question you have already answered" in P.AGENT_SYSTEM_PROMPT
     assert "(cached)" in P.AGENT_SYSTEM_PROMPT
     assert "2026" not in P.AGENT_SYSTEM_PROMPT  # system kesh prefiksi barqaror
+    # Prompt qoidasi kod qo'riqchisi bilan bir xil gapni aytadi (eval `econ-01`).
+    low = P.AGENT_SYSTEM_PROMPT.lower()
+    assert "are closed for this turn" in low
+    assert "in different words" in low
+
+
+# ─── takror-qo'riqchisi (eval `econ-01`) ─────────────────────────────────────
+#
+# Jonli yiqilish: 2-turn savolni aynan takrorladi, kesh ishladi (`cache_hits=2`),
+# lekin model keyin `search_telegram` ni boshqa so'zlar bilan yana ikki marta
+# chaqirdi — 4 bajarilgan chaqiruv, $0.086. Prompt yolg'iz yetmaydi.
+
+
+async def _run_q(llm: Any, question: str, *, conversation_id: int | None = 42) -> Any:
+    return await A.run_agent(
+        _Session(),  # type: ignore[arg-type]
+        user_id=1,
+        account_id=5,
+        question=question,
+        history=[],
+        pinned_chat=None,
+        locale="uz",
+        llm=llm,  # type: ignore[arg-type]
+        conversation_id=conversation_id,
+    )
+
+
+def _server_turn() -> Any:
+    """1-yugurish: server qidiruvi bajariladi va keshga tushadi."""
+    return _LLM(
+        [_res(calls=[ToolCall("a", "search_telegram", {"query": "ijara"})]), _res("javob1")]
+    )
+
+
+def _repeat_turn() -> Any:
+    """2-yugurish: aynan o'sha chaqiruv (kesh) + boshqa so'z bilan takror."""
+    return _LLM(
+        [
+            _res(calls=[ToolCall("a", "search_telegram", {"query": "ijara"})]),
+            _res(calls=[ToolCall("b", "search_telegram", {"query": "ijara narxi qancha"})]),
+            _res("javob2"),
+        ]
+    )
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Shu guruhda ijara narxi haqida nima deyishgan?", False),
+        ("chuqurroq qidir", True),
+        ("yana qidir", True),
+        ("qayta qidir", True),
+        ("поищи ещё раз", True),
+        ("search again please", True),
+        ("deeper", True),
+        ("rahmat, tushunarli", False),
+        ("", False),
+    ],
+)
+def test_wants_deeper_search(text: str, expected: bool) -> None:
+    assert A.wants_deeper_search(text) is expected
+
+
+async def test_repeat_guard_blocks_a_reworded_server_search_after_a_cache_hit(
+    fake_redis: _FakeRedis, fake_tool: list[dict[str, Any]]
+) -> None:
+    await _run_q(_server_turn(), "Shu guruhda ijara narxi haqida nima deyishgan?")
+    assert len(fake_tool) == 1
+
+    llm = _repeat_turn()
+    out = await _run_q(llm, "Shu guruhda ijara narxi haqida nima deyishgan?")
+
+    assert len(fake_tool) == 1, "qayta yozilgan so'rov baribir serverga chiqdi"
+    assert out.repeat_guard is True and out.cache_hits == 1
+    assert out.calls_executed == 1, "to'silgan chaqiruv byudjetga sanalmaydi"
+    assert [c["tool"] for c in out.tool_calls] == ["search_telegram", "search_telegram"]
+    assert out.tool_calls[1]["blocked"] == "repeat_guard"
+    tool_msgs = [m for m in llm.calls[2]["messages"] if m.role.value == "tool"]
+    assert any("repeat detected" in m.content for m in tool_msgs)
+    assert out.text == "javob2", "qo'riqchi javobni to'xtatmaydi"
+
+
+async def test_repeat_guard_steps_aside_when_the_user_asks_to_dig_deeper(
+    fake_redis: _FakeRedis, fake_tool: list[dict[str, Any]]
+) -> None:
+    await _run_q(_server_turn(), "Shu guruhda ijara narxi haqida nima deyishgan?")
+    out = await _run_q(_repeat_turn(), "chuqurroq qidir")
+    assert len(fake_tool) == 2, "aniq so'ralgan qayta qidiruv to'silmasligi kerak"
+    assert out.repeat_guard is False and out.calls_executed == 2
+
+
+async def test_repeat_guard_leaves_the_free_local_search_open(
+    fake_redis: _FakeRedis, fake_tool: list[dict[str, Any]]
+) -> None:
+    """Lokal `search_messages` bepul — kesh urilgandan keyin ham ochiq qoladi."""
+    await _run_q(_server_turn(), "savol")
+    llm = _LLM(
+        [
+            _res(calls=[ToolCall("a", "search_telegram", {"query": "ijara"})]),
+            _res(calls=[ToolCall("b", "search_messages", {"query": "ijara narxi"})]),
+            _res("javob"),
+        ]
+    )
+    out = await _run_q(llm, "savol")
+    assert [c["name"] for c in fake_tool] == ["search_telegram", "search_messages"]
+    assert out.repeat_guard is False and out.calls_executed == 2
+
+
+async def test_repeat_guard_is_off_without_a_cache_hit(
+    fake_redis: _FakeRedis, fake_tool: list[dict[str, Any]]
+) -> None:
+    out = await _run_q(_repeat_turn(), "Shu guruhda ijara narxi haqida nima deyishgan?")
+    assert len(fake_tool) == 2 and out.repeat_guard is False

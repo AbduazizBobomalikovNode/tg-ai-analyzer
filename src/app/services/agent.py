@@ -16,6 +16,7 @@ Xavfsizlik: faqat `tools.READ_TOOLS`; har natija `<untrusted_data>`; har chaqiru
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections import Counter
 from collections.abc import Awaitable, Callable
@@ -81,6 +82,9 @@ class AgentOutcome:
     cache_hits: int = 0  # suhbat keshidan olingan tool natijalari (`tool_cache`)
     # `answered` | `call_budget` | `cost_budget` | `iterations`
     stop_reason: str = ""
+    #: Takror-qo'riqchisi ishladimi: keshdan kelgan qidiruvdan keyin kamida
+    #: bitta server qidiruvi to'sildi (eval `econ-01`).
+    repeat_guard: bool = False
     cost_usd: float | None = None  # taxminiy yig'ma narx (pricing.estimate_cost)
 
 
@@ -112,6 +116,42 @@ async def _notify_tool(
 #: ma'lumot bermaydi — faqat MTProto kvotasi va token sarflaydi (o'lchovda
 #: `search_messages` uch marta, keyin `search_telegram` uch marta naqshi).
 SERVER_SEARCH_TOOLS = frozenset({"search_telegram", "search_global"})
+
+#: Takror-qo'riqchisi (eval `econ-01`) uchun ikki ro'yxat.
+#:
+#: `CACHEABLE_SEARCH_TOOLS` — natijasi keshdan kelsa "bu savol allaqachon
+#: berilgan" degan signal beradigan qidiruvlar. `GUARDED_SERVER_TOOLS` — shu
+#: signaldan keyin **to'siladigan** chaqiruvlar: hammasi Telegram serveriga
+#: boradi, ya'ni MTProto kvotasi + haqiqiy pul. Lokal `search_messages` ro'yxatda
+#: yo'q: u bepul va keshdan kelishi mumkin.
+CACHEABLE_SEARCH_TOOLS = frozenset(
+    {"search_messages", "search_telegram", "search_global", "search_calendar"}
+)
+GUARDED_SERVER_TOOLS = frozenset(
+    {"search_telegram", "search_global", "search_calendar", "discover_channels"}
+)
+#: Model uchun qisqa matn — nima bo'lganini va nima qilish kerakligini aytadi.
+REPEAT_GUARD_NOTE = (
+    "note: repeat detected — server search is disabled for this turn; "
+    "answer from the cached results you already have"
+)
+#: "Chuqurroq / yana qidir" — foydalanuvchi **aniq** yangi qidiruv so'ragan
+#: holat. Faqat shunda qo'riqchi o'chiriladi. Ro'yxat ataylab qisqa: noto'g'ri
+#: ijobiy (guard ishlamay qolishi) eski xatti-harakat, noto'g'ri salbiy esa
+#: foydalanuvchining haqiqiy so'rovini to'sib qo'yardi.
+_DEEPER_INTENT = re.compile(
+    r"chuqurroq|batafsilroq|yana\s+qidir|qayta\s+qidir|yangidan\s+qidir|tekshirib\s+ko"
+    r"|boshqa\s+(?:so|usul|joy|kalit|variant)"
+    r"|глубже|подробнее|ещ[её]\s+раз|ещ[её]\s+поищ|переищ|перепровер|поищи\s+ещ[её]"
+    r"|\bdeeper\b|\bsearch\s+again\b|\btry\s+again\b|\blook\s+again\b|\bre-?check\b"
+    r"|\bmore\s+(?:detail|thorough|sources)",
+    re.IGNORECASE,
+)
+
+
+def wants_deeper_search(text: str) -> bool:
+    """Foydalanuvchi aniq "chuqurroq/yana qidir" deganmi (takror-qo'riqchi istisnosi)."""
+    return bool(_DEEPER_INTENT.search(text or ""))
 
 
 def _blocked_reresearch(call: Any, local_queries: dict[str, int]) -> T.ToolResult | None:
@@ -222,6 +262,13 @@ async def run_agent(
     calls_executed = 0
     cache_hits = 0
     stop_reason = ""
+    # Takror-qo'riqchisi: keshdan qidiruv natijasi kelgan bo'lsa (ya'ni bu savol
+    # shu suhbatda allaqachon berilgan) server qidiruvlari shu yugurishda
+    # yopiladi — model boshqa so'zlar bilan qayta urinmasin (eval `econ-01`:
+    # `cache_hits=2`, keyin ikkita qayta yozilgan `search_telegram`, $0.086).
+    repeat_seen = False
+    repeat_guard = False
+    deeper_requested = wants_deeper_search(question)
     tools_off = False  # byudjet tugadi — keyingi chaqiruv tool'siz
     cost_usd: float | None = None
     call_cap = max(1, int(s.agent_max_executed_calls or MAX_EXECUTED_CALLS_PER_RUN))
@@ -261,6 +308,7 @@ async def run_agent(
         for call in res.tool_calls[:MAX_CALLS_PER_TURN]:
             t0 = time.monotonic()
             cached_text: str | None = None
+            guard_blocked = False
             # ── takroriy chaqiruvlar qopqog'i ──────────────────────────────
             # Aynan bir xil (tool, args) — natija o'zgarmaydi, qayta bajarish
             # DB/MTProto ishini ham, tokenni ham behuda sarflaydi.
@@ -277,6 +325,13 @@ async def run_agent(
                     "answer now with what you have and say what is missing",
                     ok=False,
                 )
+            elif repeat_seen and not deeper_requested and call.name in GUARDED_SERVER_TOOLS:
+                # Bu savol shu suhbatda allaqachon berilgan (kesh buni isbotladi).
+                # Boshqa so'z bilan serverga chiqish yangi ma'lumot bermaydi —
+                # faqat MTProto kvotasi va pul. Lokal `search_messages` ochiq.
+                guard_blocked = True
+                repeat_guard = True
+                result = T.ToolResult(REPEAT_GUARD_NOTE, ok=False)
             elif (blocked := _blocked_reresearch(call, local_queries)) is not None:
                 result = blocked
             elif per_tool[call.name] >= MAX_CALLS_PER_TOOL:
@@ -313,6 +368,8 @@ async def run_agent(
                 cached_text = await TC.get(ckey) if ckey else None
                 if cached_text is not None:
                     cache_hits += 1
+                    if call.name in CACHEABLE_SEARCH_TOOLS:
+                        repeat_seen = True
                     result = T.ToolResult(f"{cached_text}\n{TC.CACHED_NOTE}", ok=True)
                 else:
                     result = await T.run_tool(call.name, ctx, call.arguments)
@@ -343,6 +400,9 @@ async def run_agent(
                 "ok": result.ok,
                 "ms": int((time.monotonic() - t0) * 1000),
                 **({"cached": True} if cached_text is not None else {}),
+                # To'silgan chaqiruv ham `calls_log` ga tushadi (nima so'ralganini
+                # ko'rish uchun); sabab bilan — eval buni bajarilgandan ajratadi.
+                **({"blocked": "repeat_guard"} if guard_blocked else {}),
                 **{
                     k: v
                     for k, v in result.meta.items()
@@ -432,6 +492,7 @@ async def run_agent(
         calls_executed=calls_executed,
         cache_hits=cache_hits,
         stop_reason=stop_reason or "answered",
+        repeat_guard=repeat_guard,
         cost_usd=cost_usd,
     )
     log.info(
@@ -442,6 +503,7 @@ async def run_agent(
         calls_executed=calls_executed,
         cache_hits=cache_hits,
         stop_reason=outcome.stop_reason,
+        repeat_guard=repeat_guard,
         cost_usd=cost_usd,
         tokens_in=tokens_in,
         tokens_out=tokens_out,

@@ -435,6 +435,57 @@ def test_conversation_missing_detects_only_the_deleted_conversation() -> None:
     assert not conversation_missing({"text": "ok"})
 
 
+def test_split_calls_counts_repeat_guard_blocked_call_as_blocked_not_executed() -> None:
+    """`agent.py` ning `blocked: "repeat_guard"` belgisi qayta hisoblanmasin.
+
+    Avval `_split_calls` faqat duplicate/per-tool-limit qoidalarini takrorlab
+    chiqarardi, ya'ni repeat-guard bosgan chaqiruv ham "bajarilgan" deb
+    sanalib, senariyning `max_tool_calls` iga qarshi hisoblanardi.
+    """
+    from evals.conv_runner import _split_calls
+
+    calls = [
+        {"tool": "search_messages", "args": {"query": "narx"}, "ok": True},
+        {
+            "tool": "search_telegram",
+            "args": {"query": "narx"},
+            "ok": False,
+            "blocked": "repeat_guard",
+        },
+        {
+            "tool": "search_global",
+            "args": {"query": "narx 2"},
+            "ok": False,
+            "blocked": "repeat_guard",
+        },
+    ]
+    executed, blocked = _split_calls(calls)
+
+    assert [c["tool"] for c in executed] == ["search_messages"]
+    assert len(blocked) == 2
+    assert all(c["_block"] == "repeat_guard" for c in blocked)
+    assert [c["tool"] for c in blocked] == ["search_telegram", "search_global"]
+
+
+def test_split_calls_still_applies_duplicate_and_per_tool_limit_rules() -> None:
+    """Repeat-guard yo'q chaqiruvlar uchun eski replay mantig'i o'zgarmagan."""
+    from evals.conv_runner import MAX_CALLS_PER_TOOL, _split_calls
+
+    dup = {"tool": "search_messages", "args": {"query": "narx"}, "ok": True}
+    calls = [dup, dict(dup)]
+    executed, blocked = _split_calls(calls)
+    assert len(executed) == 1
+    assert blocked[0]["_block"] == "duplicate"
+
+    over_limit = [
+        {"tool": "get_chat_stats", "args": {"days": i}, "ok": True}
+        for i in range(MAX_CALLS_PER_TOOL + 1)
+    ]
+    executed, blocked = _split_calls(over_limit)
+    assert len(executed) == MAX_CALLS_PER_TOOL
+    assert blocked[0]["_block"] == "per_tool_limit"
+
+
 # ─── senariy rubrikalari ─────────────────────────────────────────────────────
 
 
