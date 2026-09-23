@@ -1556,7 +1556,13 @@ async def discover_channels(ctx: ToolContext, args: dict[str, Any]) -> ToolResul
             # yo'l: nom bo'yicha topib (`contacts.Search`), topilgan ochiq
             # kanallarda `messages.Search`. Yangi TL metod yo'q, Stars yo'q.
             if found.note_code in ("post_search_flood", "premium_required"):
-                by_name = await TS.server_discover_by_name(ctx.account_id, query, limit=limit)
+                name_queries = TS.discover_name_queries([query], [])
+                by_name = await TS.server_discover_by_name(
+                    ctx.account_id,
+                    queries=name_queries or [query],
+                    topic_query=query,
+                    limit=limit,
+                )
                 if by_name.note:
                     blocks.append(by_name.note)
                 if by_name.hits:

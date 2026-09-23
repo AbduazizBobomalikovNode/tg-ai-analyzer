@@ -167,10 +167,14 @@ SERVER_RRF_WEIGHT = 0.9  # lokal kanal 1.0 — server reytingsiz, faqat kalit so
 SERVER_SUBQUERIES_PER_CHAT = 2
 SERVER_GAP_CHATS_MAX = 3
 # Premium'siz kashfiyot (`tg_search.server_discover_by_name`) byudjeti:
-# 1 ta `contacts.Search` + ≤3 ta `messages.Search`. Qolgan pog'onalarga
-# (bo'shliqli chatlar, global) **kamida** shuncha chaqiruv qoldiriladi.
-# `DEEP_SERVER_MAX_CALLS=6` da: 1 flood/premium tekshiruvi + 1 nom qidiruvi +
-# ≤3 kanal = ≤5, ya'ni ≥1 chaqiruv egasining o'z arxiviga qoladi.
+# ≤2 ta `contacts.Search` (`tg_search.discover_name_queries` — qisqa
+# "nomga o'xshagan" variantlar, mavzu iborasi emas; ikkinchisi birinchisi
+# to'lgan to'plam qaytarganda o'tkazib yuboriladi) + ≤3 ta `messages.Search`.
+# Qolgan pog'onalarga (bo'shliqli chatlar, global) **kamida** shuncha
+# chaqiruv qoldiriladi. `DEEP_SERVER_MAX_CALLS=6` da: 1 flood/premium
+# tekshiruvi + ≤2 nom qidiruvi + ≤3 kanal = ≤6, `top_k` shunga qarab
+# qisqartiriladi (`allow - len(name_queries)`) — ≥1 chaqiruv egasining o'z
+# arxiviga qoladi.
 SERVER_DISCOVER_NAME_TOP_K = 3
 SERVER_OTHER_RESERVE = 1
 SERVER_LIMIT = 20
@@ -1573,11 +1577,12 @@ def _premium_skip_note() -> str:
     return "ommaviy post qidiruvi: Telegram Premium kerak, shuning uchun nom bo'yicha qidirildi"
 
 
-def _by_name_note(searched: Sequence[str]) -> str:
-    """Nom bo'yicha kashfiyot **rost** hisobi: nechta kanal haqiqatan o'qildi."""
+def _by_name_note(searched: Sequence[str], name_queries: Sequence[str] = ()) -> str:
+    """Nom bo'yicha kashfiyot **rost** hisobi: qaysi so'rovlar, nechta kanal o'qildi."""
     names = ", ".join(f"@{u}" for u in searched if u)
+    queries_part = f' ("{", ".join(name_queries)}")' if name_queries else ""
     return (
-        f"discover: nom bo'yicha (contacts.Search) + {len(searched)} kanalda "
+        f"discover: nom bo'yicha (contacts.Search{queries_part}) + {len(searched)} kanalda "
         f"messages.Search: {names}"
     )
 
@@ -1672,16 +1677,23 @@ async def escalate(
                 else _premium_skip_note()
             )
             if budget_left():
-                # Byudjet taqsimoti: nom bo'yicha yo'l 1 ta `contacts.Search` +
+                # Byudjet taqsimoti: nom bo'yicha yo'l ≤2 ta `contacts.Search`
+                # (`discover_name_queries` — mavzu iborasi emas, qisqa
+                # "nomga o'xshagan" variantlar: `contacts.Search` kanal
+                # nomi/username'iga mos keladi, to'liq iboraga emas) +
                 # ≤`top_k` ta `messages.Search` yeydi, lekin gap-chat/global
                 # pog'onalariga **kamida** `SERVER_OTHER_RESERVE` chaqiruv
                 # qoldiradi (aks holda bitta discover butun byudjetni yeb,
                 # egasining o'z arxivi qaralmay qolardi).
+                name_queries = TG.discover_name_queries(subqueries, plan.entities)
+                if not name_queries:
+                    name_queries = [subqueries[0]]
                 allow = max_calls - outcome.calls - SERVER_OTHER_RESERVE
-                top_k = max(0, min(SERVER_DISCOVER_NAME_TOP_K, allow - 1))
+                top_k = max(0, min(SERVER_DISCOVER_NAME_TOP_K, allow - len(name_queries)))
                 chans = await TG.server_discover_by_name(
                     account_id,
-                    subqueries[0],
+                    queries=name_queries,
+                    topic_query=subqueries[0],
                     top_k=top_k,
                     since=plan.since,
                     until=plan.until,
@@ -1694,7 +1706,7 @@ async def escalate(
                     outcome.notes.append(_channels_note(chans.channels))
                 if chans.searched:
                     outcome.rungs.append("channel_posts")
-                    outcome.notes.append(_by_name_note(chans.searched))
+                    outcome.notes.append(_by_name_note(chans.searched, chans.name_queries))
                 _log_rung("channels", chans.calls, len(got), chans.note or chans.error_text)
                 await _emit(
                     events,

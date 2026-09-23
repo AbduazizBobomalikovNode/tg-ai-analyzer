@@ -175,11 +175,21 @@ bitta akkaunt kvotasini bo'lishadi).
   eslab qolinadi) va **tekin zaxira yo'l** ishga tushadi:
   `tg_search.server_discover_by_name` = `contacts.Search` (nom bo'yicha ochiq
   kanallar, lokal `chats` dagilari tashlanadi) + top 3 kanalda `messages.Search`.
+  **So'rov strategiyasi ikki xil**: `contacts.Search` ga mavzu iborasi emas,
+  `tg_search.discover_name_queries` chiqargan ≤2 ta qisqa "nomga o'xshagan"
+  variant boradi (reja `entities`i, keyin subquery boshi — stop-so'z va joy
+  kelishigi qo'shimchasi olib tashlanadi; jonli misol: `"IT ta'lim
+  O'zbekistonda"` `contacts.Search`da 0 ta kanal beradi, `"IT ta'lim"` esa
+  beradi), `messages.Search` esa **asl mavzu matnini** oladi (`topic_query`) —
+  bu to'liq matn qidiruvi va iborani tushunadi. Ikkinchi `contacts.Search`
+  birinchisi allaqachon to'liq to'plam qaytarganda o'tkazib yuboriladi.
   Peer javob bilan kelgan access hash'dan yasaladi (`get_entity()` yo'q), natija
   tashqi (`[server external]`, `t.me/<username>/<id>`). Bitta implementatsiya —
   `tools.discover_channels` ham, `deep_search.escalate` ham shuni chaqiradi.
-  Byudjet: 1 flood/premium tekshiruvi + 1 `contacts.Search` + ≤3 `messages.Search`,
-  `SERVER_OTHER_RESERVE=1` esa gap-chat/global pog'onalariga qoladi.
+  Byudjet: 1 flood/premium tekshiruvi + ≤2 `contacts.Search` + ≤3
+  `messages.Search`, `SERVER_OTHER_RESERVE=1` esa gap-chat/global
+  pog'onalariga qoladi (`top_k` shunga qarab `allow - len(name_queries)`
+  bilan qisqartiriladi).
   `contacts.Search` **o'z bucket'ida** (`BUCKET_CONTACTS`, 3/min burst 2) —
   `BUCKET_DISCOVER` (burst 1) da probe yagona tokenni yeb, zaxira yo'l hech
   qachon ishga tushmasdi (jonli: `server_skipped=["discover"]`,

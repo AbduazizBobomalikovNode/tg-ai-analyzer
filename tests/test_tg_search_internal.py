@@ -278,6 +278,52 @@ async def test_premium_fallback_reaches_contacts_search(monkeypatch: pytest.Monk
     TS.PREMIUM_MISSING.discard(1)
 
 
+# ─── discover_name_queries: mavzu → "nomga o'xshagan" qisqa variantlar ───────
+
+
+@pytest.mark.parametrize(
+    ("subqueries", "entities", "expected"),
+    [
+        # Jonli misol: to'liq ibora `contacts.Search`da 0 ta natija berardi
+        # ("IT ta'lim O'zbekistonda"), qisqa variant esa beradi.
+        (["IT ta'lim O'zbekistonda"], [], ["IT ta'lim"]),
+        # Reja shu ikkitasini alohida entity qilib bergan bo'lsa — ikkalasi
+        # ham (joy kelishigi qo'shimchasi "-da" olib tashlanadi).
+        ([], ["IT ta'lim", "O'zbekistonda"], ["IT ta'lim", "O'zbekiston"]),
+        # Faqat joy nomi — bitta so'zli entity ham 1 tokenda qoladi.
+        ([], ["Toshkentda"], ["Toshkent"]),
+        # Entity to'liq stop-so'zlardan iborat — tashlab ketiladi, subquery
+        # boshiga tushiladi.
+        (["muhim mavzu haqida"], ["haqida bo'yicha"], ["muhim mavzu", "muhim"]),
+        # Ingliz: 3 so'zgacha entity o'zgarishsiz qoladi.
+        ([], ["Cloud Computing Conference"], ["Cloud Computing Conference"]),
+        # Rus: birinchi 2 so'z + birinchi so'z (≥4 belgi) — ikkalasi ham.
+        (["новости про Пятигорск фестиваль"], [], ["новости про", "новости"]),
+        # Bir xil variant ikki marta tushmasin (fold bo'yicha).
+        (["IT ta'lim narxi qancha"], ["IT ta'lim"], ["IT ta'lim"]),
+        # Juda qisqa nomzodlar (< 3 belgi) — hammasi tashlab ketiladi.
+        (["a", "b"], [], []),
+        (["", "   "], [], []),
+    ],
+)
+def test_discover_name_queries_table(
+    subqueries: list[str], entities: list[str], expected: list[str]
+) -> None:
+    assert TS.discover_name_queries(subqueries, entities) == expected
+
+
+def test_discover_name_queries_respects_max_queries() -> None:
+    out = TS.discover_name_queries(
+        [], ["IT ta'lim", "O'zbekistonda", "Toshkent shahri"], max_queries=1
+    )
+    assert out == ["IT ta'lim"]
+
+
+def test_discover_name_queries_is_deterministic_and_pure() -> None:
+    args = (["sun'iy intellekt haqida nima deyishyapti"], ["sun'iy intellekt"])
+    assert TS.discover_name_queries(*args) == TS.discover_name_queries(*args)
+
+
 async def test_contacts_search_never_draws_from_the_discover_bucket(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

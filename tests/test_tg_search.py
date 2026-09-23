@@ -702,6 +702,98 @@ async def test_discover_by_name_flood_is_not_retried(monkeypatch: pytest.MonkeyP
     assert "no retry" in (out.note or "")
 
 
+class _ByQueryClient(_NsClient):
+    """`contacts.Search` javobi so'rov matniga (`request.q`) qarab farqlanadi.
+
+    `_NsClient` bitta statik javob beradi — ikki xil nom so'rovini (`queries`)
+    alohida tekshirish uchun har chaqiruv o'z javobini olishi kerak.
+    """
+
+    def __init__(self, contacts_by_query: dict[str, Any], posts_reply: Any) -> None:
+        super().__init__({})
+        self.contacts_by_query = contacts_by_query
+        self.posts_reply = posts_reply
+
+    async def __call__(self, request: Any) -> Any:
+        self.requests.append(request)
+        if _key(request) == "contacts.SearchRequest":
+            return self.contacts_by_query.get(request.q, _messages([]))
+        return self.posts_reply
+
+
+async def test_discover_by_name_merges_two_name_queries(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ikkala nom so'rovi ham `contacts.Search`ga boradi, kanallar id bo'yicha birlashadi."""
+    chan_a = _chan(100, "ai_uz", "AI Uzbekistan")  # ikkala so'rovda ham topiladi
+    chan_b = _chan(200, "itpark_uz", "IT Park")
+    client = _ByQueryClient(
+        contacts_by_query={
+            "IT ta'lim": _messages([], chats=[chan_a]),
+            "O'zbekiston": _messages([], chats=[chan_a, chan_b]),
+        },
+        posts_reply=_messages(
+            [_msg(1, "post", channel_id=100)],
+            chats=[_entity(100, title="AI Uzbekistan", username="ai_uz")],
+        ),
+    )
+    _patch_pool(monkeypatch, client)
+
+    out = await TS.server_discover_by_name(
+        1,
+        queries=["IT ta'lim", "O'zbekiston"],
+        topic_query="IT ta'lim O'zbekistonda",
+        top_k=1,
+        known_peer_ids=set(),
+    )
+
+    assert client.ns.count("contacts.SearchRequest") == 2
+    assert out.name_queries == ["IT ta'lim", "O'zbekiston"]
+    assert {c["id"] for c in out.channels} == {100, 200}
+    # chan_a ikkala so'rovda ham topilgan → ustuvor, top_k=1 shuni tanlaydi.
+    assert out.searched == ["ai_uz"]
+    assert client.first("messages.SearchRequest").q == "IT ta'lim O'zbekistonda"
+
+
+async def test_discover_by_name_skips_second_query_when_first_is_full(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Birinchi `contacts.Search` `candidates` ga to'lgan bo'lsa — ikkinchisi yo'q."""
+    chans = [_chan(100 + i, f"c{i}", f"Kanal {i}") for i in range(TS.DISCOVER_NAME_CANDIDATES)]
+    client = _ByQueryClient(
+        contacts_by_query={"first": _messages([], chats=chans)},
+        posts_reply=_messages([]),
+    )
+    _patch_pool(monkeypatch, client)
+
+    out = await TS.server_discover_by_name(
+        1, queries=["first", "second"], topic_query="topic", known_peer_ids=set()
+    )
+
+    assert client.ns.count("contacts.SearchRequest") == 1
+    assert out.name_queries == ["first"]
+
+
+async def test_discover_by_name_backward_compatible_single_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Eski chaqiruv shakli (`query=` bitta satr) ham nom, ham mavzu bo'lib ishlaydi."""
+    client = _NsClient(
+        {
+            "contacts.SearchRequest": _messages([], chats=[_chan(100, "ielts", "IELTS")]),
+            "messages.SearchRequest": _messages(
+                [_msg(11, "post matni", channel_id=100)],
+                chats=[_entity(100, title="IELTS", username="ielts")],
+            ),
+        }
+    )
+    _patch_pool(monkeypatch, client)
+
+    out = await TS.server_discover_by_name(1, "ielts", known_peer_ids=set())
+
+    assert out.name_queries == ["ielts"]
+    assert client.first("messages.SearchRequest").q == "ielts"
+    assert out.hits
+
+
 async def test_discover_channels_falls_back_when_premium_is_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

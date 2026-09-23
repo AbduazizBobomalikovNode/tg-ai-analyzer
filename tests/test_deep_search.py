@@ -609,8 +609,8 @@ def _fake_tg(monkeypatch: pytest.MonkeyPatch, **answers: Any) -> dict[str, list[
         seen["discover"].append({"query": query, **kw})
         return _answer("discover", DS.TG.ServerHits(calls=1))
 
-    async def by_name(account_id: int, query: str, **kw: Any) -> Any:
-        seen["by_name"].append({"query": query, **kw})
+    async def by_name(account_id: int, **kw: Any) -> Any:
+        seen["by_name"].append(dict(kw))
         return _answer("by_name", DS.TG.ServerHits(calls=1))
 
     async def persist(session: Any, account_id: int, hits: Any) -> int:
@@ -786,6 +786,52 @@ def _by_name_found() -> Any:
         channels=[{"title": "IT Park", "username": "itpark_uz"}],
         searched=["itpark_uz"],
     )
+
+
+def test_by_name_note_lists_queries_and_channels() -> None:
+    note = DS._by_name_note(["ai_uz", "itpark_uz"], ["IT ta'lim", "O'zbekiston"])
+    assert "IT ta'lim" in note and "O'zbekiston" in note
+    assert "@ai_uz" in note and "@itpark_uz" in note
+
+
+def test_by_name_note_without_name_queries_still_lists_channels() -> None:
+    """Eski (bitta so'zli) chaqiruv yo'lida `name_queries` bo'sh bo'lishi mumkin."""
+    note = DS._by_name_note(["ai_uz"])
+    assert "@ai_uz" in note and "1" in note
+
+
+@pytest.mark.asyncio
+async def test_escalate_by_name_uses_short_variants_not_the_full_phrase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`contacts.Search` mavzu iborasini emas, `discover_name_queries` variantlarini oladi.
+
+    Jonli misol: `"IT ta'lim O'zbekistonda"` `contacts.Search`da 0 ta natija
+    beradi, `"IT ta'lim"` esa beradi — shuning uchun reja `entities`idan
+    qisqa nomlar ajratiladi, `messages.Search` esa baribir to'liq mavzu
+    matnini oladi (`topic_query`).
+    """
+    seen = _fake_tg(monkeypatch, discover=_premium_blocked, by_name=_by_name_found)
+
+    out = await DS.escalate(
+        factory,
+        account_id=1,
+        plan=_plan(
+            server_scope="discover",
+            subqueries=["IT ta'lim O'zbekistonda qanday rivojlanyapti"],
+            entities=["IT ta'lim", "O'zbekistonda"],
+        ),
+        gap_chats=[],
+        chats_by_id={},
+        events=None,
+        max_calls=6,
+    )
+
+    assert seen["by_name"][0]["queries"] == ["IT ta'lim", "O'zbekiston"]
+    assert seen["by_name"][0]["topic_query"] == "IT ta'lim O'zbekistonda qanday rivojlanyapti"
+    # 6 - 1 (discover probe) - 1 (SERVER_OTHER_RESERVE) - 2 (ikkita nom so'rovi)
+    assert seen["by_name"][0]["top_k"] == 2
+    assert out.external == 1
 
 
 @pytest.mark.asyncio

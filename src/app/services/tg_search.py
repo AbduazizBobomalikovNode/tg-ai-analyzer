@@ -40,6 +40,7 @@ sessiyasini yeydi).
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
@@ -51,6 +52,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import Chat, Message
 from app.logging import get_logger
 from app.services import search as S
+from app.services.stopwords import is_stopword
+from app.services.textnorm import uz_fold
 
 log = get_logger(__name__)
 
@@ -65,6 +68,7 @@ __all__ = [
     "ChannelHits",
     "ServerHit",
     "ServerHits",
+    "discover_name_queries",
     "persist_server_hits",
     "send_request",
     "server_calendar",
@@ -170,6 +174,9 @@ class ServerHits:
     #: kanallar (`contacts.Search`) va ulardan **haqiqatan** o'qilganlari.
     channels: list[dict[str, Any]] = field(default_factory=list)
     searched: list[str] = field(default_factory=list)
+    #: `contacts.Search` ga haqiqatan yuborilgan nom so'rovlari (≤2) —
+    #: qamrov/`server_notes` "nima izlandi" ni rost aytsin.
+    name_queries: list[str] = field(default_factory=list)
 
 
 # ─── entity yordamchilari (qo'shimcha RPC yo'q) ──────────────────────────────
@@ -801,6 +808,99 @@ async def server_channel_search(account_id: int, query: str, *, limit: int = 10)
 
 DISCOVER_NAME_CANDIDATES = 5  # `contacts.Search` dan olinadigan nomzodlar
 DISCOVER_NAME_TOP_K = 3  # ulardan nechtasida post o'qiladi
+DISCOVER_NAME_MAX_QUERIES = 2  # `contacts.Search` ga yuboriladigan nom nomzodlari soni
+
+# `contacts.Search` kanal **nomi/username**iga mos keladi — mavzu iborasi
+# emas (jonli o'lchov: "IT ta'lim O'zbekistonda" → 0 ta kanal, "IT ta'lim" →
+# 5 ta). Shu sababli mavzu so'rovidan qisqa "nomga o'xshagan" variantlar
+# ajratiladi: joy kelishigi qo'shimchasi (`-da`, `-dan`, ...) va "haqida" /
+# "bo'yicha" kabi bog'lovchilar bilan tugagan bo'lak kanal nomi bo'la olmaydi.
+_LOC_SUFFIXES: tuple[str, ...] = ("dagi", "gacha", "ning", "dan", "da", "ga", "ni")
+_WORD_RE = re.compile(r"[^\s]+")
+_EDGE_PUNCT = ".,;:!?\"'()[]{}<>«»"  # so'z chetidan olinadi (ichidagi apostrof qolaveradi)
+
+
+def _strip_loc_suffix(word: str) -> str:
+    """Oxirgi so'zdan joy kelishigi qo'shimchasini olib tashlaydi (bo'lsa).
+
+    Faqat so'z **kamida 3 belgi qoladigan** bo'lsa kesiladi — aks holda
+    qisqa so'zlar ("da" kabi) butunlay yo'qolib ketardi.
+    """
+    low = word.lower()
+    for suf in _LOC_SUFFIXES:
+        if low.endswith(suf) and len(word) - len(suf) >= 3:
+            return word[: len(word) - len(suf)]
+    return word
+
+
+def _normalize_name_candidate(text: str, *, max_words: int = 3) -> str:
+    """Erkin iborani "kanal nomiga o'xshagan" qisqa bo'lakka tushiradi.
+
+    Stop-so'zlar ("haqida", "bo'yicha", ...) olib tashlanadi, natija
+    `max_words` so'zgacha kesiladi, oxirgi so'zdan joy kelishigi qo'shimchasi
+    olinadi. Hammasi stop-so'z bo'lsa — bo'sh satr (nomzod tashlab ketiladi).
+    """
+    words = [w.strip(_EDGE_PUNCT) for w in _WORD_RE.findall(text or "")]
+    # BUTUNLAY BOSH HARF (masalan "IT") — ehtimol qisqartma, stop-so'z
+    # ro'yxati bilan tasodifiy to'qnashsa ham (`uz_fold("IT") == "it"`,
+    # inglizcha stop-so'z) saqlanadi.
+    kept = [w for w in words if w and (w.isupper() or not is_stopword(w))]
+    if not kept:
+        return ""
+    kept = kept[:max_words]
+    kept[-1] = _strip_loc_suffix(kept[-1])
+    return " ".join(kept).strip()
+
+
+def discover_name_queries(
+    subqueries: Sequence[str],
+    entities: Sequence[str],
+    *,
+    max_queries: int = DISCOVER_NAME_MAX_QUERIES,
+) -> list[str]:
+    """Mavzu so'rovlaridan `contacts.Search` uchun qisqa **nomga o'xshagan**
+    variantlar — deterministik, LLM yo'q.
+
+    `contacts.Search` kanal nomi/username'iga mos keladi, mavzu iborasiga
+    emas (module docstring'dagi jonli misol). Ustuvorlik tartibi:
+
+    1. `entities` — reja topgan nom/mavzular (stop-so'z va joy kelishigi
+       qo'shimchasi olib tashlangan holda, ≤3 so'z);
+    2. har `subqueries` elementining birinchi 2 so'zi;
+    3. har `subqueries` elementining birinchi so'zi (≥4 belgi bo'lsa).
+
+    Fold (`uz_fold`) bo'yicha takrorlar olib tashlanadi, 3 belgidan qisqa
+    nomzod tashlab ketiladi, natija ≤`max_queries` ga kesiladi.
+    """
+    raw: list[str] = []
+    for ent in entities:
+        norm = _normalize_name_candidate(ent)
+        if norm:
+            raw.append(norm)
+    for sq in subqueries:
+        words = (sq or "").split()
+        head = " ".join(words[:2]).strip()
+        if head:
+            raw.append(head)
+    for sq in subqueries:
+        words = (sq or "").split()
+        if words and len(words[0]) >= 4:
+            raw.append(words[0])
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for cand in raw:
+        cand = cand.strip()
+        if len(cand) < 3:
+            continue
+        key = uz_fold(cand)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(cand)
+        if len(out) >= max_queries:
+            break
+    return out
 
 
 async def local_peer_ids(account_id: int) -> set[int]:
@@ -827,8 +927,10 @@ def _peer_of_found(ch: dict[str, Any], tlt: Any) -> Any | None:
 
 async def server_discover_by_name(
     account_id: int,
-    query: str,
+    query: str = "",
     *,
+    queries: Sequence[str] | None = None,
+    topic_query: str | None = None,
     top_k: int = DISCOVER_NAME_TOP_K,
     candidates: int = DISCOVER_NAME_CANDIDATES,
     limit: int = 10,
@@ -842,54 +944,116 @@ async def server_discover_by_name(
     da aynan shu chiqdi: `PremiumAccountRequiredError`). Tekin muqobil ikki
     qadam, ikkalasi ham allowlist'da READ:
 
-    1. `contacts.Search` — nomi/username'i so'rovga mos **ochiq** kanal va
-       supergruhlar (≤`candidates`). Lokal `chats` da bori tashlanadi —
-       ular allaqachon indeksda, bu esa "men a'zo emasman" savoli.
-    2. Top `top_k` kanalda `messages.Search` — ochiq kanal tarixi a'zo
-       bo'lmasdan o'qiladi. `InputPeer` **javob bilan kelgan** access hash'dan
-       yasaladi (`get_entity()` chaqirilmaydi).
+    1. `contacts.Search` — **har bir** `queries` elementi uchun (≤2, odatda
+       `tg_search.discover_name_queries` chiqargan qisqa "nomga o'xshagan"
+       variantlar — mavzu iborasi emas: `contacts.Search` kanal nomi/
+       username'iga mos keladi, "IT ta'lim O'zbekistonda" kabi to'liq
+       ibora 0 ta natija beradi, "IT ta'lim" esa beradi). Birinchi so'rov
+       ≥`candidates` kanal topsa, ikkinchisi **chaqirilmaydi** (byudjet).
+       Topilgan kanallar id bo'yicha birlashtiriladi, `top_k` tasi
+       (ikkalasida ham topilgani, keyin a'zolar soni, keyin tartib bo'yicha)
+       qoladi. Lokal `chats` da bori tashlanadi.
+    2. Top `top_k` kanalda `messages.Search` — **`topic_query`** (yoki
+       yo'q bo'lsa `query`/birinchi nom so'rovi) bilan, chunki bu
+       to'liq matn qidiruvi va mavzu iborasini tushunadi. Ochiq kanal
+       tarixi a'zo bo'lmasdan o'qiladi; `InputPeer` **javob bilan kelgan**
+       access hash'dan yasaladi (`get_entity()` chaqirilmaydi).
 
     Natija odatdagi `ServerHits`: `chat_id=None` → quyi oqimda tashqi
     (`[server external]`, manfiy sintetik id, `t.me/<username>/<id>` havolasi).
     Har `messages.Search` **search** bucket'idan o'tadi; `FloodWaitError`
     retry qilinmaydi — matn bo'lib qaytadi va pog'ona to'xtaydi.
+
+    Eski chaqiruv shakli (`query=` bitta satr) ishlashda davom etadi: o'sha
+    bitta satr ham nom, ham mavzu sifatida ishlatiladi.
     """
     from telethon.tl import types as tlt
 
-    query = (query or "").strip()
-    if not query:
+    name_queries = [
+        q for q in ((qq or "").strip() for qq in (queries if queries is not None else [query])) if q
+    ]
+    topic = (topic_query or query or (name_queries[0] if name_queries else "")).strip()
+    if not name_queries or not topic:
         return ServerHits(error_text="error: `query` is required")
 
-    found = await server_channel_search(account_id, query, limit=max(1, int(candidates)))
-    out = ServerHits(calls=found.calls, mode="by name", note_code="discover_by_name")
-    if found.rate_limited:
-        out.rate_limited = found.rate_limited
-        out.error_text = found.error_text
-        out.note = f"channel name search skipped: {found.rate_limited} quota is full"
-        return out
-    if found.error_text is not None:
-        out.error_text = found.error_text
-        out.note = f"channel name search failed ({found.error_text}); no retry"
+    out = ServerHits(mode="by name", note_code="discover_by_name")
+    # Kalit **odatda** `contacts.Search` id'si (raqamli, ikkala so'rov
+    # natijasini birlashtirish uchun); id kelmasa (masalan eski test
+    # fixture'i) username'ga, u ham bo'lmasa obyektning o'ziga tushadi — bu
+    # holatda dedup ishlamaydi, lekin kanal baribir ro'yxatdan tushib
+    # ketmaydi (`_peer_of_found` baribir id/access_hash talab qiladi).
+    merged: dict[Any, dict[str, Any]] = {}
+    found_at: dict[Any, int] = {}  # kalit -> nechta nom so'rovida topilgani
+    order: list[Any] = []
+
+    def _key(ch: dict[str, Any]) -> Any:
+        cid = int(ch.get("id") or 0)
+        if cid:
+            return cid
+        uname = str(ch.get("username") or "").strip()
+        return f"u:{uname}" if uname else id(ch)
+
+    for i, nq in enumerate(name_queries):
+        found = await server_channel_search(account_id, nq, limit=max(1, int(candidates)))
+        out.calls += found.calls
+        if found.rate_limited:
+            out.rate_limited = found.rate_limited
+            out.error_text = found.error_text
+            out.note = f"channel name search skipped: {found.rate_limited} quota is full"
+            if not merged:
+                return out
+            break
+        if found.error_text is not None:
+            out.error_text = found.error_text
+            out.note = f"channel name search failed ({found.error_text}); no retry"
+            if not merged:
+                return out
+            break
+        out.name_queries.append(nq)
+        for ch in found.channels:
+            key = _key(ch)
+            if key in merged:
+                found_at[key] += 1
+            else:
+                merged[key] = ch
+                found_at[key] = 1
+                order.append(key)
+        # Birinchi so'rov allaqachon to'liq to'plam qaytargan bo'lsa —
+        # ikkinchi `contacts.Search` (yana bitta RPC) shart emas.
+        if i == 0 and len(found.channels) >= candidates:
+            break
+
+    out.channels = [merged[cid] for cid in order]
+    if not merged:
+        names = " / ".join(f'"{q}"' for q in out.name_queries or name_queries)
+        out.note = f"no public channels found for {names}"
         return out
 
-    out.channels = list(found.channels)
-    pool_ = [(ch, _peer_of_found(ch, tlt)) for ch in found.channels]
+    def _rank(key: Any) -> tuple[int, int, int]:
+        ch = merged[key]
+        members = ch.get("members")
+        members_val = int(members) if isinstance(members, int) else -1
+        return (-found_at[key], -members_val, order.index(key))
+
+    ranked = sorted(order, key=_rank)
+    pool_ = [(merged[cid], _peer_of_found(merged[cid], tlt)) for cid in ranked]
     usable = [(ch, peer) for ch, peer in pool_ if peer is not None]
+    names = " / ".join(f'"{q}"' for q in out.name_queries)
     if not usable:
-        out.note = f'no public channels outside your chats match "{query}"'
+        out.note = f"no public channels outside your chats match {names}"
         return out
 
     known = known_peer_ids if known_peer_ids is not None else await local_peer_ids(account_id)
     fresh = [(ch, peer) for ch, peer in usable if int(ch["id"]) not in known][: max(0, int(top_k))]
     if not fresh:
-        out.note = f'every public channel matching "{query}" is already in your chats'
+        out.note = f"every public channel matching {names} is already in your chats"
         return out
 
     for ch, peer in fresh:
         res = await server_search_chat(
             account_id,
             None,
-            query,
+            topic,
             peer=peer,
             chat_title=str(ch.get("title") or ch.get("username") or ""),
             since=since,
@@ -909,12 +1073,12 @@ async def server_discover_by_name(
             continue
         out.searched.append(str(ch.get("username") or ""))
         out.hits.extend(res.hits)
-    names = ", ".join(f"@{u}" for u in out.searched)
+    searched_names = ", ".join(f"@{u}" for u in out.searched)
     out.note = (
         f"name search (contacts.Search) + messages.Search in {len(out.searched)} "
-        f"public channel(s): {names}"
+        f"public channel(s): {searched_names}"
         if out.searched
-        else f'found public channels for "{query}" but could not read their posts'
+        else f"found public channels for {names} but could not read their posts"
     )
     return out
 
