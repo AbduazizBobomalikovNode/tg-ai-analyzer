@@ -753,13 +753,23 @@ async def test_discover_by_name_merges_two_name_queries(monkeypatch: pytest.Monk
     assert client.first("messages.SearchRequest").q == "IT ta'lim O'zbekistonda"
 
 
-async def test_discover_by_name_skips_second_query_when_first_is_full(
+async def test_discover_by_name_sends_both_queries_even_when_the_first_is_full(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Birinchi `contacts.Search` `candidates` ga to'lgan bo'lsa — ikkinchisi yo'q."""
+    """Jonli regressiya: to'la birinchi so'rov ikkinchisini **bekor qilmaydi**.
+
+    `global-04` da birinchi nom so'rovi joy nomi ("O'zbekiston") edi va u
+    `candidates` ga har doim to'ladi (yuzlab kanalda shu so'z bor) — eski
+    "birinchisi to'la bo'lsa to'xta" qoidasi mavzu so'rovini ("IT ta'lim")
+    **hech qachon** yubormasdi. Byudjet `escalate` da hisoblanadi, bu yerda
+    emas.
+    """
     chans = [_chan(100 + i, f"c{i}", f"Kanal {i}") for i in range(TS.DISCOVER_NAME_CANDIDATES)]
     client = _ByQueryClient(
-        contacts_by_query={"first": _messages([], chats=chans)},
+        contacts_by_query={
+            "first": _messages([], chats=chans),
+            "second": _messages([], chats=[_chan(900, "second_ch", "Ikkinchi")]),
+        },
         posts_reply=_messages([]),
     )
     _patch_pool(monkeypatch, client)
@@ -768,8 +778,135 @@ async def test_discover_by_name_skips_second_query_when_first_is_full(
         1, queries=["first", "second"], topic_query="topic", known_peer_ids=set()
     )
 
-    assert client.ns.count("contacts.SearchRequest") == 1
-    assert out.name_queries == ["first"]
+    assert client.ns.count("contacts.SearchRequest") == 2
+    assert out.name_queries == ["first", "second"]
+    assert 900 in {c["id"] for c in out.channels}
+
+
+class _ByPeerClient(_NsClient):
+    """`contacts.Search` so'rov matniga, `messages.Search` esa **peer**ga qarab.
+
+    Jonli `global-04` ni uchidan-uchiga o'ynash uchun: har nom so'rovi o'z
+    kanallarini beradi, har kanal esa o'z postlarini (yoki bo'shini).
+    """
+
+    def __init__(
+        self,
+        contacts_by_query: dict[str, Any],
+        posts_by_peer: dict[tuple[int, str], Any],
+    ) -> None:
+        super().__init__({})
+        self.contacts_by_query = contacts_by_query
+        self.posts_by_peer = posts_by_peer
+
+    async def __call__(self, request: Any) -> Any:
+        self.requests.append(request)
+        if _key(request) == "contacts.SearchRequest":
+            return self.contacts_by_query.get(request.q, _messages([]))
+        peer = getattr(request, "peer", None)
+        channel_id = int(getattr(peer, "channel_id", 0) or 0)
+        return self.posts_by_peer.get((channel_id, request.q), _messages([]))
+
+
+def _post_in(channel_id: int, username: str, mid: int) -> Any:
+    return _messages(
+        [_msg(mid, "IT ta'lim haqida post", channel_id=channel_id)],
+        chats=[_entity(channel_id, title=username, username=username)],
+    )
+
+
+async def test_discover_by_name_live_case_topical_channels_win(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Jonli `global-04`: mavzu so'rovi 3 ta kichik kanal, joy nomi 1 ta gigant.
+
+    Kutilgan: ikkala `contacts.Search` ham yuboriladi, mavzu **birinchi**,
+    tanlov `top_k=3` da **2 mavzu + 1 joy** bo'ladi (round-robin) — gigant
+    kanal a'zolar soni bilan mavzu kanallarini siqib chiqarmaydi.
+    """
+    topical = [
+        _chan(101, "ittechuz", "IT Tech Uz", participants_count=500),
+        _chan(102, "ITtalim_uz", "IT ta'lim", participants_count=300),
+        _chan(103, "kafolattalim_uz", "Kafolat ta'lim", participants_count=200),
+    ]
+    generic = _chan(
+        900, "uzbekistan_news", "O'zbekiston yangiliklari", participants_count=2_000_000
+    )
+    queries = TS.discover_name_queries(["IT ta'lim O'zbekistonda"], ["O'zbekiston", "IT ta'lim"])
+    assert queries == ["IT ta'lim", "O'zbekiston"]  # mavzu birinchi
+
+    client = _ByPeerClient(
+        contacts_by_query={
+            "IT ta'lim": _messages([], chats=topical),
+            "O'zbekiston": _messages([], chats=[generic]),
+        },
+        posts_by_peer={(101, "IT ta'lim O'zbekistonda"): _post_in(101, "ittechuz", 11)},
+    )
+    _patch_pool(monkeypatch, client)
+
+    out = await TS.server_discover_by_name(
+        1,
+        queries=queries,
+        topic_query="IT ta'lim O'zbekistonda",
+        top_k=3,
+        known_peer_ids=set(),
+    )
+
+    assert [r.q for r in client.requests if _key(r) == "contacts.SearchRequest"] == [
+        "IT ta'lim",
+        "O'zbekiston",
+    ]
+    # 2 mavzu + 1 joy; uchinchi mavzu kanali `top_k` ga sig'madi.
+    assert out.searched == ["ittechuz", "uzbekistan_news", "ITtalim_uz"]
+    assert "kafolattalim_uz" not in out.searched
+    assert [h.link for h in out.hits] == ["https://t.me/ittechuz/11"]
+    assert all(h.chat_id is None for h in out.hits)  # tashqi
+
+
+async def test_discover_by_name_retries_zero_hit_channel_with_the_short_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mavzu iborasi 0 bersa — **shu** kanalda qisqa mavzu nomi bilan bir marta."""
+    client = _ByPeerClient(
+        contacts_by_query={"IT ta'lim": _messages([], chats=[_chan(101, "ittechuz", "IT Tech")])},
+        posts_by_peer={(101, "IT ta'lim"): _post_in(101, "ittechuz", 12)},
+    )
+    _patch_pool(monkeypatch, client)
+
+    out = await TS.server_discover_by_name(
+        1,
+        queries=["IT ta'lim"],
+        topic_query="IT ta'lim O'zbekistonda qanday rivojlanyapti",
+        top_k=1,
+        known_peer_ids=set(),
+    )
+
+    searches = [r.q for r in client.requests if _key(r) == "messages.SearchRequest"]
+    assert searches == ["IT ta'lim O'zbekistonda qanday rivojlanyapti", "IT ta'lim"]
+    assert [h.link for h in out.hits] == ["https://t.me/ittechuz/12"]
+
+
+async def test_discover_by_name_retry_respects_the_call_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`max_calls` (escalate'ning `allow` i) tugagan bo'lsa qayta urinish yo'q."""
+    client = _ByPeerClient(
+        contacts_by_query={"IT ta'lim": _messages([], chats=[_chan(101, "ittechuz", "IT Tech")])},
+        posts_by_peer={(101, "IT ta'lim"): _post_in(101, "ittechuz", 12)},
+    )
+    _patch_pool(monkeypatch, client)
+
+    out = await TS.server_discover_by_name(
+        1,
+        queries=["IT ta'lim"],
+        topic_query="IT ta'lim O'zbekistonda",
+        top_k=1,
+        max_calls=2,  # 1 nom so'rovi + 1 kanal — qayta urinishga joy yo'q
+        known_peer_ids=set(),
+    )
+
+    assert client.ns.count("messages.SearchRequest") == 1
+    assert out.calls == 2 and out.hits == []
 
 
 async def test_discover_by_name_backward_compatible_single_query(

@@ -319,6 +319,35 @@ def test_discover_name_queries_respects_max_queries() -> None:
     assert out == ["IT ta'lim"]
 
 
+@pytest.mark.parametrize(
+    ("subqueries", "entities", "max_queries", "expected"),
+    [
+        # Jonli `global-04` rejasi: reja joy nomini **birinchi** bergan edi va
+        # `contacts.Search` shu bilan gigant/umumiy kanal topardi. Endi mavzu
+        # birinchi.
+        (
+            ["IT ta'lim O'zbekistonda"],
+            ["O'zbekiston", "IT ta'lim"],
+            2,
+            ["IT ta'lim", "O'zbekiston"],
+        ),
+        # Joy nomi qopqoqqa sig'masa — **butunlay** tashlanadi.
+        (["IT ta'lim O'zbekistonda"], ["O'zbekiston", "IT ta'lim"], 1, ["IT ta'lim"]),
+        # Rus/ingliz variantlari ham (fold bitta fazoga tushiradi).
+        ([], ["Новости", "ИИ стартапы"], 2, ["ИИ стартапы", "Новости"]),
+        ([], ["world", "quantum computing"], 2, ["quantum computing", "world"]),
+        # Joy nomi + mavzu bitta iborada — bu **mavzu** nomzodi, surilmaydi.
+        ([], ["IT Uzbekistan", "Toshkent"], 2, ["IT Uzbekistan", "Toshkent"]),
+        # Faqat joy nomlari bo'lsa — baribir qaytadi (boshqa nomzod yo'q).
+        ([], ["Toshkent", "Samarqand"], 2, ["Toshkent", "Samarqand"]),
+    ],
+)
+def test_discover_name_queries_puts_location_terms_last(
+    subqueries: list[str], entities: list[str], max_queries: int, expected: list[str]
+) -> None:
+    assert TS.discover_name_queries(subqueries, entities, max_queries=max_queries) == expected
+
+
 def test_discover_name_queries_is_deterministic_and_pure() -> None:
     args = (["sun'iy intellekt haqida nima deyishyapti"], ["sun'iy intellekt"])
     assert TS.discover_name_queries(*args) == TS.discover_name_queries(*args)

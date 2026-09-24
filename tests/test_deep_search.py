@@ -835,6 +835,44 @@ async def test_escalate_by_name_uses_short_variants_not_the_full_phrase(
 
 
 @pytest.mark.asyncio
+async def test_escalate_two_name_queries_still_leave_the_reserve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ikkala `contacts.Search` yuborilgani `SERVER_OTHER_RESERVE` ni yemaydi.
+
+    Byudjet formulasi (`escalate`): `allow = max_calls - calls - reserve`,
+    `top_k = min(3, allow - len(name_queries))`, funksiyaga `max_calls=allow`.
+    Bu yerda: 6 - 1 (probe) - 1 (zaxira) = 4 → 2 nom + 2 kanal = 4, ya'ni
+    global pog'onasiga chaqiruv qoladi.
+    """
+    seen = _fake_tg(
+        monkeypatch,
+        discover=_premium_blocked,
+        by_name=DS.TG.ServerHits(calls=4, note_code="discover_by_name"),
+    )
+
+    out = await DS.escalate(
+        factory,
+        account_id=1,
+        plan=_plan(
+            server_scope="discover",
+            subqueries=["IT ta'lim O'zbekistonda qanday rivojlanyapti"],
+            entities=["O'zbekiston", "IT ta'lim"],
+        ),
+        gap_chats=[],
+        chats_by_id={},
+        events=None,
+        max_calls=6,
+    )
+
+    call = seen["by_name"][0]
+    assert call["queries"] == ["IT ta'lim", "O'zbekiston"]  # mavzu birinchi
+    assert call["top_k"] == 2 and call["max_calls"] == 4
+    # 1 (probe) + 4 (nom yo'li) = 5, SERVER_OTHER_RESERVE = 1 → global yugurdi.
+    assert out.calls <= 6 and "global" in out.rungs
+
+
+@pytest.mark.asyncio
 async def test_escalate_discovers_by_name_without_premium(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -44,6 +44,7 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
+from itertools import groupby
 from typing import Any
 
 from sqlalchemy import select, tuple_
@@ -852,6 +853,60 @@ def _normalize_name_candidate(text: str, *, max_words: int = 3) -> str:
     return " ".join(kept).strip()
 
 
+# Joy nomlari va umumiy so'zlar — `contacts.Search` uchun **eng oxirgi**
+# ustuvorlikda: ular kanal nomi sifatida juda keng tarqalgan (yuzlab
+# kanal/guruh nomida "O'zbekiston" bor) va shuning uchun mavzu haqidagi
+# aniq nomzodni siqib chiqarib, o'ziga bog'liq bo'lmagan gigant/umumiy
+# kanalni topib beradi (jonli o'lchov: "O'zbekiston" → vakansiyalar kanali,
+# "IT ta'lim" → aynan mavzuga oid kichik kanallar). uz/ru/en variantlari —
+# fold orqali bitta fazoga tushadi, shuning uchun bitta so'z yetarli.
+_LOCATION_OR_GENERIC_WORDS: tuple[str, ...] = (
+    "o'zbekiston",
+    "uzbekistan",
+    "узбекистан",
+    "toshkent",
+    "tashkent",
+    "ташкент",
+    "samarqand",
+    "buxoro",
+    "farg'ona",
+    "andijon",
+    "namangan",
+    "qashqadaryo",
+    "xorazm",
+    "surxondaryo",
+    "jizzax",
+    "navoiy",
+    "sirdaryo",
+    "qoraqalpog'iston",
+    "rossiya",
+    "россия",
+    "dunyo",
+    "мир",
+    "world",
+    "yangiliklar",
+    "новости",
+    "news",
+)
+_LOCATION_OR_GENERIC_FOLDED: frozenset[str] = frozenset(
+    uz_fold(w) for w in _LOCATION_OR_GENERIC_WORDS
+)
+
+
+def _is_location_or_generic(candidate: str) -> bool:
+    """`candidate` faqat joy nomi/umumiy so'zlardan iboratmi (`contacts.Search`
+    uchun eng past ustuvorlik — module docstring'ga qarang).
+
+    Har bir so'z alohida tekshiriladi: butun ibora (masalan "Toshkent
+    shahri") emas, balki **har** so'zi ro'yxatda bo'lishi kerak — aks holda
+    "IT Uzbekistan" kabi haqiqiy mavzu nomzodi ham chetlanib ketardi.
+    """
+    words = [w for w in candidate.split() if w]
+    if not words:
+        return False
+    return all(uz_fold(w) in _LOCATION_OR_GENERIC_FOLDED for w in words)
+
+
 def discover_name_queries(
     subqueries: Sequence[str],
     entities: Sequence[str],
@@ -869,8 +924,17 @@ def discover_name_queries(
     2. har `subqueries` elementining birinchi 2 so'zi;
     3. har `subqueries` elementining birinchi so'zi (≥4 belgi bo'lsa).
 
+    Har guruh ichida **joy nomi/umumiy so'zlar** (`_is_location_or_generic`
+    — "O'zbekiston", "Toshkent", "yangiliklar", ...) eng oxiriga suriladi:
+    reja `entities` tartibini kafolatlamaydi (jonli misolda `["O'zbekiston",
+    "IT ta'lim"]` — joy nomi birinchi), lekin `contacts.Search`da joy nomi
+    deyarli har doim gigant/umumiy kanal topadi va mavzu nomzodini siqib
+    chiqaradi. Guruh ichidagi asl tartib saqlanadi (barqaror bo'linish).
+
     Fold (`uz_fold`) bo'yicha takrorlar olib tashlanadi, 3 belgidan qisqa
-    nomzod tashlab ketiladi, natija ≤`max_queries` ga kesiladi.
+    nomzod tashlab ketiladi, natija ≤`max_queries` ga kesiladi — ya'ni
+    mavzu nomzodlari yetarli bo'lsa, joy nomi/umumiy so'z butunlay
+    tashlab ketiladi.
     """
     raw: list[str] = []
     for ent in entities:
@@ -886,6 +950,10 @@ def discover_name_queries(
         words = (sq or "").split()
         if words and len(words[0]) >= 4:
             raw.append(words[0])
+
+    topical = [c for c in raw if not _is_location_or_generic(c)]
+    generic = [c for c in raw if _is_location_or_generic(c)]
+    raw = topical + generic
 
     out: list[str] = []
     seen: set[str] = set()
@@ -925,6 +993,31 @@ def _peer_of_found(ch: dict[str, Any], tlt: Any) -> Any | None:
     return tlt.InputPeerChannel(channel_id=ident, access_hash=int(access))
 
 
+def _round_robin[T](groups: Sequence[Sequence[T]], limit: int) -> list[T]:
+    """Guruhlardan navbat bilan `limit` ta element — har guruhdan kamida bittasi.
+
+    Nega kerak: nom so'rovlari bo'yicha topilgan kanallar **bir tekis**
+    taqsimlansin. Oddiy "reyting bo'yicha birinchi `limit` ta" tanlovda bitta
+    so'rov (masalan joy nomi) katta a'zoli kanallar bilan butun `top_k` ni
+    egallab, mavzu so'rovining kanallarini butunlay siqib chiqarardi.
+    Guruhlar tartibi saqlanadi (ustuvor so'rov birinchi navbatda oladi).
+    """
+    out: list[T] = []
+    idx = [0] * len(groups)
+    while len(out) < limit:
+        progressed = False
+        for gi, group in enumerate(groups):
+            if len(out) >= limit:
+                break
+            if idx[gi] < len(group):
+                out.append(group[idx[gi]])
+                idx[gi] += 1
+                progressed = True
+        if not progressed:
+            break
+    return out
+
+
 async def server_discover_by_name(
     account_id: int,
     query: str = "",
@@ -932,6 +1025,7 @@ async def server_discover_by_name(
     queries: Sequence[str] | None = None,
     topic_query: str | None = None,
     top_k: int = DISCOVER_NAME_TOP_K,
+    max_calls: int | None = None,
     candidates: int = DISCOVER_NAME_CANDIDATES,
     limit: int = 10,
     since: datetime | None = None,
@@ -946,18 +1040,46 @@ async def server_discover_by_name(
 
     1. `contacts.Search` — **har bir** `queries` elementi uchun (≤2, odatda
        `tg_search.discover_name_queries` chiqargan qisqa "nomga o'xshagan"
-       variantlar — mavzu iborasi emas: `contacts.Search` kanal nomi/
-       username'iga mos keladi, "IT ta'lim O'zbekistonda" kabi to'liq
-       ibora 0 ta natija beradi, "IT ta'lim" esa beradi). Birinchi so'rov
-       ≥`candidates` kanal topsa, ikkinchisi **chaqirilmaydi** (byudjet).
-       Topilgan kanallar id bo'yicha birlashtiriladi, `top_k` tasi
-       (ikkalasida ham topilgani, keyin a'zolar soni, keyin tartib bo'yicha)
-       qoladi. Lokal `chats` da bori tashlanadi.
-    2. Top `top_k` kanalda `messages.Search` — **`topic_query`** (yoki
-       yo'q bo'lsa `query`/birinchi nom so'rovi) bilan, chunki bu
-       to'liq matn qidiruvi va mavzu iborasini tushunadi. Ochiq kanal
+       variantlar, mavzu **birinchi**, joy nomi/umumiy so'z oxirida —
+       mavzu iborasi emas: `contacts.Search` kanal nomi/username'iga mos
+       keladi, "IT ta'lim O'zbekistonda" kabi to'liq ibora 0 ta natija
+       beradi, "IT ta'lim" esa beradi). **Byudjet ruxsat bersa ikkalasi
+       ham yuboriladi** — birinchisi to'la (`candidates`) natija qaytarsa
+       ham: joy nomi/umumiy so'z bo'yicha qidiruv deyarli har doim to'ladi
+       (yuzlab kanalda "O'zbekiston" bor) va shu "to'la" belgisi asossiz
+       ravishda mavzu so'rovini yeb qo'yardi (jonli `global-04`: faqat
+       "O'zbekiston" yuborildi, "IT ta'lim" hech qachon chaqirilmadi).
+       Topilgan kanallar id bo'yicha birlashtiriladi; saralash — **qaysi
+       so'rov birinchi topgani** (mavzu ustuvor), keyin ikkala so'rovda
+       ham topilgani, keyin a'zolar soni. Tanlov **round-robin**: har
+       so'rov hech bo'lmasa bitta kanal bilan ishtirok etadi (`top_k=3`,
+       2 so'rov → odatda 2 + 1), aks holda a'zolar soni bo'yicha eng katta
+       (lekin joy nomiga tegishli) kanal mavzuga oid kichik kanallarni
+       butunlay siqib chiqarardi. Lokal `chats` da bori tashlanadi.
+    2. Top kanallarda `messages.Search` — **`topic_query`** (yoki yo'q
+       bo'lsa `query`/birinchi nom so'rovi) bilan, chunki bu to'liq matn
+       qidiruvi va mavzu iborasini tushunadi. 0 natija bersa — **shu
+       kanalning o'zida** (yangi kanal qo'shilmaydi) mavzu nom so'rovi
+       (`name_queries[0]`, ya'ni ustuvor — odatda mavzu) bilan yana **bir
+       marta** `messages.Search`: mavzu iborasi kanal ichida so'zma-so'z
+       bo'lmasligi mumkin, qisqa nom esa ko'proq mos keladi. Ochiq kanal
        tarixi a'zo bo'lmasdan o'qiladi; `InputPeer` **javob bilan kelgan**
        access hash'dan yasaladi (`get_entity()` chaqirilmaydi).
+
+    Byudjet formulasi — **halol hisob**, taxmin emas. Chaqiruvchi (odatda
+    `deep_search.escalate`) `allow = max_calls - outcome.calls -
+    SERVER_OTHER_RESERVE` ni hisoblab, `top_k = min(3, allow - len(queries))`
+    va `max_calls=allow` beradi. Ya'ni bu funksiya sarflaydigan RPC:
+    `len(name_queries)` ta `contacts.Search` + ≤`top_k` ta `messages.Search`
+    + qolgan joyga sig'sa qayta urinishlar. `max_calls` berilgan bo'lsa
+    **qayta urinish faqat shu chegara ichida** bajariladi (nom so'rovlari va
+    asosiy kanal qidiruvlari allaqachon `top_k` orqali chegaralangan), shuning
+    uchun `SERVER_OTHER_RESERVE` hech qachon yeyilmaydi. `DEEP_SERVER_MAX_CALLS=6`
+    va issiq (Premium holati eslab qolingan, probe 0 chaqiruv) yugurishda:
+    `allow=5`, 2 nom so'rovi + 3 kanal = 5 → qayta urinishga joy qolmaydi;
+    kanallar kamroq topilsa (masalan lokal `chats` dagilari tashlansa) qolgan
+    slot qayta urinishga ketadi. `max_calls=None` — chegarasiz (tool yo'li,
+    u yerda shift `MethodBuckets` bilan o'lchanadi).
 
     Natija odatdagi `ServerHits`: `chat_id=None` → quyi oqimda tashqi
     (`[server external]`, manfiy sintetik id, `t.me/<username>/<id>` havolasi).
@@ -984,6 +1106,7 @@ async def server_discover_by_name(
     # ketmaydi (`_peer_of_found` baribir id/access_hash talab qiladi).
     merged: dict[Any, dict[str, Any]] = {}
     found_at: dict[Any, int] = {}  # kalit -> nechta nom so'rovida topilgani
+    first_idx: dict[Any, int] = {}  # kalit -> uni birinchi topgan so'rov indeksi
     order: list[Any] = []
 
     def _key(ch: dict[str, Any]) -> Any:
@@ -1017,11 +1140,15 @@ async def server_discover_by_name(
             else:
                 merged[key] = ch
                 found_at[key] = 1
+                first_idx[key] = i
                 order.append(key)
-        # Birinchi so'rov allaqachon to'liq to'plam qaytargan bo'lsa —
-        # ikkinchi `contacts.Search` (yana bitta RPC) shart emas.
-        if i == 0 and len(found.channels) >= candidates:
-            break
+        # E'TIBOR: bu yerda "birinchi so'rov to'la qaytardi" bo'yicha erta
+        # to'xtash **ataylab yo'q**. Byudjet `discover_name_queries` (≤2)
+        # va `deep_search.escalate` (`allow`) tomonidan allaqachon
+        # hisoblangan — ikkala `contacts.Search` ham arzon (1 RPC), lekin
+        # birinchisi (masalan joy nomi) to'lib ketishi mavzu so'rovini
+        # (ikkinchi bo'lishi ham mumkin edi, endi tartib bilan birinchi)
+        # o'tkazib yuborish sababi bo'lmasligi kerak (jonli `global-04`).
 
     out.channels = [merged[cid] for cid in order]
     if not merged:
@@ -1029,25 +1156,56 @@ async def server_discover_by_name(
         out.note = f"no public channels found for {names}"
         return out
 
-    def _rank(key: Any) -> tuple[int, int, int]:
+    def _rank(key: Any) -> tuple[int, int, int, int]:
         ch = merged[key]
         members = ch.get("members")
         members_val = int(members) if isinstance(members, int) else -1
-        return (-found_at[key], -members_val, order.index(key))
+        # Ustuvorlik: (1) qaysi so'rov birinchi topgani (mavzu so'rovi
+        # `discover_name_queries` tomonidan har doim birinchi qo'yiladi —
+        # joy nomi/umumiy so'z oxirida), (2) ikkala so'rovda ham topilgani,
+        # (3) a'zolar soni. Joy nomi so'rovi ko'pincha gigant kanal topadi —
+        # a'zolar soni **hech qachon** birinchi mezon bo'lmasin, aks holda
+        # aynan shu gigant kanal mavzuga oid kichik kanallarni siqib
+        # chiqaradi (jonli `global-04`).
+        return (first_idx[key], -found_at[key], -members_val, order.index(key))
 
     ranked = sorted(order, key=_rank)
-    pool_ = [(merged[cid], _peer_of_found(merged[cid], tlt)) for cid in ranked]
-    usable = [(ch, peer) for ch, peer in pool_ if peer is not None]
+    pool_ = [(key, merged[key], _peer_of_found(merged[key], tlt)) for key in ranked]
+    usable = [(key, ch, peer) for key, ch, peer in pool_ if peer is not None]
     names = " / ".join(f'"{q}"' for q in out.name_queries)
     if not usable:
         out.note = f"no public channels outside your chats match {names}"
         return out
 
     known = known_peer_ids if known_peer_ids is not None else await local_peer_ids(account_id)
-    fresh = [(ch, peer) for ch, peer in usable if int(ch["id"]) not in known][: max(0, int(top_k))]
+    pool_fresh = [(key, ch, peer) for key, ch, peer in usable if int(ch["id"]) not in known]
+    if not pool_fresh:
+        out.note = f"every public channel matching {names} is already in your chats"
+        return out
+
+    # Tanlov **round-robin**: har nom so'rovi hech bo'lmasa bitta kanal bilan
+    # ishtirok etadi (`top_k=3`, 2 so'rov → 2 mavzu + 1 boshqa). `pool_fresh`
+    # allaqachon `_rank` bo'yicha saralangan va birinchi mezon aynan
+    # `first_idx`, ya'ni bir so'rovning kanallari ketma-ket turadi —
+    # `groupby` xavfsiz va guruhlar so'rov ustuvorligi tartibida chiqadi.
+    groups = [list(g) for _, g in groupby(pool_fresh, key=lambda item: first_idx[item[0]])]
+    top_k_n = max(0, int(top_k))
+    fresh: list[tuple[dict[str, Any], Any]] = []
+    for row in _round_robin(groups, top_k_n):
+        fresh.append((row[1], row[2]))
     if not fresh:
         out.note = f"every public channel matching {names} is already in your chats"
         return out
+
+    # Mavzu bo'yicha eng ustuvor nom so'rovi — 0 natijali `messages.Search`ni
+    # **shu kanalning o'zida** qayta sinash uchun (yangi kanal qo'shilmaydi).
+    topical_retry = out.name_queries[0] if out.name_queries else ""
+    # Byudjet — chaqiruvchining `allow` i (docstring'dagi formula). Shift
+    # (`search` bucket'i) **oldindan tekshirilmaydi**: `_guard` tokenni
+    # o'zi **oladi**, shuning uchun ikki marta chaqirilsa kvota ikki barobar
+    # yeyilardi. To'lgan bucket `server_search_chat` dan `rate_limited`
+    # bo'lib qaytadi — o'sha yerda hisobga olinadi.
+    budget = None if max_calls is None else max(0, int(max_calls))
 
     for ch, peer in fresh:
         res = await server_search_chat(
@@ -1071,8 +1229,26 @@ async def server_discover_by_name(
                 reason=res.error_text[:120],
             )
             continue
+        hits = list(res.hits)
+        retry_ok = budget is None or out.calls < budget
+        if not hits and retry_ok and topical_retry and uz_fold(topical_retry) != uz_fold(topic):
+            retry = await server_search_chat(
+                account_id,
+                None,
+                topical_retry,
+                peer=peer,
+                chat_title=str(ch.get("title") or ch.get("username") or ""),
+                since=since,
+                until=until,
+                limit=limit,
+            )
+            out.calls += retry.calls
+            if retry.rate_limited:
+                out.rate_limited = retry.rate_limited
+            elif retry.error_text is None:
+                hits = list(retry.hits)
         out.searched.append(str(ch.get("username") or ""))
-        out.hits.extend(res.hits)
+        out.hits.extend(hits)
     searched_names = ", ".join(f"@{u}" for u in out.searched)
     out.note = (
         f"name search (contacts.Search) + messages.Search in {len(out.searched)} "

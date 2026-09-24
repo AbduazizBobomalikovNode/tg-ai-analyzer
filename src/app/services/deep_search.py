@@ -168,8 +168,10 @@ SERVER_SUBQUERIES_PER_CHAT = 2
 SERVER_GAP_CHATS_MAX = 3
 # Premium'siz kashfiyot (`tg_search.server_discover_by_name`) byudjeti:
 # ≤2 ta `contacts.Search` (`tg_search.discover_name_queries` — qisqa
-# "nomga o'xshagan" variantlar, mavzu iborasi emas; ikkinchisi birinchisi
-# to'lgan to'plam qaytarganda o'tkazib yuboriladi) + ≤3 ta `messages.Search`.
+# "nomga o'xshagan" variantlar, mavzu iborasi emas; **ikkalasi ham**
+# yuboriladi, birinchisi to'la natija qaytargani ikkinchisini bekor
+# qilmaydi — joy nomi bo'yicha qidiruv deyarli har doim to'ladi va shu
+# bilan mavzu so'rovini yeb qo'yardi) + ≤3 ta `messages.Search`.
 # Qolgan pog'onalarga (bo'shliqli chatlar, global) **kamida** shuncha
 # chaqiruv qoldiriladi. `DEEP_SERVER_MAX_CALLS=6` da: 1 flood/premium
 # tekshiruvi + ≤2 nom qidiruvi + ≤3 kanal = ≤6, `top_k` shunga qarab
@@ -1688,6 +1690,15 @@ async def escalate(
                 name_queries = TG.discover_name_queries(subqueries, plan.entities)
                 if not name_queries:
                     name_queries = [subqueries[0]]
+                # Formula (halol hisob, taxmin emas): `allow` — shu pog'onaga
+                # ajratilgan **jami** RPC. Undan `len(name_queries)` ta
+                # `contacts.Search` (ikkalasi ham yuboriladi — birinchisi
+                # to'lgani ikkinchisini bekor qilmaydi) ketadi, qolgani
+                # kanal o'qishga: `top_k`. `max_calls=allow` bilan funksiya
+                # o'zi ham chegara ichida qoladi (0 natijali kanalni qisqa
+                # nom bilan qayta sinash faqat ortib qolgan slotga).
+                # `SERVER_MAX_CALLS=6`, issiq probe (0 chaqiruv): allow=5,
+                # 2 nom + 3 kanal = 5, zaxira 1 — o'z arxiviga.
                 allow = max_calls - outcome.calls - SERVER_OTHER_RESERVE
                 top_k = max(0, min(SERVER_DISCOVER_NAME_TOP_K, allow - len(name_queries)))
                 chans = await TG.server_discover_by_name(
@@ -1695,6 +1706,7 @@ async def escalate(
                     queries=name_queries,
                     topic_query=subqueries[0],
                     top_k=top_k,
+                    max_calls=max(0, allow),
                     since=plan.since,
                     until=plan.until,
                     limit=SERVER_LIMIT,

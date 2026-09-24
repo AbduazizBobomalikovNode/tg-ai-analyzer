@@ -181,8 +181,15 @@ bitta akkaunt kvotasini bo'lishadi).
   kelishigi qo'shimchasi olib tashlanadi; jonli misol: `"IT ta'lim
   O'zbekistonda"` `contacts.Search`da 0 ta kanal beradi, `"IT ta'lim"` esa
   beradi), `messages.Search` esa **asl mavzu matnini** oladi (`topic_query`) —
-  bu to'liq matn qidiruvi va iborani tushunadi. Ikkinchi `contacts.Search`
-  birinchisi allaqachon to'liq to'plam qaytarganda o'tkazib yuboriladi.
+  bu to'liq matn qidiruvi va iborani tushunadi. **Mavzu nomzodlari birinchi,
+  joy nomi/umumiy so'zlar ("O'zbekiston", "Toshkent", "yangiliklar", ...)
+  oxirida** va qopqoqqa sig'masa butunlay tashlanadi; byudjet ruxsat bersa
+  ikkala `contacts.Search` ham **yuboriladi** (birinchisining to'la natijasi
+  ikkinchisini bekor qilmaydi — aks holda joy nomi mavzu so'rovini yer edi),
+  kanal tanlovi esa so'rovlar bo'yicha **round-robin** (gigant umumiy kanal
+  a'zolar soni bilan mavzu kanallarini siqib chiqarmaydi). Kanalda mavzu
+  matni 0 bersa — **o'sha kanalda** qisqa mavzu nomi bilan bir marta qayta
+  qidiriladi (byudjet qolgan bo'lsa).
   Peer javob bilan kelgan access hash'dan yasaladi (`get_entity()` yo'q), natija
   tashqi (`[server external]`, `t.me/<username>/<id>`). Bitta implementatsiya —
   `tools.discover_channels` ham, `deep_search.escalate` ham shuni chaqiradi.
