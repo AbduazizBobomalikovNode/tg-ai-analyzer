@@ -84,6 +84,24 @@ synth → qamrov. Web: `POST /api/conversations/{id}/messages` `mode="deep"`
 `chat_service.send_message`) yoki `POST /api/deep/stream` (SSE,
 `web/routers/deep.py`).
 
+- **Intent avval, qidiruv keyin.** Rejim (`fast|deep|exhaustive`) —
+  **qopqoq**, buyruq emas: u qidiruv qanchalik chuqur bora olishini aytadi,
+  qidirish kerakligini emas. Tartib: (a) kod darvozasi
+  `deep_search.direct_intent` (deterministik, uz/ru/en: salom/`meta`/qisqa
+  gap-so'z) → (b) planner intenti (`meta|chitchat|about_prior` ham bor) →
+  (c) **faqat** qidiruv kerak bo'lsa baho → tasdiq → skan. Qidiruvsiz turn'da
+  `estimate` hodisasi ham, `scan_runs` qatori ham yo'q va deep shift sloti
+  `limits.refund_deep_rate` bilan qaytariladi (baho yo'li bilan bir xil).
+- **Qidiruvsiz javob — `deep_search.answer_direct`**: bitta arzon chaqiruv
+  (`Task.SEARCH`), `meta` da imkoniyatlar **statik matndan**
+  (`prompts_deep.capabilities_text`, uch tilda) — model funksiya o'ylab
+  topmasin. Yozuv o'sha yagona yozuvchida (`_persist`), `context.direct=True`,
+  `context.intent=<intent>`, qamrov da'vosi yo'q. `about_prior` esa qidirmaydi,
+  lekin **oldingi dalillarni** `_refs_to_hits` bilan qayta o'qiydi; havola
+  bo'lmasa quvur baribir qidiradi.
+- **`stages` hodisasi birinchi keladi** — shu turn'da yuguradigan bosqichlar
+  ro'yxati; UI reyki (`static/pages/ask/deep.js`) shundan quriladi, qattiq
+  yozilgan 9 talikdan emas. Baho kartasi faqat `estimate` hodisasi kelganda.
 - **Dual-LLM taint guard.** `plan` va `reflect` prompt'lariga xabar matni
   **hech qachon** tushmaydi — `_Taint.assert_clean()` har chaqiruvdan oldin
   tekshiradi, buzilsa `DeepSearchError("taint")`. Yangi bosqich qo'shsangiz

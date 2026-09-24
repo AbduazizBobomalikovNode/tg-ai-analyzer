@@ -14,7 +14,7 @@ Tamoyillar (rejaning 4.3-bandi va prompt-engineering amaliyoti):
 
 from __future__ import annotations
 
-PROMPT_VERSION = "2026-09-23.2"
+PROMPT_VERSION = "2026-09-24.1"
 
 # ─── umumiy yadro ────────────────────────────────────────────────────────────
 
@@ -161,6 +161,10 @@ it, and `discover_channels` / `search_global` least of all: searching public Tel
 nonsense words returns real posts about nothing the user asked for, and quoting them turns \
 noise into a fabricated answer. Words you do not recognize are not a reason to search; they \
 are a reason to ask.
+- A greeting, a thank-you or a question about YOU ("what can you do", "sen nimalar qila \
+olasan", "что ты умеешь") is not a search: call NO tools and answer in one short turn. When \
+the runtime note carries a <capabilities> block, answer from it and never add an ability it \
+does not list.
 - Clarify first, too, when the question is UNDERSPECIFIED: an essential parameter is missing \
 — which chat, which period, or whose messages — and neither the conversation nor the \
 runtime chat index makes it obvious. Ask ONE short clarifying question offering 2-3 concrete \

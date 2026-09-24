@@ -75,6 +75,35 @@ hozircha rost oqim yo'q, `token` bo'laklari tayyor javobdan kesiladi —
 shartnoma oqim qo'shilganda ham o'zgarmaydi. Saqlash oqimsiz yo'l bilan
 **aynan bir xil** (yagona yozuvchi `chat_service.send_message`).
 
+### SSE: `POST /api/deep/stream`
+
+Tana: `{conversation_id, question, mode?: fast|deep|exhaustive, deep?, confirm?}`.
+Rejim — **qopqoq**, buyruq emas: u qidiruv qanchalik chuqur bora olishini
+aytadi, qidirish kerakligini emas.
+
+| Hodisa | `data` |
+|---|---|
+| `stages` | `{stages: ["plan", …], mode, direct?}` — **birinchi** hodisa: shu turn'da yuguradigan bosqichlar. Reja tanlovdan oldin kelgani uchun ro'yxat bir marta kengayishi mumkin (`["plan"]` → to'liq ro'yxat) |
+| `plan` | `{standalone_question, intent, intent_follow_up, needs_retrieval, since, until, chats, subqueries, …}` |
+| `estimate` | `{mode, buckets, weeks, range, est_messages, est_cost_usd, est_total_usd, ceiling_usd}` — **faqat** kaskad rejimida va **faqat** qidiruv kerak bo'lganda |
+| `buckets`/`pull`/`filter`/`select`/`map`/`reduce` | kaskad progressi (`scale_search`) |
+| `search`/`cluster`/`rerank` | fan-out (`fast`) progressi |
+| `token` | `{text}` — javob bo'laklari |
+| `coverage` | qamrov (`Coverage.to_dict()`) — qidiruvsiz turn'da **yuborilmaydi** |
+| `done` | `{citations, invalid_citations, cost_usd, tokens_in, tokens_out, model, provider, latency_ms, assistant_message_id, conversation_id}`; `{needs_confirm: true, estimate}` — tasdiq kutilyapti; `{direct: true, intent}` — qidiruvsiz javob |
+| `error` | `{code: "chat.err.<x>", detail}` |
+
+Uch ssenariy:
+
+* **qidiruvsiz** (`salom`, "sen nimalar qila olasan", "2-bandni tushuntir"):
+  `stages ["plan","write"]` → `plan` → `token`* → `done {direct:true,intent}`.
+  `estimate` yo'q, `scan_runs` qatori yo'q, deep shift sloti **qaytariladi**;
+* **tasdiq** (`exhaustive`, `confirm:false`): `stages` → `plan` → `estimate` →
+  `done {needs_confirm:true}` (slot qaytariladi, `scan_runs.stopped_by =
+  "estimate_only"`);
+* **to'liq yugurish**: `stages` → `plan` → (`estimate` → kaskad | fan-out) →
+  `token`* → `coverage` → `done`.
+
 ## Sozlamalar va akkaunt (ui/R1b)
 | Metod | Yo'l | Tana / javob |
 |---|---|---|

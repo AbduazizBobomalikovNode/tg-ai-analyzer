@@ -175,6 +175,30 @@ REPEAT_TURN_NOTE = (
 )
 
 
+def direct_intent_note(intent: str, locale: str) -> str:
+    """Qidiruvsiz turn uchun runtime qator (`meta` da imkoniyatlar matni bilan).
+
+    Nega `runtime_note` ichida, system'da emas: system prompt bayt darajasida
+    barqaror bo'lishi kerak (kesh prefiksi), bu qator esa faqat darvoza
+    ishlagan turn'da qo'shiladi. Imkoniyatlar ro'yxati **statik matndan**
+    (`prompts_deep.capabilities_text`) — model o'zida yo'q funksiyani o'ylab
+    topmasin.
+    """
+    from app.services.prompts_deep import capabilities_text
+
+    if intent == "meta":
+        return (
+            "Bu turn tizimning o'zi haqida: tool chaqirma, quyidagi ro'yxatdan "
+            "foydalanuvchi tilida qisqa javob ber va ro'yxatda yo'q imkoniyatni "
+            "qo'shma. Oxirida bitta aniq misol savol taklif qil.\n"
+            f"<capabilities>\n{capabilities_text(locale)}\n</capabilities>"
+        )
+    return (
+        "Bu turn salomlashuv/minnatdorchilik — tool chaqirma, bir-ikki qatorda "
+        "iliq javob ber va nima qidirib bera olishingni qisqa taklif qil."
+    )
+
+
 def _repeat_fold(text: str) -> str:
     """`uz_fold` (kirill→lotin, apostrofsiz) + `fold_query` (tinish olib tashlash)."""
     return fold_query(uz_fold(text))
@@ -307,6 +331,13 @@ async def run_agent(
     )
     if repeat_turn:
         note = f"{note}\n\n{REPEAT_TURN_NOTE}"
+    # Salom / "nimalar qila olasan" — tool kerak emas. Darvoza deep quvuridagi
+    # bilan **bitta** (`deep_search.direct_intent`): rejim qopqoq, buyruq emas.
+    from app.services.deep_search import direct_intent
+
+    gate_intent = direct_intent(question)
+    if gate_intent:
+        note = f"{note}\n\n{direct_intent_note(gate_intent, locale)}"
     messages: list[Msg] = [
         Msg.system(AGENT_SYSTEM_PROMPT),
         *history,

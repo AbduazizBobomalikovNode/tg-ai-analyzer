@@ -427,8 +427,10 @@ qoniqmasa cheksiz qayta so'raydi.
 
 "Hamma xabarlar ko'rildi" iborasi hech qachon chiqmaydi.
 
-**SSE `/api/deep/stream`** eventlari: `plan`, `search`, `cluster`, `rerank`,
-`token`, `coverage`, `done`. Klaster yorliqlari javob matnidan **oldin**
+**SSE `/api/deep/stream`** eventlari: `stages`, `plan`, `search`, `cluster`,
+`rerank`, `token`, `coverage`, `done`. Birinchisi — `stages`: shu turn'da
+**haqiqatan** yuguradigan bosqichlar ro'yxati (UI reyki shundan quriladi,
+qattiq yozilgan 9 talik ro'yxatdan emas). Klaster yorliqlari javob matnidan **oldin**
 ko'rsatiladi — foydalanuvchi 20 soniya bo'sh ekranga qaramaydi. Sitata id
 fazosi yagona (`#msg_id` + chat). Narx `done` eventida; kunlik byudjet
 (`services/limits.py`) so'rovdan **oldin** tekshiriladi.

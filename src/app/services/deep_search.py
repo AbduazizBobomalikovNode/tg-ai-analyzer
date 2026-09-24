@@ -72,14 +72,17 @@ from app.services import cluster as C
 from app.services import limits as LIM
 from app.services import rerank as RR
 from app.services import search as S
+from app.services import textnorm as TN
 from app.services import tg_search as TG
 from app.services import tools as T
 from app.services import untrusted as U
 from app.services.prompts_deep import (
+    DEEP_DIRECT_PROMPT,
     DEEP_HYDE_PROMPT,
     DEEP_PLAN_PROMPT,
     DEEP_REFLECT_PROMPT,
     DEEP_SYNTH_PROMPT,
+    capabilities_text,
 )
 
 log = get_logger(__name__)
@@ -149,9 +152,41 @@ FOLLOW_UPS = (
     "context_switch",
     "reformat",
     "explain",
+    "about_prior",
+    "meta",
+    "chitchat",
 )
-#: Faqat shu ikkitasi qidiruvsiz javob bera oladi (oldingi dalillar bilan).
-NO_RETRIEVAL_FOLLOW_UPS = ("reformat", "explain")
+#: Shu uchtasi qidiruvsiz javob bera oladi — **oldingi dalillar** bilan
+#: (`_refs_to_hits`). Havola bo'lmasa quvur baribir qidiradi: model
+#: "kerak emas" deb yolg'on aytsa ham javob dalilsiz qolmasin.
+NO_RETRIEVAL_FOLLOW_UPS = ("reformat", "explain", "about_prior")
+#: Bular umuman arxiv haqida emas — dalil ham, qidiruv ham kerak emas
+#: (`answer_direct`). Ular **tarixsiz** birinchi turn'da ham bo'la oladi.
+DIRECT_FOLLOW_UPS = ("meta", "chitchat")
+#: `direct_intent` (kod darvozasi) qaytara oladigan qiymatlar.
+DIRECT_INTENTS = ("greeting", "meta", "chitchat")
+DIRECT_MAX_TOKENS = 900
+
+# ─── bosqichlar ro'yxati (UI reyki shu hodisadan quriladi) ───────────────────
+# Quvur har doim bir xil emas: rejim — **qopqoq**, ssenariy emas. Shuning
+# uchun `stages` hodisasi aynan shu turn'da yuguradigan bosqichlarni aytadi va
+# UI reykni o'shandan quradi (ilgari 9 ta bosqich qattiq yozilgan edi va
+# "salom" ga ham to'liq skan ro'yxati chizilardi).
+STAGES_PLAN_ONLY = ("plan",)
+STAGES_DIRECT = ("plan", "write")
+STAGES_REUSE = ("plan", "search", "write")
+STAGES_FAST = ("plan", "search", "cluster", "rerank", "write")
+STAGES_SCALE = (
+    "plan",
+    "estimate",
+    "buckets",
+    "pull",
+    "filter",
+    "select",
+    "map",
+    "reduce",
+    "write",
+)
 #: `deeper` / `repeat` da oldingi subquery'lar ham qo'shiladi — qopqoq kengroq.
 MAX_SUBQUERIES_WIDENED = 12
 
@@ -287,7 +322,13 @@ class DeepSearchError(Exception):
 
 @dataclass(slots=True)
 class DeepEvent:
-    """SSE hodisasi: `plan | search | cluster | rerank | token | coverage | done | error`."""
+    """SSE hodisasi.
+
+    `stages | plan | search | cluster | rerank | token | coverage | done |
+    error` (kaskadda qo'shimcha: `estimate | buckets | pull | filter | select |
+    map | reduce`). Birinchi hodisa **har doim** `stages`: u aynan shu turn'da
+    yuguradigan bosqichlarni sanaydi, chunki quvur har doim bir xil emas.
+    """
 
     kind: str
     data: dict[str, Any]
@@ -505,10 +546,16 @@ class DeepResult:
     #: `scale_search.ScanStats.to_dict()` — skan haqiqatan nima qilgani.
     scan: dict[str, Any] = field(default_factory=dict)
     mode: str = "fast"
+    #: Qidiruvsiz javob (`answer_direct`): baho ham, skan ham bo'lmadi.
+    direct: bool = False
+    #: `greeting|meta|chitchat` — `direct=True` bo'lganda nima uchun.
+    intent: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "mode": self.mode,
+            "direct": self.direct,
+            "intent": self.intent,
             "needs_confirm": self.needs_confirm,
             "estimate": self.estimate,
             "scan": self.scan,
@@ -977,17 +1024,28 @@ def parse_plan(
     # ── follow-up: avval savolni o'zicha tushunarli qilib qayta yozamiz ──────
     plan.standalone_question = _standalone(data.get("standalone_question"), question)
     follow = data.get("intent_follow_up")
+    # `meta` / `chitchat` — suhbatga bog'liq emas, ya'ni **tarixsiz** ham
+    # haqiqiy qiymat. Qolgani oldingi turn bilan munosabatni ta'riflaydi,
+    # shuning uchun tarix bo'lmasa "none" ga tushadi.
     plan.intent_follow_up = (
-        follow if isinstance(follow, str) and follow in FOLLOW_UPS and history else "none"
+        follow
+        if isinstance(follow, str)
+        and follow in FOLLOW_UPS
+        and (history or follow in DIRECT_FOLLOW_UPS)
+        else "none"
     )
-    # `needs_retrieval=False` — faqat `reformat`/`explain` da va faqat oldingi
-    # turn dalillari bo'lsa. Model "qidirmasa ham bo'ladi" deb yolg'on aytsa,
-    # quvur baribir qidiradi (xavfsiz tomonga xato).
+    # `needs_retrieval=False` — `reformat`/`explain`/`about_prior` da va faqat
+    # oldingi turn dalillari bo'lsa. Model "qidirmasa ham bo'ladi" deb yolg'on
+    # aytsa, quvur baribir qidiradi (xavfsiz tomonga xato). `meta`/`chitchat`
+    # esa **kod qarori**: ular arxiv haqida emas, dalil ham kerak emas.
     wants_reuse = data.get("needs_retrieval") is False
     plan.needs_retrieval = not (
-        wants_reuse
-        and plan.intent_follow_up in NO_RETRIEVAL_FOLLOW_UPS
-        and bool(prior_refs(history))
+        plan.intent_follow_up in DIRECT_FOLLOW_UPS
+        or (
+            wants_reuse
+            and plan.intent_follow_up in NO_RETRIEVAL_FOLLOW_UPS
+            and bool(prior_refs(history))
+        )
     )
 
     intent = data.get("intent")
@@ -1063,7 +1121,15 @@ def _apply_follow_up(plan: DeepPlan, history: Sequence[Turn]) -> DeepPlan:
     qo'shiladi. `correction` / `context_switch` da esa aksincha: eski reja
     **meros qilib olinmaydi**, aks holda tuzatilgan entity qaytib kelardi.
     """
-    if plan.intent_follow_up in ("none", "correction", "context_switch"):
+    # `meta`/`chitchat` — qidiruv yo'q; `about_prior` — oldingi dalillar
+    # qayta o'qiladi, reja kengaytirilmaydi. Uchalasida ham meros yo'q.
+    if plan.intent_follow_up in (
+        "none",
+        "correction",
+        "context_switch",
+        "about_prior",
+        *DIRECT_FOLLOW_UPS,
+    ):
         return plan
     previous = prior_plan(history)
     if plan.intent_follow_up in ("deeper", "repeat"):
@@ -1085,6 +1151,177 @@ def _apply_follow_up(plan: DeepPlan, history: Sequence[Turn]) -> DeepPlan:
         plan.expansion = True
         plan.use_hyde = True
     return plan
+
+
+# ─── kod darvozasi: qidiruvsiz turn'lar ─────────────────────────────────────
+#
+# Rejim (`fast|deep|exhaustive`) — **qopqoq**, buyruq emas: u qidiruv
+# qanchalik chuqur bora olishini aytadi, qidirish kerakligini emas. "Salom",
+# "sen nimalar qila olasan", "rahmat" — bular qidiruv turn'i emas, ya'ni ularda
+# baho ham, bucket rejasi ham, skan ham bo'lmasligi kerak. Planner buni ayta
+# oladi, lekin u ham bitta LLM chaqirig'i: eng arzon va **deterministik** yo'l
+# shu darvoza. U ataylab **tor**: shubha bo'lsa `None` qaytaradi va planner hal
+# qiladi (noto'g'ri "direct" — javobsiz qolgan savol, noto'g'ri "qidir" — faqat
+# ortiqcha token).
+
+#: Fold qilingan matndan tinish/emoji olib tashlash (raqam, @, # — kontent belgisi).
+_PUNCT_RE = re.compile(r"[^a-z0-9@#\s]+")
+_WS_RE = re.compile(r"\s+")
+#: Bular bo'lsa savol arxiv haqida: darvoza ishlamaydi.
+_CONTENT_MARKS = re.compile(r"[0-9@#]|https?://")
+_CONTENT_WORDS = frozenset(
+    {
+        "chat",
+        "chatda",
+        "chatdan",
+        "chatlar",
+        "chatlarda",
+        "chate",
+        "chatah",
+        "chats",
+        "guruh",
+        "guruhda",
+        "gruppe",
+        "gruppa",
+        "kanal",
+        "kanalda",
+        "kanale",
+        "kanallar",
+        "channel",
+        "channels",
+        "xabar",
+        "xabarda",
+        "xabarlar",
+        "message",
+        "messages",
+        "soobshenie",
+        "soobsheniya",
+        "arxiv",
+        "arxivda",
+        "kecha",
+        "bugun",
+        "yesterday",
+        "today",
+        "vchera",
+        "segodnya",
+    }
+)
+
+_GREET_UNIT = r"""(?:
+    assalomu?\s+alaykum | va\s*alaykum\s+assalom | assalom | salom |
+    hayrli\s+(?:kun|tong|kech) | xayrli\s+(?:kun|tong|kech) |
+    qalaysan | qalaysiz | yaxshimisiz | yaxshimisan |
+    rahmat | rahmatlar | tashakkur | xayr | korishguncha |
+    hi | hello | hey | howdy | good\s+(?:morning|afternoon|evening|night) |
+    thanks | thank\s+you | thx | bye | goodbye | cheers | sorry |
+    privet | privetstvuyu | zdravstvuy(?:te)? | dobriy\s+(?:den|vecher) |
+    dobroe\s+utro | spasibo | blagodaryu | poka | kak\s+dela
+)"""
+#: Butun turn **faqat** salomlashuvdan iborat bo'lsa — shuning uchun `fullmatch`.
+#: "salom, kecha guruhda nima bo'ldi?" bu yerga tushmaydi (aynan shu maqsadda).
+_GREETING_RE = re.compile(rf"{_GREET_UNIT}(?:\s+{_GREET_UNIT})*", re.X)
+
+#: Tizimning **o'zi** haqidagi savol. `search` — chunki "ayt-chi, sen nimalar
+#: qila olasan" kabi muqaddimalar bor; qopqoq: qisqa va kontent belgisiz turn.
+_META_RE = re.compile(
+    r"""(?:
+    nima(?:lar)?\s+qila\s+ol | nima(?:lar)?ni\s+qila\s+ol | nimalarga\s+qodir |
+    qanday\s+(?:yordam|ishlaysan|ishlaysiz|ishlaydi|ishlaysanlar) |
+    qanaqa\s+ishlaysan | imkoniyatlaring | sen\s+kimsan | kimsan\b | sen\s+nimasan |
+    o?zing\s+haqingda | vazifang\s+nima |
+    chto\s+ti\s+(?:umeesh|mojesh) | chto\s+umeesh | kto\s+ti | kak\s+ti\s+rabotaesh |
+    tvoi\s+vozmojnosti | chem\s+ti\s+mojesh\s+pomoch | chto\s+ti\s+takoe |
+    what\s+can\s+you\s+do | who\s+are\s+you | how\s+do\s+you\s+work |
+    what\s+do\s+you\s+do | your\s+capabilities | what\s+are\s+you
+)""",
+    re.X,
+)
+#: Bitta so'zli yordam so'rovi — faqat to'liq mos kelganda.
+_META_SOLO = frozenset({"yordam", "pomosh", "pomogi", "help", "spravka", "menyu", "menu"})
+_META_MAX_TOKENS = 12
+
+#: ≤2 so'zli "gap-so'z" — qidirib bo'lmaydigan turn. Ro'yxat **yopiq**: yalang'och
+#: so'z (ism, mavzu) qidiruv savoli bo'lishi mumkin, shuning uchun u bu yerga
+#: tushmaydi.
+_CHATTER = frozenset(
+    {
+        "ha",
+        "yoq",
+        "mayli",
+        "zor",
+        "ajoyib",
+        "barakalla",
+        "tushunarli",
+        "tushundim",
+        "ok",
+        "okay",
+        "oke",
+        "da",
+        "net",
+        "ladno",
+        "ponyatno",
+        "klass",
+        "super",
+        "top",
+        "haha",
+        "hahaha",
+        "lol",
+        "hmm",
+        "voy",
+        "yes",
+        "no",
+        "sure",
+        "nice",
+        "cool",
+        "great",
+        "good",
+    }
+)
+#: Tarix bo'lsa bular davom ettirish bo'lishi mumkin ("ha" = "ha, qidir") —
+#: shubhada planner hal qilsin.
+_AMBIGUOUS_CHATTER = frozenset({"ha", "da", "yes", "ok", "okay", "oke", "mayli", "sure"})
+
+
+def _fold_turn(text: str) -> str:
+    """Darvoza uchun matn: fold (kirill→lotin, apostrofsiz) + tinishsiz."""
+    folded = TN.uz_fold(TN.strip_invisible(text or ""))
+    return _WS_RE.sub(" ", _PUNCT_RE.sub(" ", folded)).strip()
+
+
+def direct_intent(question: str, history: Sequence[Turn] = ()) -> str | None:
+    """Qidiruvsiz javob beriladigan turn'ni **kodda** aniqlaydi.
+
+    `"greeting" | "meta" | "chitchat"` yoki `None` (→ planner). Deterministik
+    va konservativ: qidirilishi mumkin bo'lgan har qanday narsa `None`.
+
+    Args:
+        question: foydalanuvchining xom matni.
+        history: suhbat turn'lari — "ha"/"ok" tarix bo'lsa **davom ettirish**
+            bo'lishi mumkin, shuning uchun u yerda darvoza ochilmaydi.
+
+    Examples:
+        >>> direct_intent("sen nimalar qila olasan!")
+        'meta'
+        >>> direct_intent("salom") , direct_intent("Assalomu alaykum!")
+        ('greeting', 'greeting')
+        >>> direct_intent("salom, kecha guruhda nima bo'ldi?") is None
+        True
+    """
+    folded = _fold_turn(question)
+    if not folded:
+        return None
+    tokens = folded.split(" ")
+    if _GREETING_RE.fullmatch(folded):
+        return "greeting"
+    if _CONTENT_MARKS.search(folded) or _CONTENT_WORDS & set(tokens):
+        return None  # raqam, @username, chat/xabar so'zi — arxiv savoli
+    if len(tokens) <= _META_MAX_TOKENS and (_META_RE.search(folded) or folded in _META_SOLO):
+        return "meta"
+    if len(tokens) <= 2 and set(tokens) <= _CHATTER:
+        if history and set(tokens) & _AMBIGUOUS_CHATTER:
+            return None  # "ha" = "ha, qidiraver" bo'lishi mumkin
+        return "chitchat"
+    return None
 
 
 def normalize_mode(mode: str, *, deep: bool = True) -> str:
@@ -2209,6 +2446,47 @@ async def synthesize(
     return (f"{answer}\n{extra}".strip() if extra else answer), kept, more
 
 
+async def answer_direct(
+    meter: _Meter,
+    question: str,
+    *,
+    intent: str,
+    locale: str = "uz",
+    history: Sequence[Turn] = (),
+    taint: _Taint | None = None,
+) -> tuple[str, ChatResult | None]:
+    """Qidiruvsiz javob — **bitta arzon** chaqiruv (`Task.SEARCH`, `DEEP` emas).
+
+    Salomlashuv, tizimning o'zi haqidagi savol va "gap-so'z" turn'i. Dalil
+    yo'q, sitata yo'q, qamrov da'vosi yo'q. `meta` da imkoniyatlar ro'yxati
+    **statik matndan** (`prompts_deep.capabilities_text`) beriladi: model
+    o'zida yo'q funksiyani o'ylab topmasin.
+
+    Taint qoidasi o'zgarmaydi: oldingi javob faqat
+    `<untrusted_data kind="prior_answer">` konvertida (`render_history`),
+    xabar matni esa bu yerga umuman yetib kelmaydi.
+    """
+    hist = render_history(history)
+    parts = [hist] if hist else []
+    if intent == "meta":
+        parts.append(f"<capabilities>\n{capabilities_text(locale)}\n</capabilities>")
+    parts.append(f"<question>{U.neutralize(question)}</question>")
+    parts.append(f"(intent: {intent}; locale: {locale}; no retrieval ran this turn)")
+    prompt = "\n\n".join(parts)
+    if taint is not None:
+        taint.assert_clean("direct", prompt)
+    try:
+        res = await meter.chat(
+            Task.SEARCH,
+            [Msg.system(DEEP_DIRECT_PROMPT), Msg.user(prompt)],
+            max_tokens=DIRECT_MAX_TOKENS,
+        )
+    except LLMError as exc:
+        log.warning("deep.direct_failed", intent=intent, error=str(exc)[:200])
+        raise DeepSearchError("llm", str(exc)[:200]) from exc
+    return res.text.strip(), res
+
+
 def evidence_refs(evidence: Sequence[DeepEvidence]) -> list[dict[str, int]]:
     """Dalillarning **qayta o'qiladigan** havolalari — `context.evidence_refs`.
 
@@ -2891,6 +3169,114 @@ async def _run_pipeline(
     server_calls_max = int(s.deep_server_max_calls or 0) if s.deep_server_rungs_enabled else 0
     server_min_local = int(s.deep_server_min_local_hits)
 
+    async def finish_direct(intent: str, direct_plan: DeepPlan, *, emit_plan: bool) -> DeepResult:
+        """Qidiruvsiz javob: `plan` → `write` → `done`. Baho ham, skan ham yo'q.
+
+        Deep shift sloti chegarada qaytariladi (`done.direct` → routerdagi
+        `limits.refund_deep_rate`) — bu yugurish kvotani yemaydi.
+        """
+        await _emit(events, "stages", stages=list(STAGES_DIRECT), mode=mode, direct=True)
+        if emit_plan:
+            await _emit(events, "plan", **direct_plan.to_dict())
+        answer_text, res_direct = await answer_direct(
+            meter, question, intent=intent, locale=locale, history=history, taint=taint
+        )
+        state["answer"] = answer_text
+        for start in range(0, len(answer_text), TOKEN_CHUNK_CHARS):
+            await _emit(events, "token", text=answer_text[start : start + TOKEN_CHUNK_CHARS])
+        direct_result = DeepResult(
+            answer=answer_text,
+            plan=direct_plan.to_dict(),
+            mode=mode,
+            direct=True,
+            intent=intent,
+            tokens_in=meter.tokens_in,
+            tokens_out=meter.tokens_out,
+            cost_usd=round(meter.cost_usd, 6) if meter.cost_usd else None,
+            model=res_direct.model if res_direct else "",
+            provider=res_direct.provider if res_direct else "",
+            latency_ms=int(elapsed() * 1000),
+            conversation_id=conversation_id,
+        )
+        await _persist(
+            session_factory,
+            conversation_id=conversation_id,
+            user_id=user_id,
+            account_id=account_id,
+            question=question,
+            result=direct_result,
+            context_meta={
+                "mode": "deep",
+                "scale_mode": mode,
+                "strategy": "direct",
+                "source": "deep",
+                "account_id": account_id,
+                # Qidiruv bo'lmadi: "nechta chat ko'rildi" degan da'vo yo'q.
+                "direct": True,
+                "intent": intent,
+                "messages": 0,
+                "candidates": 0,
+                "coverage": direct_result.coverage.to_dict(),
+                "plan": direct_result.plan,
+                "citations": [],
+                "est_tokens": S.est_tokens(answer_text),
+                "finish_reason": res_direct.finish_reason if res_direct else "",
+                # Oldingi turn dalillari **saqlanib qoladi**: salomdan keyingi
+                # "2-bandni tushuntir" ham havolasiz qolmasin.
+                "evidence_refs": prior_refs(history),
+                "reused_evidence": False,
+            },
+        )
+        state["persisted"] = True
+        state["status"] = "direct"
+        DEEP_RUNS.labels("direct").inc()
+        DEEP_LATENCY.observe(elapsed())
+        if direct_result.cost_usd:
+            DEEP_COST.inc(direct_result.cost_usd)
+        log.info(
+            "deep.direct",
+            conversation_id=conversation_id,
+            intent=intent,
+            mode=mode,
+            gate="code" if emit_plan else "plan",
+            llm_calls=meter.calls,
+            latency_ms=direct_result.latency_ms,
+        )
+        await _emit(
+            events,
+            "done",
+            direct=True,
+            intent=intent,
+            citations=[],
+            invalid_citations=0,
+            cost_usd=direct_result.cost_usd,
+            tokens_in=direct_result.tokens_in,
+            tokens_out=direct_result.tokens_out,
+            model=direct_result.model,
+            provider=direct_result.provider,
+            latency_ms=direct_result.latency_ms,
+            assistant_message_id=direct_result.assistant_message_id,
+            conversation_id=conversation_id,
+        )
+        return direct_result
+
+    # ── (a) kod darvozasi: **birinchi LLM chaqirig'idan oldin** ─────────────
+    # Rejim qopqoq, buyruq emas — "salom" `exhaustive` da ham salom bo'lib
+    # qoladi: baho ham, bucket rejasi ham qurilmaydi.
+    gate = direct_intent(question, history)
+    if gate:
+        return await finish_direct(
+            gate,
+            DeepPlan(
+                subqueries=[],
+                standalone_question=question[:400],
+                intent_follow_up="chitchat" if gate == "greeting" else gate,
+                needs_retrieval=False,
+            ),
+            emit_plan=True,
+        )
+    await _emit(events, "stages", stages=list(STAGES_PLAN_ONLY), mode=mode)
+
     async def maybe_escalate(current: list[S.Hit]) -> list[S.Hit]:
         """Lokal qamrov yetmasa — server pog'onalari; aks holda hech narsa qilmaydi.
 
@@ -2977,10 +3363,17 @@ async def _run_pipeline(
                 plan.hyde_text = await hyde_text(meter, taint, search_question)
             await _emit(events, "plan", **plan.to_dict())
 
+            # ── (b) planner intenti: qidiruv kerakmi ───────────────────────
+            if plan.intent_follow_up in DIRECT_FOLLOW_UPS:
+                # "Nimalar qila olasan" / "salom" — darvoza ushlamagan shakl.
+                # Baho ham, skan ham yo'q; javob bitta arzon chaqiruvda.
+                return await finish_direct(plan.intent_follow_up, plan, emit_plan=False)
+
             if not plan.needs_retrieval:
-                # "Qisqartir" / "tushuntir": qidiruv **yugurtirilmaydi** —
-                # oldingi turn dalillari DB'dan qayta o'qiladi. Yangi fakt
-                # kerak emas, shakl kerak.
+                # "Qisqartir" / "tushuntir" / "2-bandni batafsil": qidiruv
+                # **yugurtirilmaydi** — oldingi turn dalillari DB'dan qayta
+                # o'qiladi. Yangi fakt kerak emas, shakl yoki izoh kerak.
+                await _emit(events, "stages", stages=list(STAGES_REUSE), mode=mode)
                 refs = prior_refs(history)
                 async with session_factory() as session:
                     candidates = await _refs_to_hits(session, refs, account_id=account_id)
@@ -2996,6 +3389,7 @@ async def _run_pipeline(
                 # sintez, qamrov va sitata validatsiyasi **o'sha** (shu fayl).
                 from app.services import scale_search as SC
 
+                await _emit(events, "stages", stages=list(STAGES_SCALE), mode=mode)
                 scale_used = True
                 outcome = await SC.run_scale(
                     session_factory,
@@ -3067,6 +3461,7 @@ async def _run_pipeline(
                     deduped = merged
                     ranked = list(merged[: SC.SYNTH_EVIDENCE_LINES])
             else:
+                await _emit(events, "stages", stages=list(STAGES_FAST), mode=mode)
                 subqueries = list(plan.subqueries)
                 if plan.hyde_text:
                     subqueries.append(plan.hyde_text)
@@ -3412,6 +3807,8 @@ async def stream_deep_search(
 __all__ = [
     "DEEP_HISTORY_TURNS",
     "DEEP_RESULT_TOKENS",
+    "DIRECT_FOLLOW_UPS",
+    "DIRECT_INTENTS",
     "DISCOVER_RE",
     "FOLLOW_UPS",
     "HARD_WALL_S",
@@ -3427,6 +3824,10 @@ __all__ = [
     "SERVER_RRF_WEIGHT",
     "SERVER_SCOPES",
     "SOFT_WALL_S",
+    "STAGES_DIRECT",
+    "STAGES_FAST",
+    "STAGES_REUSE",
+    "STAGES_SCALE",
     "Coverage",
     "DeepEvent",
     "DeepEvidence",
@@ -3436,12 +3837,14 @@ __all__ = [
     "RunContext",
     "ServerOutcome",
     "Turn",
+    "answer_direct",
     "build_coverage",
     "build_evidence_envelope",
     "build_plan_prompt",
     "build_reflect_prompt",
     "confidence_of",
     "coverage_disclosure",
+    "direct_intent",
     "earliest_synced_at",
     "escalate",
     "evidence_refs",

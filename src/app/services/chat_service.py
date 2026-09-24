@@ -16,6 +16,7 @@ strukturaviy jihatdan yo'q.
 
 from __future__ import annotations
 
+import contextlib
 import re
 import time
 from collections.abc import Awaitable, Callable
@@ -631,9 +632,20 @@ async def _send_via_deep(
     except DeepSearchError as exc:
         raise ChatError(exc.code, exc.detail) from exc
 
+    if result.direct:
+        # Qidiruvsiz javob (salom / "nimalar qila olasan" / oldingi javob
+        # haqidagi savol) deep kvotasini yemasin — SSE routerdagi bilan bir
+        # qoida (`web/routers/deep.py::_refund_unused`).
+        from app.services import limits
+
+        with contextlib.suppress(Exception):
+            limits.refund_deep_rate(user_id)
+
     context_used: dict[str, Any] = {
         "mode": "deep",
         "scale_mode": result.mode,
+        "direct": result.direct,
+        "intent": result.intent,
         "scan": result.scan,
         "estimate": result.estimate,
         "strategy": "deep",

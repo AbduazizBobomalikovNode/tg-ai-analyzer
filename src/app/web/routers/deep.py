@@ -7,7 +7,7 @@ Ikkala yo'l ham **bitta** quvurni (`services/deep_search.run_deep_search`)
 chaqiradi va yozuvni o'sha quvur bajaradi (yagona yozuvchi) — oqimli va
 oqimsiz javob bir-biridan farq qilmaydi, faqat yetkazib berish usuli boshqa.
 
-Nega SSE va nega `POST`: hodisalar ketma-ket va bir tomonlama (`plan` →
+Nega SSE va nega `POST`: hodisalar ketma-ket va bir tomonlama (`stages` → `plan` →
 `search` → `cluster` → `rerank` → `token` → `coverage` → `done`), lekin
 `EventSource` POST qila olmaydi — frontend `fetch` + `ReadableStream` bilan
 o'qiydi (`web/static/pages/ask/deep.js`). Shu sababli CSRF himoyasi ham odatdagidek
@@ -103,8 +103,12 @@ def _confirm(body: DeepIn) -> bool:
     return True
 
 
-def _refund_estimate_only(user_id: int) -> None:
-    """Baho bilan tugagan yugurish deep shift slotini **yemasin**.
+def _refund_unused(user_id: int) -> None:
+    """Qidiruv yugurmagan turn deep shift slotini **yemasin**.
+
+    Ikki holat: (1) baho ko'rsatilib to'xtagan `exhaustive`; (2) qidiruvsiz
+    javob (`direct` — salom, "nimalar qila olasan", oldingi javob haqidagi
+    savol). Ikkalasida ham korpus skani bo'lmagan, ya'ni kvota yeyilmasin.
 
     Shift `_prepare` da olinadi (u yerda hali natija noma'lum), shuning
     uchun qaytarish `done {needs_confirm: true}` ko'ringanda bo'ladi.
@@ -142,8 +146,10 @@ async def deep_stream(
                 mode=DS.normalize_mode(body.mode, deep=body.deep),
                 confirm=_confirm(body),
             ):
-                if event.kind == "done" and event.data.get("needs_confirm"):
-                    _refund_estimate_only(ident.user_id)
+                if event.kind == "done" and (
+                    event.data.get("needs_confirm") or event.data.get("direct")
+                ):
+                    _refund_unused(ident.user_id)
                 yield _sse(event)
         except Exception as exc:
             # L2: xom istisno matni klientga chiqmaydi (SQL, yo'l, sir bo'lishi
@@ -179,6 +185,6 @@ async def deep_once(
         )
     except DS.DeepSearchError as exc:
         raise _http(exc.code, exc.detail) from exc
-    if result.needs_confirm:
-        _refund_estimate_only(ident.user_id)
+    if result.needs_confirm or result.direct:
+        _refund_unused(ident.user_id)
     return result.to_dict()

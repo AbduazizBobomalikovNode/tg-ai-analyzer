@@ -1097,7 +1097,11 @@ async def test_scale_run_emits_events_in_order(wired: dict[str, Any]) -> None:
         mode="deep",
     )
     kinds = [e.kind for e in events]
-    assert kinds[0] == "plan"
+    # `stages` — shu turn'da yuguradigan bosqichlar ro'yxati (reja ham, kaskad
+    # ham): UI reyki qattiq ro'yxatdan emas, shu hodisadan quriladi.
+    assert kinds[0] == "stages" and kinds[1] == "plan"
+    stages = [e.data["stages"] for e in events if e.kind == "stages"]
+    assert stages[-1] == list(DS.STAGES_SCALE)
     for earlier, later in (
         ("estimate", "buckets"),
         ("buckets", "filter"),

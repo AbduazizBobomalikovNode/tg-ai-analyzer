@@ -1350,7 +1350,8 @@ async def test_full_run_events_citations_and_persist(
     )
 
     kinds = [e.kind for e in events]
-    assert kinds[0] == "plan"
+    # Birinchi hodisa — `stages` (shu turn'da nima yuguradi), keyin reja.
+    assert kinds[0] == "stages" and kinds[1] == "plan"
     assert kinds.index("search") < kinds.index("cluster") < kinds.index("rerank")
     assert kinds.index("rerank") < kinds.index("token") < kinds.index("coverage")
     assert kinds[-1] == "done"
@@ -1510,7 +1511,7 @@ async def test_stream_yields_ordered_events(
             llm=FakeLLM(),  # type: ignore[arg-type]
         )
     ]
-    assert kinds[0] == "plan" and kinds[-1] == "done"
+    assert kinds[0] == "stages" and kinds[1] == "plan" and kinds[-1] == "done"
 
 
 @pytest.mark.asyncio
@@ -2379,7 +2380,9 @@ def test_deep_prompts_describe_the_follow_up_contract() -> None:
     # 2026-09-23.2 — `external_evidence` fakt satri va "tashqi kanal deb
     # aytma" qoidasi (jonli regressiya: javob `external_hits=0` bo'lsa ham
     # "ochiq kanallardan" degan edi).
-    assert DEEP_PROMPT_VERSION == "2026-09-23.2"
+    # 2026-09-24.1 — intent avval, qidiruv keyin: `meta`/`chitchat`/`about_prior`
+    # intentlari va qidiruvsiz javob prompt'i (`DEEP_DIRECT_PROMPT`).
+    assert DEEP_PROMPT_VERSION == "2026-09-24.1"
     for field_name in ("standalone_question", "intent_follow_up", "needs_retrieval"):
         assert field_name in DEEP_PLAN_PROMPT
     for label in DS.FOLLOW_UPS:
@@ -2502,3 +2505,274 @@ def test_build_coverage_cascade_uses_pulled_and_filter_done() -> None:
 
     text = DS.render_coverage(cov, locale="uz")
     assert "ko'rilgan xabarlar: 517" in text
+
+
+# ─── intent birinchi, qidiruv ikkinchi ───────────────────────────────────────
+
+
+def test_direct_intent_gate_table() -> None:
+    """Kod darvozasi: deterministik, konservativ, uz/ru/en.
+
+    Pozitivlar qidiruvsiz javobga ketadi; "yaqin o'tmishdagi" salbiylar —
+    salom bilan boshlangan **haqiqiy** savol, yalang'och ism, mavzu — planner
+    qo'liga o'tadi (`None`).
+    """
+    greetings = ["salom", "Assalomu alaykum!", "Salom!!!", "привет", "Спасибо!", "hi", "thanks"]
+    metas = [
+        "sen nimalar qila olasan!",
+        "sen kimsan",
+        "qanday ishlaysan?",
+        "что ты умеешь?",
+        "кто ты",
+        "what can you do",
+        "help",
+    ]
+    chatter = ["ok", "ha", "lol"]
+    negatives = [
+        "salom, kecha guruhda nima bo'ldi?",  # salom + haqiqiy savol
+        "Nurbek",  # yalang'och ism — bu qidiruv
+        "to'lov?",
+        "что писали в чате?",
+        "2-bandni batafsil tushuntir",  # planner `about_prior` deb hal qiladi
+        "chuqurroq qidir",
+        "what can you do with chat 5?",  # kontent belgisi (raqam + "chat")
+        "",
+    ]
+    assert [DS.direct_intent(q) for q in greetings] == ["greeting"] * len(greetings)
+    assert [DS.direct_intent(q) for q in metas] == ["meta"] * len(metas)
+    assert [DS.direct_intent(q) for q in chatter] == ["chitchat"] * len(chatter)
+    assert [DS.direct_intent(q) for q in negatives] == [None] * len(negatives)
+    # "ha" tarix bo'lganda davom ettirish bo'lishi mumkin — planner hal qilsin.
+    assert DS.direct_intent("ha", _history()) is None
+    assert DS.direct_intent("lol", _history()) == "chitchat"
+
+
+def test_parse_plan_accepts_meta_and_about_prior_intents() -> None:
+    """`meta`/`chitchat` tarixsiz ham qabul qilinadi; `about_prior` havola talab qiladi."""
+    meta = DS.parse_plan(
+        '{"intent_follow_up":"meta","needs_retrieval":true,'
+        '"standalone_question":"Nima qila olasan?"}',
+        question="nima qila olasan",
+        known_chats=[1],
+        history=[],
+    )
+    # `needs_retrieval` **kod** qarori: model "true" desa ham meta qidirmaydi.
+    assert meta.intent_follow_up == "meta" and meta.needs_retrieval is False
+
+    prior = DS.parse_plan(
+        '{"intent_follow_up":"about_prior","needs_retrieval":false,'
+        '"standalone_question":"Oldingi javobdagi 2-band"}',
+        question="2-bandni batafsil",
+        known_chats=[1],
+        history=_history(),
+    )
+    assert prior.intent_follow_up == "about_prior" and prior.needs_retrieval is False
+
+    # Havola yo'q — model yolg'on aytsa ham quvur baribir qidiradi.
+    no_refs = DS.parse_plan(
+        '{"intent_follow_up":"about_prior","needs_retrieval":false}',
+        question="2-bandni batafsil",
+        known_chats=[1],
+        history=_history(refs=[]),
+    )
+    assert no_refs.needs_retrieval is True
+
+
+def _no_scale(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Kaskad **umuman** chaqirilmasligi kerak (baho ham, skan ham)."""
+    from app.services import scale_search as SC
+
+    async def boom(*a: Any, **kw: Any) -> Any:
+        raise AssertionError("qidiruvsiz turn kaskadga kirmasligi kerak")
+
+    monkeypatch.setattr(SC, "run_scale", boom)
+
+
+@pytest.mark.asyncio
+async def test_exhaustive_meta_question_answers_directly_without_estimate(
+    monkeypatch: pytest.MonkeyPatch, wired: dict[str, Any]
+) -> None:
+    """`To'liq` rejim + "sen nimalar qila olasan" → baho ham, skan ham yo'q."""
+    from app.services.prompts_deep import DEEP_DIRECT_PROMPT, capabilities_text
+
+    _no_scale(monkeypatch)
+    searched = use_multi(monkeypatch, lambda q: [_hit(1)])
+    events: list[DS.DeepEvent] = []
+
+    async def sink(e: DS.DeepEvent) -> None:
+        events.append(e)
+
+    llm = FakeLLM()
+    llm.answers[DEEP_DIRECT_PROMPT] = "Men arxivingizni qidiraman."
+    result = await DS.run_deep_search(
+        factory,  # type: ignore[arg-type]
+        1,
+        10,
+        "sen nimalar qila olasan!",
+        locale="uz",
+        llm=llm,  # type: ignore[arg-type]
+        events=sink,  # type: ignore[arg-type]
+        mode="exhaustive",
+        confirm=False,
+    )
+    kinds = [e.kind for e in events]
+    assert "estimate" not in kinds and "buckets" not in kinds and "search" not in kinds
+    assert kinds[0] == "stages" and kinds[-1] == "done"
+    assert events[0].data["stages"] == list(DS.STAGES_DIRECT)
+    assert events[-1].data["direct"] is True and events[-1].data["intent"] == "meta"
+    assert searched == []  # hech qanday qidiruv yugurmadi
+    assert llm.count(DEEP_PLAN_PROMPT) == 0  # kod darvozasi planner'ni ham tejadi
+    assert llm.count(DEEP_DIRECT_PROMPT) == 1
+    assert result.direct is True and result.intent == "meta" and result.scan == {}
+    assert result.estimate == {} and result.answer == "Men arxivingizni qidiraman."
+    meta = wired["persisted"]["context_meta"]
+    assert meta["direct"] is True and meta["intent"] == "meta" and meta["strategy"] == "direct"
+    assert wired["persisted"].get("scan") is None
+    # Imkoniyatlar ro'yxati **statik matndan** — model o'zi o'ylab topmaydi.
+    assert capabilities_text("uz")[:60] in llm.user_turn(DEEP_DIRECT_PROMPT)
+
+
+@pytest.mark.asyncio
+async def test_deep_greeting_answers_directly(
+    monkeypatch: pytest.MonkeyPatch, wired: dict[str, Any]
+) -> None:
+    from app.services.prompts_deep import DEEP_DIRECT_PROMPT
+
+    _no_scale(monkeypatch)
+    searched = use_multi(monkeypatch, lambda q: [_hit(1)])
+    llm = FakeLLM()
+    llm.answers[DEEP_DIRECT_PROMPT] = "Salom! Nima qidiramiz?"
+    result = await DS.run_deep_search(
+        factory,  # type: ignore[arg-type]
+        1,
+        10,
+        "salom",
+        locale="uz",
+        llm=llm,  # type: ignore[arg-type]
+        mode="deep",
+    )
+    assert result.direct is True and result.intent == "greeting"
+    assert searched == [] and result.answer == "Salom! Nima qidiramiz?"
+    # Qamrov da'vosi yo'q: "nechta chat ko'rildi" degan gap chiqmaydi.
+    assert result.coverage.chats_searched == 0 and result.coverage.messages_scanned == 0
+
+
+@pytest.mark.asyncio
+async def test_planner_meta_intent_answers_directly_without_scan(
+    monkeypatch: pytest.MonkeyPatch, wired: dict[str, Any]
+) -> None:
+    """Darvoza ushlamagan shakl — planner `meta` desa ham skan bo'lmaydi."""
+    from app.services.prompts_deep import DEEP_DIRECT_PROMPT
+
+    _no_scale(monkeypatch)
+    searched = use_multi(monkeypatch, lambda q: [_hit(1)])
+    events: list[DS.DeepEvent] = []
+
+    async def sink(e: DS.DeepEvent) -> None:
+        events.append(e)
+
+    llm = FakeLLM(
+        plan='{"intent_follow_up":"meta","needs_retrieval":false,'
+        '"standalone_question":"Qanday imkoniyatlaring bor?"}'
+    )
+    llm.answers[DEEP_DIRECT_PROMPT] = "Mana imkoniyatlarim."
+    result = await DS.run_deep_search(
+        factory,  # type: ignore[arg-type]
+        1,
+        10,
+        "ayt-chi, qanaqa foydangiz bor menga?",
+        locale="uz",
+        llm=llm,  # type: ignore[arg-type]
+        events=sink,  # type: ignore[arg-type]
+        mode="exhaustive",
+        confirm=True,
+    )
+    kinds = [e.kind for e in events]
+    assert "estimate" not in kinds and searched == []
+    assert kinds.count("plan") == 1  # reja hodisasi ikki marta yuborilmaydi
+    assert result.direct is True and result.intent == "meta"
+
+
+@pytest.mark.asyncio
+async def test_about_prior_reuses_evidence_without_fan_out(
+    monkeypatch: pytest.MonkeyPatch, wired: dict[str, Any]
+) -> None:
+    """2-bandni batafsil — yangi qidiruv yo'q, oldingi dalillar qayta o'qiladi."""
+    _no_scale(monkeypatch)
+    searched = use_multi(monkeypatch, lambda q: [_hit(1)])
+    asked_refs: list[Any] = []
+
+    async def fake_refs(session: Any, refs: Any, *, account_id: int) -> list[S.Hit]:
+        asked_refs.append(list(refs))
+        return [_hit(1)]
+
+    monkeypatch.setattr(DS, "_refs_to_hits", fake_refs)
+    wired["history"] = _history()
+    events: list[DS.DeepEvent] = []
+
+    async def sink(e: DS.DeepEvent) -> None:
+        events.append(e)
+
+    llm = FakeLLM(
+        plan='{"intent_follow_up":"about_prior","needs_retrieval":false,'
+        '"standalone_question":"Oldingi javobdagi 2-bandni tushuntir"}'
+    )
+    result = await DS.run_deep_search(
+        factory,  # type: ignore[arg-type]
+        1,
+        10,
+        "oldingi javobdagi 2-bandni batafsil",
+        locale="uz",
+        llm=llm,  # type: ignore[arg-type]
+        events=sink,  # type: ignore[arg-type]
+        mode="deep",
+    )
+    assert searched == []  # fan-out ham, kaskad ham yugurmadi
+    assert asked_refs == [[{"chat_id": 1, "tg_msg_id": 101}]]
+    assert result.direct is False and result.plan["needs_retrieval"] is False
+    assert result.plan["intent_follow_up"] == "about_prior"
+    stages = [e.data["stages"] for e in events if e.kind == "stages"]
+    assert stages[-1] == list(DS.STAGES_REUSE)
+    assert wired["persisted"]["context_meta"]["reused_evidence"] is True
+
+
+@pytest.mark.asyncio
+async def test_real_question_still_plans_and_searches(
+    monkeypatch: pytest.MonkeyPatch, wired: dict[str, Any]
+) -> None:
+    """Regressiya qopqog'i: haqiqiy savol — o'sha quvur, o'sha bosqichlar."""
+    from app.services.prompts_deep import DEEP_DIRECT_PROMPT
+
+    searched = use_multi(monkeypatch, lambda q: [_hit(1), _hit(2)])
+    events: list[DS.DeepEvent] = []
+
+    async def sink(e: DS.DeepEvent) -> None:
+        events.append(e)
+
+    llm = FakeLLM()
+    result = await DS.run_deep_search(
+        factory,  # type: ignore[arg-type]
+        1,
+        10,
+        "Oxirgi oyda kommunal to'lovlar haqida nima deyishdi?",
+        locale="uz",
+        llm=llm,  # type: ignore[arg-type]
+        events=sink,  # type: ignore[arg-type]
+        mode="fast",
+    )
+    assert searched, "haqiqiy savol qidiruvsiz qolmasin"
+    assert llm.count(DEEP_DIRECT_PROMPT) == 0
+    assert result.direct is False and result.intent == ""
+    stages = [e.data["stages"] for e in events if e.kind == "stages"]
+    assert stages[0] == list(DS.STAGES_PLAN_ONLY) and stages[-1] == list(DS.STAGES_FAST)
+    assert [e.kind for e in events if e.kind == "coverage"] == ["coverage"]
+
+
+def test_direct_router_refunds_the_deep_rate_slot(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`done {direct: true}` → shift sloti qaytariladi (baho yo'li bilan bir xil)."""
+    from app.web.routers import deep as router
+
+    seen: list[int] = []
+    monkeypatch.setattr(LIM, "refund_deep_rate", lambda uid: seen.append(uid))
+    router._refund_unused(7)
+    assert seen == [7]
