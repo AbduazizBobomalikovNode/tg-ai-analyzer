@@ -70,12 +70,21 @@
 
 .conv-list { flex: 1 1 auto; overflow: auto; margin: 0; padding: var(--s-2); list-style: none; }
 .conv-empty { padding: var(--s-4); color: var(--muted); font-size: var(--fs-sm); text-align: center; }
+/* L6: `.conv-act` tugmalari (nomlash/o'chirish) faqat hoverda ko'rinadi,
+   lekin eski versiyada `flex: none` bo'lgani uchun **har doim** `--tap`
+   (44px) x2 joy band qilardi — sarlavha shu tufayli qatorning ~60%
+   kengligida kesilib, o'ng tarafda bo'sh joy qolardi. Endi `.conv-actions`
+   qatordan chiqarilib (`position:absolute`), `.conv-open` butun kenglikni
+   oladi; amallar faqat hoverda **ustidan** chiqadi, fon `--row-bg` orqali
+   qator holatiga mos keladi (ostidagi matnni to'liq yopadi). */
 .conv-row {
+  position: relative;
   display: flex; align-items: center; gap: var(--s-1);
   border-radius: var(--r-md, 12px);
+  --row-bg: transparent;
 }
-.conv-row:hover { background: var(--panel-2); }
-.conv-row.is-active { background: var(--accent-soft); }
+.conv-row:hover { --row-bg: var(--panel-2); background: var(--row-bg); }
+.conv-row.is-active { --row-bg: var(--accent-soft); background: var(--row-bg); }
 .conv-row.is-active .conv-title { color: var(--accent-text); font-weight: 600; }
 .conv-open {
   flex: 1 1 auto; min-inline-size: 0; display: grid; gap: 2px;
@@ -87,8 +96,16 @@
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .conv-meta { font-size: var(--fs-xs); color: var(--faint); }
-.conv-act { opacity: 0; flex: none; }
-.conv-row:hover .conv-act, .conv-row:focus-within .conv-act { opacity: 1; }
+.conv-actions {
+  position: absolute; inset-block: 0; inset-inline-end: var(--s-1);
+  display: flex; align-items: center; gap: var(--s-1);
+  border-radius: var(--r-md, 12px);
+  background: var(--row-bg);
+  opacity: 0; pointer-events: none;
+  transition: opacity var(--t-hover) var(--ease);
+}
+.conv-row:hover .conv-actions, .conv-row:focus-within .conv-actions { opacity: 1; pointer-events: auto; }
+.conv-act { flex: none; }
 .conv-act.danger:hover { color: var(--danger); }
 .conv-rename {
   inline-size: 100%; min-block-size: 30px; font-size: var(--fs-sm);
@@ -516,7 +533,7 @@
 
 /* Harakatni kamaytirish — animatsiya emas, holat muhim */
 @media (prefers-reduced-motion: reduce) {
-  .cite-chip, .conv-act { transition: none; }
+  .cite-chip, .conv-actions { transition: none; }
 }
 
 /* ══ Rejim tanlagich (ko'lam) ══════════════════════════════════════

@@ -73,14 +73,16 @@ function convRow(c) {
         accountLabel(c.account_id),
       ].filter(Boolean).join(" · ")),
     ]),
-    iconButton("edit-3", t("web.ask.rename"), {
-      cls: "conv-act",
-      onclick: () => startRename(li, c, title),
-    }),
-    iconButton("trash-2", t("web.chat.delete"), {
-      cls: "conv-act danger",
-      onclick: () => deferredDelete(c),
-    }),
+    el("span.conv-actions", null, [
+      iconButton("edit-3", t("web.ask.rename"), {
+        cls: "conv-act",
+        onclick: () => startRename(li, c, title),
+      }),
+      iconButton("trash-2", t("web.chat.delete"), {
+        cls: "conv-act danger",
+        onclick: () => deferredDelete(c),
+      }),
+    ]),
   ]);
   return li;
 }
