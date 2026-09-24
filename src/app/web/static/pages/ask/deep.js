@@ -241,12 +241,29 @@ export const STAGE_ORDER = [
   "search", "map", "reduce", "cluster", "rerank", "write",
 ];
 
-/** Rejim bo'yicha **oldindan ko'rinadigan** bosqichlar (qolgani kelganda ochiladi). */
+/**
+ * Rejim bo'yicha **zaxira** ro'yxat: server `stages` hodisasini yubormasa
+ * (eski versiya) shu ishlatiladi. Odatda reyk `stages` hodisasidan quriladi —
+ * quvur har doim bir xil emas: "salom" turn'ida reja + yozish, xolos.
+ */
 const VISIBLE_STAGES = {
   fast: ["plan", "search", "cluster", "rerank", "write"],
   deep: ["plan", "estimate", "buckets", "pull", "filter", "select", "map", "reduce", "write"],
 };
 VISIBLE_STAGES.exhaustive = VISIBLE_STAGES.deep;
+
+/** Shu turn uchun rejalashtirilgan bosqichlar (server aytgani yoki zaxira). */
+function plannedStages(model) {
+  const list = Array.isArray(model.visible) && model.visible.length ? model.visible : null;
+  return list || VISIBLE_STAGES[model.mode] || VISIBLE_STAGES.deep;
+}
+
+/** Rejalashtirilgan ro'yxatda `key` dan keyingi bosqich (yo'q bo'lsa `null`). */
+function nextStage(model, key) {
+  const list = plannedStages(model);
+  const i = list.indexOf(key);
+  return i >= 0 && i + 1 < list.length ? list[i + 1] : null;
+}
 
 const STAGE_ICON = {
   plan: "brain", estimate: "activity", buckets: "layers", pull: "database",
@@ -269,6 +286,11 @@ const numOr = (v, fallback = 0) => (Number.isFinite(Number(v)) ? Number(v) : fal
 export function emptyModel(mode = "deep") {
   return {
     mode,
+    //: Shu turn'da **haqiqatan** yuguradigan bosqichlar (`stages` hodisasi).
+    //: `null` — server aytmadi, rejim bo'yicha zaxira ro'yxat ishlatiladi.
+    visible: null,
+    direct: false,         // qidiruvsiz turn (salom / "nimalar qila olasan")
+    intent: "",
     stages: {},            // kalit → {state, detail?, startedAt, endedAt}
     active: null,          // hozir ishlayotgan bosqich (aria-live shu o'zgarganda)
     estimate: null,        // {mode, buckets, est_messages, est_cost_usd, ceiling_usd}
@@ -325,10 +347,25 @@ export function reduceEvent(model, kind, d = {}, at = 0) {
   };
 
   switch (kind) {
+    // Quvur har doim bir xil emas — server shu turn'da yuguradigan
+    // bosqichlarni aytadi va reyk **faqat** shulardan quriladi.
+    case "stages": {
+      const list = (d.stages || []).filter((k) => STAGE_ORDER.includes(k));
+      if (list.length) model.visible = list;
+      if (d.direct) model.direct = true;
+      // Ro'yxat rejadan **keyin** kengaysa (tarmoq tanlangach), navbatdagi
+      // bosqich shu yerda yonadi: `plan` allaqachon yopilgan bo'ladi.
+      if (!model.active && model.stages.plan && model.stages.plan.state === "done") {
+        const next = plannedStages(model).find((k) => !model.stages[k]);
+        if (next) touch(next, "active");
+      }
+      break;
+    }
+
     case "plan":
       model.plan = d;
       f.planned = (d.subqueries || []).length;
-      advance("plan", model.mode === "fast" ? "search" : "estimate");
+      advance("plan", nextStage(model, "plan"));
       break;
 
     case "estimate":
@@ -433,6 +470,7 @@ export function reduceEvent(model, kind, d = {}, at = 0) {
 
     case "done":
       model.needsConfirm = Boolean(d.needs_confirm);
+      if (d.direct) { model.direct = true; model.intent = String(d.intent || ""); }
       for (const [k, st] of Object.entries(model.stages)) {
         if (st.state === "active") touch(k, model.needsConfirm ? "pending" : "done");
       }
@@ -472,9 +510,8 @@ export function stageModel(events, opts = {}) {
 /* ── bosqich timeline (chizish) ───────────────────────────────────── */
 
 /** Vertikal (desktop) / gorizontal scroll-snap (mobil) bosqich reyki. */
-function stageRail(mode) {
+function stageRail() {
   const items = new Map();
-  const visible = new Set(VISIBLE_STAGES[mode] || VISIBLE_STAGES.deep);
   const rail = el("ol.stage-rail", { "aria-label": t("web.ask.stages") });
   for (const key of STAGE_ORDER) {
     const detail = el("span.stage-detail");
@@ -483,9 +520,11 @@ function stageRail(mode) {
     const body = el("div.stage-body", null, [
       el("span.stage-label", null, t(STAGE_LABEL[key])), detail, time, track,
     ]);
+    // Boshida hammasi yashirin: nima ko'rinishini `stages` hodisasi (yoki
+    // kelgan hodisaning o'zi) hal qiladi — `paint()` da.
     const li = el("li.stage-item", {
       dataset: { state: "pending", stage: key },
-      hidden: !visible.has(key),
+      hidden: true,
     }, [icon(STAGE_ICON[key]), body]);
     rail.appendChild(li);
     items.set(key, { li, detail, time, track });
@@ -829,7 +868,7 @@ const COUNT_MS = 400;       // nomzodlar sanog'ining "o'sish" davomiyligi
 export function createDeepPanel(answerEl, opts = {}) {
   const mode = opts.mode || "deep";
   const model = emptyModel(mode);
-  const { rail, items } = stageRail(mode);
+  const { rail, items } = stageRail();
   const estimate = el("div.estimate-wrap", { hidden: true });
   // aria-live **faqat bosqich almashganda** yangilanadi: har progress
   // yangilanishida e'lon qilinsa ekran o'quvchi sanoqni o'qib tugatmaydi.
@@ -851,9 +890,16 @@ export function createDeepPanel(answerEl, opts = {}) {
 
   const paint = () => {
     const now = Date.now();
+    // Reyk **shu turn** uchun rejalashtirilgan bosqichlardan quriladi; ularga
+    // qo'shimcha, haqiqatan kelgan bosqich ham ko'rinadi (reja kutmagan yo'l).
+    const planned = new Set(plannedStages(model));
     for (const [key, item] of items) {
       const st = model.stages[key];
-      if (!st) continue;
+      if (!st) {
+        item.li.hidden = !planned.has(key);
+        item.li.dataset.state = "pending";
+        continue;
+      }
       item.li.hidden = false;
       item.li.dataset.state = st.state;
       item.li.classList.toggle("is-collapsed", st.state === "done");
@@ -1028,6 +1074,7 @@ function renderPlan(box, plan) {
 /** Tanilgan davom turlari — begona qiymat badge bo'lib chiqmaydi. */
 const INTENTS = new Set([
   "deeper", "repeat", "correction", "context_switch", "reformat", "explain",
+  "about_prior", "meta", "chitchat",
 ]);
 /**
  * Saqlangan (tarixdagi) deep javobi uchun panel — qamrov va manbalar

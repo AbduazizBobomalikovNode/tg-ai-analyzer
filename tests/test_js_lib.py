@@ -894,3 +894,72 @@ def test_place_popover_clamps_to_viewport_and_flips_above_when_no_room() -> None
         assert 0 <= result["left"] <= viewport["width"] - pop["width"]
         assert result["top"] >= 0
         assert result["placement"] in ("above", "below")
+
+
+def test_stage_model_follows_the_stages_event() -> None:
+    """Reyk **shu turn** yuguradigan bosqichlardan quriladi (`stages` hodisasi).
+
+    Qidiruvsiz turn ("salom", "nimalar qila olasan") `plan → write` beradi:
+    baho kartasi ham, skan bosqichlari ham chizilmaydi. Hodisa kelmasa
+    (eski server) rejim bo'yicha zaxira ro'yxat ishlaydi — eski xulq.
+    """
+    script = """
+const direct = M.stageModel(INPUT.direct, { mode: "exhaustive" });
+const late = M.stageModel(INPUT.late, { mode: "exhaustive" });
+const pick = (m) => {
+  const s = {};
+  for (const [k, v] of Object.entries(m.stages)) s[k] = v.state;
+  return s;
+};
+process.stdout.write(JSON.stringify({
+  directStates: pick(direct),
+  directVisible: direct.visible,
+  isDirect: direct.direct,
+  intent: direct.intent,
+  estimate: direct.estimate,
+  lateStates: pick(late),
+  lateVisible: late.visible,
+}));
+"""
+    payload = {
+        # Qidiruvsiz turn: `stages` → `plan` → `token` → `done {direct}`.
+        "direct": [
+            {"kind": "stages", "t": 0, "data": {"stages": ["plan", "write"], "direct": True}},
+            {"kind": "plan", "t": 5, "data": {"intent_follow_up": "meta", "subqueries": []}},
+            {"kind": "token", "t": 20, "data": {"text": "Salom!"}},
+            {"kind": "done", "t": 30, "data": {"direct": True, "intent": "meta"}},
+        ],
+        # Haqiqiy savol: ro'yxat reja **hodisasidan keyin** kengayadi —
+        # navbatdagi bosqich (`estimate`) o'shanda yonadi.
+        "late": [
+            {"kind": "stages", "t": 0, "data": {"stages": ["plan"]}},
+            {"kind": "plan", "t": 5, "data": {"subqueries": ["a", "b"]}},
+            {
+                "kind": "stages",
+                "t": 6,
+                "data": {
+                    "stages": [
+                        "plan",
+                        "estimate",
+                        "buckets",
+                        "pull",
+                        "filter",
+                        "select",
+                        "map",
+                        "reduce",
+                        "write",
+                    ]
+                },
+            },
+        ],
+    }
+    out = _ask_module("deep.js", script, payload)
+
+    assert out["directVisible"] == ["plan", "write"]
+    assert out["directStates"] == {"plan": "done", "write": "done"}
+    assert out["isDirect"] is True and out["intent"] == "meta"
+    assert out["estimate"] is None, "baho kartasi `estimate` hodisasisiz chizilmaydi"
+
+    assert out["lateStates"]["plan"] == "done"
+    assert out["lateStates"]["estimate"] == "active"
+    assert len(out["lateVisible"]) == 9
