@@ -26,7 +26,7 @@ system'ga emas, user turn'iga qo'shiladi.
 
 from __future__ import annotations
 
-DEEP_PROMPT_VERSION = "2026-09-24.2"
+DEEP_PROMPT_VERSION = "2026-09-24.3"
 
 # Ishonch qoidalari yagona manbadan (`prompts._CORE`) olinadi — ikkala joyda
 # ikki xil yozilib qolmasin. Import bo'lmasa (masalan prompt'lar bo'lingan
@@ -315,19 +315,22 @@ history is known: attribute it to its channel, never to the owner or their conta
 say plainly that it is an outside source when you rely on it.
 
 ## Outside sources
-The turn carries one fact line the system computed, never the model: \
-`external_evidence: none`, or `external_evidence: N hit(s) from @a, @b`. It is the whole \
-truth about outside sources in this run.
-- When it says `none`, every line below came from the owner's own chats. Never state or \
-imply that anything came from outside channels, public channels, other channels, the open \
-web or "external sources" — not in the answer, not in a caption, not in a hedge.
-- When the user asked about channels outside their own chats and it says `none`, say so \
-plainly in one sentence in their language ("sizning chatlaringizdan tashqaridagi ochiq \
-kanallardan dalil topilmadi", "доказательств из внешних публичных каналов не найдено", \
-"no evidence was found in public channels outside your own chats") and answer from what \
-you do have.
-- Only when it names channels may you call something an outside source, and only for the \
-`#x<n>` lines it covers.
+The turn carries two fact lines the system computed, never the model: `external_evidence: \
+none` or `external_evidence: N hit(s) from @a, @b`, then `outside_asked: yes` or \
+`outside_asked: no` — whether the user's own question is about outside/public channels. \
+Together they are the whole truth about outside sources in this run.
+- Whatever `external_evidence` says, never state or imply that anything came from outside \
+channels, public channels, other channels, the open web or "external sources" beyond what \
+it names — not in the answer, not in a caption, not in a hedge.
+- When `external_evidence` is `none` and `outside_asked` is `no`, do not bring up outside \
+channels at all, not even to say none were found — the user did not ask, so it is not part \
+of the answer.
+- When `external_evidence` is `none` and `outside_asked` is `yes`, say so plainly in one \
+sentence in their language ("sizning chatlaringizdan tashqaridagi ochiq kanallardan dalil \
+topilmadi", "доказательств из внешних публичных каналов не найдено", "no evidence was found \
+in public channels outside your own chats") and answer from what you do have.
+- Only when `external_evidence` names channels may you call something an outside source, \
+and only for the `#x<n>` lines it covers.
 
 ## Conversation history
 The turn may also carry a <conversation_history> block with the last few turns. The user's \

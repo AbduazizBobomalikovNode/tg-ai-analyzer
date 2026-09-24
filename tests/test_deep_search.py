@@ -31,7 +31,9 @@ from app.llm.base import ChatResult, Usage
 from app.services import cluster as C
 from app.services import deep_search as DS
 from app.services import limits as LIM
+from app.services import scale_search as SCS
 from app.services import search as S
+from app.services import window_search as WIN
 from app.services.prompts_deep import (
     DEEP_HYDE_PROMPT,
     DEEP_PLAN_PROMPT,
@@ -2033,7 +2035,10 @@ async def test_synthesize_reports_a_still_truncated_answer() -> None:
 
 def test_external_fact_is_computed_from_the_evidence_not_the_model() -> None:
     local = DS.to_evidence([_hit(1)], [], link_prefixes={1: "https://t.me/c/1/"})
-    assert DS.external_fact(local) == "external_evidence: none"
+    assert DS.external_fact(local) == "external_evidence: none\noutside_asked: no"
+    assert DS.external_fact(local, outside_asked=True) == (
+        "external_evidence: none\noutside_asked: yes"
+    )
 
     ext = DS.to_evidence(
         [_hit(2, chat_id=0)],
@@ -2043,7 +2048,25 @@ def test_external_fact_is_computed_from_the_evidence_not_the_model() -> None:
     )
     fact = DS.external_fact(ext)
     assert fact.startswith("external_evidence: 1 hit(s)") and "@ai_uz" in fact
+    assert "outside_asked: no" in fact
     assert DS.external_channels(ext) == ["@ai_uz"]
+
+
+def test_question_asks_outside_reuses_the_discover_regex_and_the_rescoped_flag() -> None:
+    # Savol o'zi "a'zo bo'lmagan kanallar" desa — DISCOVER_RE orqali, hatto
+    # plan.server_scope keyinroq boshqa qiymatga rescope bo'lgan bo'lsa ham.
+    plan = DS.DeepPlan(
+        subqueries=["a"],
+        standalone_question="Men a'zo bo'lmagan kanallarda IELTS haqida nima yozishyapti?",
+        server_scope="global",
+    )
+    assert DS.question_asks_outside(plan) is True
+
+    plan2 = DS.DeepPlan(subqueries=["a"], standalone_question="to'lov?", server_scope="discover")
+    assert DS.question_asks_outside(plan2) is True
+
+    plan3 = DS.DeepPlan(subqueries=["a"], standalone_question="bugun menga kimlar yozgan?")
+    assert DS.question_asks_outside(plan3) is False
 
 
 @pytest.mark.asyncio
@@ -2052,10 +2075,92 @@ async def test_synthesis_turn_carries_the_external_fact_line() -> None:
     meter = DS._Meter(llm)  # type: ignore[arg-type]
     await DS.synthesize(meter, "savol?", DS.to_evidence([_hit(1)], []), [], locale="uz", deep=True)
     assert "external_evidence: none" in llm.calls[0][-1].content
+    assert "outside_asked: no" in llm.calls[0][-1].content
+
+
+@pytest.mark.asyncio
+async def test_synthesis_turn_marks_outside_asked_when_the_plan_says_so() -> None:
+    llm = _TruncatingLLM()
+    meter = DS._Meter(llm)  # type: ignore[arg-type]
+    await DS.synthesize(
+        meter,
+        "savol?",
+        DS.to_evidence([_hit(1)], []),
+        [],
+        locale="uz",
+        deep=True,
+        outside_asked=True,
+    )
+    assert "outside_asked: yes" in llm.calls[0][-1].content
+
+
+@pytest.mark.asyncio
+async def test_run_window_inbox_question_never_asks_about_outside_channels(
+    monkeypatch: pytest.MonkeyPatch, wired: dict[str, Any]
+) -> None:
+    """Uchdan-uchgacha: "bugun menga kimlar yozgan?" tashqi kanal haqida emas.
+
+    Jonli regressiya: `retrieval_kind="window"` savoli ham javobni har doim
+    "sizning chatlaringizdan tashqaridagi ochiq kanallardan dalil topilmadi"
+    deb boshlatardi — savol tashqi kanal haqida umuman emas edi. Endi
+    `outside_asked: no` sintez turiga tushadi va sintez prompt'i shu holatda
+    mavzuni umuman ko'tarmaslikni talab qiladi.
+    """
+
+    async def fake_run_window(
+        _session_factory: Any,
+        *,
+        account_id: int,
+        plan: DS.DeepPlan,
+        question: str,
+        mode: str,
+        meter: Any,
+        taint: Any,
+        events: Any = None,
+        chat_titles: Any = None,
+        all_chats: Any = None,
+        deadline: Any = None,
+        confirm: bool = True,
+        locale: str = "uz",
+    ) -> SCS.ScaleOutcome:
+        hit = _hit(1)
+        spec = WIN.WindowSpec(
+            account_id=account_id, chats=None, since=None, until=NOW, inbox=plan.inbox
+        )
+        count = WIN.WindowCount(total=1, chats=1, groups=1)
+        return SCS.ScaleOutcome(
+            evidence=[hit],
+            pool=[hit],
+            stats=SCS.ScanStats(pulled=1, candidates=1, kept=1, evidence=1),
+            window=spec,
+            window_count=count,
+        )
+
+    monkeypatch.setattr(WIN, "run_window", fake_run_window)
+    llm = FakeLLM(synth="Bugun sizga Nurbek yozdi #c1m101.")
+
+    result = await DS.run_deep_search(
+        factory,  # type: ignore[arg-type]
+        1,
+        10,
+        "bugun menga kimlar yozgan?",
+        locale="uz",
+        llm=llm,
+    )
+
+    assert result.plan["retrieval_kind"] == "window"
+    # Sintez turi: fakt satrlari kod hisoblagan, savol tashqi kanal so'ramagan.
+    synth_turn = llm.user_turn(DEEP_SYNTH_PROMPT)
+    assert "external_evidence: none" in synth_turn
+    assert "outside_asked: no" in synth_turn
+    # Soxta LLM javobida ham jumla yo'q — regressiya aynan shu edi.
+    assert "tashqaridagi ochiq kanallar" not in result.answer
+    assert "external channel" not in result.answer.lower()
 
 
 def test_synth_prompt_forbids_unbacked_outside_claims() -> None:
     assert "external_evidence: none" in DEEP_SYNTH_PROMPT
+    assert "outside_asked" in DEEP_SYNTH_PROMPT
     assert "Outside sources" in DEEP_SYNTH_PROMPT
 
 
@@ -2384,7 +2489,11 @@ def test_deep_prompts_describe_the_follow_up_contract() -> None:
     # intentlari va qidiruvsiz javob prompt'i (`DEEP_DIRECT_PROMPT`).
     # 2026-09-24.2 — `retrieval_kind` (topic|window|person) va oyna qoidasi:
     # nisbiy sanalar kodda tahlil qilinadi (`services/timewin.py`).
-    assert DEEP_PROMPT_VERSION == "2026-09-24.2"
+    # 2026-09-24.3 — `outside_asked` fakt satri (jonli regressiya: javob har
+    # doim "tashqi ochiq kanallardan dalil topilmadi" deb boshlardi, savol
+    # tashqi kanal haqida bo'lmasa ham; endi kod hisoblaydi va yo'q bo'lsa
+    # model mavzuni umuman ko'tarmasligi kerak).
+    assert DEEP_PROMPT_VERSION == "2026-09-24.3"
     assert "retrieval_kind" in DEEP_PLAN_PROMPT
     for field_name in ("standalone_question", "intent_follow_up", "needs_retrieval"):
         assert field_name in DEEP_PLAN_PROMPT

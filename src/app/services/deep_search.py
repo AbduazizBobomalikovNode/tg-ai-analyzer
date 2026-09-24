@@ -2509,19 +2509,39 @@ def external_channels(evidence: Sequence[DeepEvidence]) -> list[str]:
     return out
 
 
-def external_fact(evidence: Sequence[DeepEvidence]) -> str:
-    """Sintez prompt'iga tushadigan **kod hisoblagan** fakt satri.
+def external_fact(evidence: Sequence[DeepEvidence], *, outside_asked: bool = False) -> str:
+    """Sintez prompt'iga tushadigan **kod hisoblagan** fakt satrlari.
 
-    Jonli regressiya: javob "ochiq kanallardan" deb yozardi, holbuki
+    Jonli regressiya #1: javob "ochiq kanallardan" deb yozardi, holbuki
     `external_hits=0` va har sitata lokal chatdan edi. Model qamrovni
     ko'rmaydi — shuning uchun tashqi dalil bor-yo'qligi unga aniq aytiladi.
+
+    Jonli regressiya #2: dalil yo'qligida ham javob **har doim** "tashqi
+    ochiq kanallardan dalil topilmadi" deb boshlardi, savol umuman tashqi
+    kanal haqida bo'lmasa ham — modelga "foydalanuvchi so'radimi" degan
+    baholovni ishonib bo'lmaydi. Shuning uchun bu ham kodda hisoblanadi va
+    ikkinchi fakt satri (`outside_asked`) bilan beriladi;
+    `question_asks_outside()` yagona hisoblovchi.
     """
     count = sum(1 for e in evidence if e.external)
+    asked = "yes" if outside_asked else "no"
     if not count:
-        return "external_evidence: none"
+        return f"external_evidence: none\noutside_asked: {asked}"
     names = external_channels(evidence)[:5]
     tail = f" from {', '.join(names)}" if names else ""
-    return f"external_evidence: {count} hit(s){tail}"
+    return f"external_evidence: {count} hit(s){tail}\noutside_asked: {asked}"
+
+
+def question_asks_outside(plan: DeepPlan) -> bool:
+    """Savolning o'zi tashqi/ochiq kanallar haqida so'ragan-so'ramaganini aytadi.
+
+    `server_scope` reflect bosqichida boshqa qiymatga rescope bo'lishi mumkin
+    (`marker "reflect yangi server_scope berdi"`), shu bois faqat oxirgi
+    `plan.server_scope` ga tayanib bo'lmaydi — asl savol ham qayta tekshiriladi,
+    **mavjud** `DISCOVER_RE` orqali (ikkinchi nusxa yozilmaydi, `build_plan` da
+    ishlatilgani bilan bir xil naqsh).
+    """
+    return plan.server_scope == "discover" or bool(DISCOVER_RE.search(plan.standalone_question))
 
 
 #: Javobda "tashqi/ochiq/boshqa kanallardan" degan da'vo — uch tilda.
@@ -2600,6 +2620,7 @@ async def synthesize(
     follow_up: str = "none",
     claims_block: str = "",
     mode_note: str = "",
+    outside_asked: bool = False,
 ) -> tuple[str, list[DeepEvidence], ChatResult | None]:
     """Yagona begona matn ko'ruvchi bosqich.
 
@@ -2623,7 +2644,7 @@ async def synthesize(
         tail = f"\n{mode_note}{tail}"
     # Fakt satri **kodda** hisoblanadi (qamrov bilan bir mantiq): modelning
     # o'zi tashqi dalil bor-yo'qligini dalil satrlaridan taxmin qilmasin.
-    fact = external_fact(kept)
+    fact = external_fact(kept, outside_asked=outside_asked)
     user_turn = f"{head}{envelope}\n\nQuestion: {U.neutralize(question)}\n{note}\n{fact}{tail}"
     task = Task.DEEP if deep else Task.SEARCH
     messages = [Msg.system(DEEP_SYNTH_PROMPT), Msg.user(user_turn)]
@@ -3944,6 +3965,7 @@ async def _run_pipeline(
         follow_up=plan.intent_follow_up,
         claims_block=claims_block,
         mode_note=WINDOW_SYNTH_NOTE if window_used else "",
+        outside_asked=question_asks_outside(plan),
     )
     state["answer"] = answer  # H2: uzilish javobdan keyin bo'lsa ham matn yo'qolmaydi
     if len(kept) < len(evidence):
@@ -4229,6 +4251,7 @@ __all__ = [
     "person_username",
     "prior_plan",
     "prior_refs",
+    "question_asks_outside",
     "render_coverage",
     "render_history",
     "run_deep_search",
