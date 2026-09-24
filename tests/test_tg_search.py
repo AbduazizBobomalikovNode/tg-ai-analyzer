@@ -619,8 +619,21 @@ def _chan(ident: int, username: str, title: str, *, access_hash: int | None = 7,
 
 @pytest.fixture(autouse=True)
 def _forget_premium(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Premium holati jarayon xotirasida — testlar orasida oqib ketmasin."""
+    """Premium holati jarayon xotirasida — testlar orasida oqib ketmasin.
+
+    `TS._redis` ham **standart holda** xato ko'taradigan soxta funksiyaga
+    almashtiriladi: aks holda `.env`dagi haqiqiy Redis'ga (butun suit bilan
+    baham ko'rilgan, 7 kunlik TTL) `tg:premium_missing:1` kabi kalitlar
+    yozilib qolardi va keyingi testlar/yugurishlar shu qoldiqdan
+    "premium_required" deb noto'g'ri javob olardi. Redis'ni **haqiqatan**
+    tekshiradigan testlar buni o'z `fake_redis_ts` bilan ustidan bosadi.
+    """
     monkeypatch.setattr(TS, "PREMIUM_MISSING", set())
+
+    async def _no_redis() -> Any:
+        raise RuntimeError("redis disabled in this test by default")
+
+    monkeypatch.setattr(TS, "_redis", _no_redis)
 
 
 async def test_discover_by_name_reads_public_channels(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -972,6 +985,91 @@ async def test_premium_state_is_remembered_per_account(monkeypatch: pytest.Monke
     assert first.note_code == second.note_code == "premium_required"
     assert first.calls == 1 and second.calls == 0
     assert client.ns == ["channels.CheckSearchPostsFloodRequest"]  # ikkinchi marta yo'q
+
+
+# ─── Premium yo'qligi Redis'da (7 kun) — sovuq jarayon ham probe qilmasin ────
+
+
+class _FakeRedis:
+    """Xotiradagi Redis o'rnini bosuvchi (TTL yozib boriladi, lekin kutilmaydi)."""
+
+    def __init__(self, store: dict[str, str] | None = None) -> None:
+        self.store = store if store is not None else {}
+        self.ttls: dict[str, int] = {}
+        self.closed = 0
+
+    async def get(self, key: str) -> bytes | None:
+        raw = self.store.get(key)
+        return raw.encode("utf-8") if raw is not None else None
+
+    async def set(self, key: str, value: str, *, ex: int | None = None) -> None:
+        self.store[key] = value
+        if ex is not None:
+            self.ttls[key] = ex
+
+    async def aclose(self) -> None:
+        self.closed += 1
+
+
+@pytest.fixture
+def fake_redis_ts(monkeypatch: pytest.MonkeyPatch) -> _FakeRedis:
+    redis = _FakeRedis()
+
+    async def _redis() -> Any:
+        return redis
+
+    monkeypatch.setattr(TS, "_redis", _redis)
+    return redis
+
+
+async def test_discover_skips_probe_when_flag_is_in_redis(
+    monkeypatch: pytest.MonkeyPatch, fake_redis_ts: _FakeRedis
+) -> None:
+    """Sovuq jarayon (xotirada bo'sh) — Redis'dagi bayroq probe'ni to'xtatadi."""
+    fake_redis_ts.store[TS._premium_missing_key(1)] = "1"
+    client = _NsClient({})
+    _patch_pool(monkeypatch, client)
+
+    out = await TS.server_discover(1, "ielts")
+
+    assert out.calls == 0 and out.note_code == "premium_required"
+    assert client.ns == []  # RPC umuman yuborilmadi
+    assert 1 in TS.PREMIUM_MISSING  # tez yo'lga ham keshlandi
+
+
+async def test_discover_falls_back_to_probing_when_redis_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Redis o'qishda xato — **fail-open**: probe baribir bajariladi."""
+
+    async def boom() -> Any:
+        raise RuntimeError("no redis")
+
+    monkeypatch.setattr(TS, "_redis", boom)
+    client = _NsClient(
+        {"channels.CheckSearchPostsFloodRequest": SimpleNamespace(query_is_free=True, remains=0)}
+    )
+    _patch_pool(monkeypatch, client)
+
+    out = await TS.server_discover(1, "ielts")
+
+    assert out.note_code != "premium_required"
+    assert "channels.CheckSearchPostsFloodRequest" in client.ns  # probe chaqirildi
+
+
+async def test_premium_error_writes_redis_flag_with_ttl(
+    monkeypatch: pytest.MonkeyPatch, fake_redis_ts: _FakeRedis
+) -> None:
+    """`PremiumAccountRequiredError` → Redis'ga 7 kunlik bayroq yoziladi."""
+    client = _NsClient({"channels.CheckSearchPostsFloodRequest": PremiumAccountRequiredError()})
+    _patch_pool(monkeypatch, client)
+
+    out = await TS.server_discover(1, "ielts")
+
+    key = TS._premium_missing_key(1)
+    assert out.note_code == "premium_required"
+    assert fake_redis_ts.store[key] == "1"
+    assert fake_redis_ts.ttls[key] == TS.PREMIUM_MISSING_TTL_S == 7 * 24 * 3600
 
 
 async def test_discover_channels_similar_to(monkeypatch: pytest.MonkeyPatch) -> None:

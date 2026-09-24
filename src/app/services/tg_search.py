@@ -26,7 +26,9 @@ Invariantlar (CLAUDE.md):
 * **Premium yo'q bo'lsa kashfiyot to'xtamaydi** — `SearchPosts` Premium
   talab qilsa (`note_code="premium_required"`) tekin yo'l ishlaydi:
   `contacts.Search` (nom) + topilgan ochiq kanallarda `messages.Search`
-  (`server_discover_by_name`). Yangi TL metod qo'shilmagan.
+  (`server_discover_by_name`). Yangi TL metod qo'shilmagan. Bayroq
+  (`PREMIUM_MISSING`) jarayon xotirasida **va** Redis'da (7 kun TTL) —
+  sovuq jarayon ham qayta probe qilmaydi.
 * **Telefon raqami qaytarilmaydi** — `ServerHit` da bunday maydon yo'q va
   entity'dan faqat nom/username o'qiladi.
 * **`get_sender()` / `get_chat()` chaqirilmaydi** — muallif va chat nomi
@@ -50,6 +52,7 @@ from typing import Any
 from sqlalchemy import select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.db.models import Chat, Message
 from app.logging import get_logger
 from app.services import search as S
@@ -650,7 +653,58 @@ def flood_reset_at(flood: Any) -> str:
 #: `users.GetFullUser(self).is_premium` bilan **oldindan** tekshirish mumkin
 #: emas edi: bu ortiqcha RPC va baribir har chaqiruvda xato ushlash kerak.
 #: Shuning uchun xatoning o'zi signal — ikkinchi marta so'ralmaydi.
+#: Bu **tez yo'l**, jarayon o'lganda yo'qoladi — shuning uchun Redis'da ham
+#: dublikat saqlanadi (`_premium_missing_key`), 7 kun TTL bilan: sovuq `api`
+#: jarayoni ham qayta ishga tushgach probe'ni qaytadan to'lamaydi. Foydalanuvchi
+#: keyinroq Premium sotib olsa, bayroq ≤7 kunda o'zi eskiradi (qo'lda tozalash
+#: shart emas).
 PREMIUM_MISSING: set[int] = set()
+
+#: Redis'dagi Premium-yo'q bayrog'ining hayot muddati.
+PREMIUM_MISSING_TTL_S = 7 * 24 * 3600  # 7 kun
+
+
+async def _redis() -> Any:
+    import redis.asyncio as aioredis
+
+    return aioredis.from_url(get_settings().redis_url)  # type: ignore[no-untyped-call]
+
+
+def _premium_missing_key(account_id: int) -> str:
+    return f"tg:premium_missing:{int(account_id)}"
+
+
+async def _premium_missing_in_redis(account_id: int) -> bool:
+    """Redis'dagi bayroqni o'qiydi. Redis yo'q/xato → `False` (**fail-open**:
+
+    kesh promahi kabi — probe qayta bajariladi, xato ko'tarilmaydi)."""
+    try:
+        r = await _redis()
+        try:
+            raw = await r.get(_premium_missing_key(account_id))
+        finally:
+            await r.aclose()
+    except Exception as exc:
+        log.debug("tg_search.premium_missing_read_failed", error=str(exc)[:100])
+        return False
+    return bool(raw)
+
+
+async def _mark_premium_missing(account_id: int) -> None:
+    """Tez yo'l (jarayon xotirasi) **va** Redis'ni belgilaydi (7 kun TTL).
+
+    Redis yozuvi muvaffaqiyatsiz bo'lsa ham jim o'tiladi — xotiradagi
+    belgi shu jarayon uchun baribir ishlaydi, keyingisi qayta probe qiladi.
+    """
+    PREMIUM_MISSING.add(account_id)
+    try:
+        r = await _redis()
+        try:
+            await r.set(_premium_missing_key(account_id), "1", ex=PREMIUM_MISSING_TTL_S)
+        finally:
+            await r.aclose()
+    except Exception as exc:
+        log.debug("tg_search.premium_missing_write_failed", error=str(exc)[:100])
 
 
 def is_premium_error(err: str | None) -> bool:
@@ -690,8 +744,14 @@ async def server_discover(account_id: int, query: str, *, limit: int = 10) -> Se
     if not query:
         return ServerHits(error_text="error: `query` is required")
     # Premium'siz akkauntda bu pog'ona **umuman** ishlamaydi — bir marta
-    # bilib olgandan keyin RPC ham, bucket tokeni ham sarflanmaydi.
+    # bilib olgandan keyin RPC ham, bucket tokeni ham sarflanmaydi. Avval
+    # tez (jarayon xotirasi) yo'l, keyin Redis — sovuq jarayon ham probe
+    # qilmasin (topilsa xotiraga ham keshlanadi, keyingi chaqiruv Redis'ga
+    # bormaydi).
     if account_id in PREMIUM_MISSING:
+        return ServerHits(calls=0, note=premium_note(), note_code="premium_required")
+    if await _premium_missing_in_redis(account_id):
+        PREMIUM_MISSING.add(account_id)
         return ServerHits(calls=0, note=premium_note(), note_code="premium_required")
     if (err := _guard(account_id, BUCKET_DISCOVER)) is not None:
         return _rate_limited(BUCKET_DISCOVER, err)
@@ -701,7 +761,7 @@ async def server_discover(account_id: int, query: str, *, limit: int = 10) -> Se
     )
     if err is not None:
         if is_premium_error(err):
-            PREMIUM_MISSING.add(account_id)
+            await _mark_premium_missing(account_id)
             return ServerHits(calls=1, note=premium_note(), note_code="premium_required")
         return ServerHits(error_text=err, calls=1)
     free = bool(getattr(flood, "query_is_free", False))
@@ -737,7 +797,7 @@ async def server_discover(account_id: int, query: str, *, limit: int = 10) -> Se
     res, err = await send_request(account_id, request)
     if err is not None:
         if is_premium_error(err):
-            PREMIUM_MISSING.add(account_id)
+            await _mark_premium_missing(account_id)
             return ServerHits(calls=2, note=premium_note(), note_code="premium_required")
         return ServerHits(error_text=err, calls=2)
     index = entity_index(res)

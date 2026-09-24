@@ -200,8 +200,10 @@ bitta akkaunt kvotasini bo'lishadi).
   `contacts.Search` **o'z bucket'ida** (`BUCKET_CONTACTS`, 3/min burst 2) —
   `BUCKET_DISCOVER` (burst 1) da probe yagona tokenni yeb, zaxira yo'l hech
   qachon ishga tushmasdi (jonli: `server_skipped=["discover"]`,
-  `external_hits=0`). `PREMIUM_MISSING` — **jarayon xotirasida**: har
-  restartdan keyingi birinchi yugurish bitta probe to'laydi.
+  `external_hits=0`). `PREMIUM_MISSING` — jarayon xotirasida (tez yo'l) **va**
+  Redis'da 7 kun TTL bilan (`tg:premium_missing:<account_id>`) — sovuq `api`
+  jarayoni ham qayta probe qilmaydi; Premium sotib olinsa bayroq ≤7 kunda
+  o'zi eskiradi.
 - To'lgan bucket — xato emas: pog'ona **o'tkazib yuboriladi** va
   `coverage.server_skipped` ga yoziladi. Kutish yo'q, retry yo'q.
 - Server hitlari alohida RRF ro'yxati (og'irlik 0.9). Lokal `chats` da bor

@@ -105,6 +105,15 @@ def _reset(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setenv("TG_SEARCH_RATE_PER_MINUTE", "10")
     get_settings.cache_clear()
     monkeypatch.setattr(T, "_buckets", _buckets(50))
+
+    # `TS._redis` — standart holda xato ko'taradi (fail-open): bu fayldagi
+    # testlar Premium xatosini haqiqiy Redis'ga (7 kunlik TTL bilan, butun
+    # test suit bilan baham ko'rilgan) yozib qo'ymasin. `tests/test_tg_search.py`
+    # dagi izohga qarang — sabab bir xil.
+    async def _no_redis() -> Any:
+        raise RuntimeError("redis disabled in this test by default")
+
+    monkeypatch.setattr(TS, "_redis", _no_redis)
     yield
     get_settings.cache_clear()
 
