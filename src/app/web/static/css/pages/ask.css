@@ -223,6 +223,12 @@
   display: grid; gap: var(--s-3);
   padding: var(--s-3); border: 1px solid var(--border-soft); border-radius: var(--r-lg, 16px);
   background: var(--panel-2);
+  /* `.deep-panel` flex item bo'lib (`.msg-a`) va o'zi grid konteyner —
+     grid/flex item default `min-width:auto` (content-based) tufayli
+     ichidagi bironta bola (masalan manbalar tasmasi) kartani kengaytirib
+     yuborishi mumkin edi. `min-inline-size: 0` shu default'ni bekor qiladi,
+     `max-inline-size: 100%` esa kartani ota konteynerdan kengaytirmaydi. */
+  min-inline-size: 0; max-inline-size: 100%;
 }
 .stage-rail { display: grid; gap: var(--s-2); margin: 0; padding: 0; list-style: none; }
 .stage-rail .stage-item {
@@ -251,14 +257,26 @@
 .chip.cluster[aria-pressed="true"] { background: var(--peer, var(--accent-soft)); color: var(--peer-ink, var(--accent-text)); }
 .chip.cluster b { margin-inline-start: var(--s-1); opacity: .75; }
 
-/* Manbalar tasmasi — gorizontal scroll-snap */
+/* Manbalar tasmasi — keng ekranda karta ichida o'raladi (scroll shart
+   emas), tor ekranda (<=640px) bitta qatorli scroll-snap lentaga aylanadi
+   (pastda, mobil bo'lim). `.sources-wrap` (`.deep-panel`ning grid katakchasi)
+   va `.source-strip-wrap` — ikkalasi ham grid/flex bola, default
+   `min-width:auto` tufayli ichidagi chiplar (ayniqsa uzun sarlavhali,
+   ko'p chatli javoblarda) kartadan tashqariga chiqib ketardi (UI audit:
+   karta o'ng chegarasi ~790px'da, chiplar ~1150px'gacha davom etardi).
+   `min-inline-size: 0` bu default'ni bekor qiladi, `max-inline-size: 100%`
+   esa ularni kartadan kengaytirmaydi. */
+.sources-wrap, .source-strip-wrap {
+  min-inline-size: 0; max-inline-size: 100%;
+}
 .source-strip-head { font-size: var(--fs-xs); color: var(--muted); margin-block-end: var(--s-1); }
 .source-strip {
-  display: flex; gap: var(--s-2); overflow-x: auto;
-  scroll-snap-type: x proximity; padding-block-end: var(--s-1);
+  display: flex; flex-wrap: wrap; gap: var(--s-2);
+  min-inline-size: 0; max-inline-size: 100%;
+  padding-block-end: var(--s-1);
 }
 .source-card {
-  scroll-snap-align: start; flex: none;
+  flex: none;
   display: flex; align-items: center; gap: var(--s-2);
   max-inline-size: 240px; padding: var(--s-2) var(--s-3);
   border: 1px solid var(--border); border-radius: var(--r-full, 999px);
@@ -268,6 +286,19 @@
 .source-card[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
 .source-title { min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .source-count { flex: none; font-size: var(--fs-xs); color: var(--muted); }
+
+/* Tor ekran (<=640px) — o'rash o'rniga bitta qatorli scroll-snap lenta,
+   `.stage-rail`ning mobil uslubi bilan bir xil naqsh (L456 dagi
+   `@media (max-width: 860px)` bloki). */
+@media (max-width: 640px) {
+  .source-strip {
+    flex-wrap: nowrap; overflow-x: auto;
+    scroll-snap-type: x proximity;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+  }
+  .source-card { scroll-snap-align: start; }
+}
 
 /* Qamrov */
 .cov-box { font-size: var(--fs-sm); }
