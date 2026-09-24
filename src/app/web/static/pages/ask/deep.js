@@ -777,6 +777,10 @@ function estimateLine(est) {
  */
 function estimateHint(est) {
   if (!est || est.mode !== "exhaustive") return null;
+  // Savolning o'zida oraliq bor edi (`timewin.parse_window` topdi) — "vaqt
+  // oralig'ini ko'rsating" deyish yolg'on bo'lardi. Oyna yo'lida (`window`)
+  // bucket/hafta tushunchasi umuman yo'q.
+  if (est.window_from_question || est.retrieval_kind === "window") return null;
   if (!(est.weeks > 0 && est.weeks <= 2)) return null;
   return el("p.est-hint", { role: "note" }, [
     icon("alert-triangle"),

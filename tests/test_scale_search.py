@@ -1123,6 +1123,10 @@ async def test_scale_run_emits_events_in_order(wired: dict[str, Any]) -> None:
         "est_total_usd",
         "ceiling_usd",
         "weeks",
+        # Oyna savoldan olinganmi va quvur qaysi shaklda ketyapti — UI
+        # "vaqt oralig'ini ko'rsating" ogohlantirishini shundan hal qiladi.
+        "retrieval_kind",
+        "window_from_question",
         "range",
     }
     assert estimate.data["weeks"] >= 1

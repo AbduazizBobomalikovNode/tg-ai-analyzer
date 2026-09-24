@@ -47,7 +47,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 from sqlalchemy import and_, func, or_, select
@@ -55,6 +55,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db.models import (
+    Account,
     AgentRun,
     Chat,
     ChatType,
@@ -74,6 +75,7 @@ from app.services import rerank as RR
 from app.services import search as S
 from app.services import textnorm as TN
 from app.services import tg_search as TG
+from app.services import timewin as TW
 from app.services import tools as T
 from app.services import untrusted as U
 from app.services.prompts_deep import (
@@ -82,6 +84,7 @@ from app.services.prompts_deep import (
     DEEP_PLAN_PROMPT,
     DEEP_REFLECT_PROMPT,
     DEEP_SYNTH_PROMPT,
+    WINDOW_SYNTH_NOTE,
     capabilities_text,
 )
 
@@ -187,8 +190,61 @@ STAGES_SCALE = (
     "reduce",
     "write",
 )
+#: Oyna yo'li (`retrieval_kind="window"`): bucket rejasi, tirsak va mavzu
+#: filtri **yo'q** — oynadagi xabarlar vaqt bo'yicha olinadi.
+STAGES_WINDOW = ("plan", "estimate", "pull", "select", "map", "write")
 #: `deeper` / `repeat` da oldingi subquery'lar ham qo'shiladi — qopqoq kengroq.
 MAX_SUBQUERIES_WIDENED = 12
+
+# ─── olish turi (`retrieval_kind`) ───────────────────────────────────────────
+# Har savol korpus bo'ylab mavzu skani emas. Uch tur bor:
+#   * `topic`  — semantik/kalit so'z qidiruvi (2- va 4-bosqich quvurlari);
+#   * `window` — vaqt bilan chegaralangan ro'yxat/dayjest ("bugun kimlar
+#     yozgan", "kecha qaysi chatlar faol edi") — `services/window_search.py`;
+#   * `person` — nomi aytilgan odam/chat; hozircha `topic` quvuri bilan
+#     yuguradi (`plan.intent == "person"` allaqachon tor qidiruv beradi),
+#     lekin reja maydoni bor: alohida yo'l kerak bo'lsa shu yerdan ochiladi.
+RETRIEVAL_KINDS = ("topic", "window", "person")
+DEFAULT_RETRIEVAL_KIND = "topic"
+
+#: "Menga kim yozdi" — `inbox` bayrog'ini **ham** yoqadigan naqshlar.
+INBOX_RE = re.compile(
+    r"kimlar\s+yoz\w*"
+    r"|kim\s+yoz\w*"
+    r"|menga\s+(?:kim|kimlar|nima|nimalar)\w*\s+yoz\w*"
+    r"|menga\s+yoz\w*"
+    r"|men\s*ga\s+kel\w*\s+xabar"
+    r"|кто\s+(?:мне\s+)?(?:писал|написал|пишет|пишут)\w*"
+    r"|кто\s+мне\b"
+    r"|who\s+(?:wrote|messaged|texted|has\s+written|pinged)\b",
+    re.I,
+)
+#: Oyna ro'yxati: `inbox` naqshlari + "qaysi chatlar faol", "nima bo'ldi".
+WINDOW_LIST_RE = re.compile(
+    INBOX_RE.pattern + r"|qaysi\s+chat\w*"
+    r"|qanaqa\s+chat\w*"
+    r"|eng\s+faol\b"
+    r"|faol\s+chat\w*"
+    r"|nima\w*\s+bo'ldi\b"
+    r"|nimalar\s+bo'l\w*"
+    r"|kak(?:ie|ih)\s+chat\w*"
+    r"|как(?:ие|их)\s+чат\w*"
+    r"|сам\w+\s+активн\w*"
+    r"|активн\w+\s+чат\w*"
+    r"|что\s+(?:было|происходило|нового)\b"
+    r"|which\s+chats\b"
+    r"|most\s+active\b"
+    r"|what\s+happened\b",
+    re.I,
+)
+#: Savolda mavzu bor — bu oyna ro'yxati emas, mavzu skani ("bugun IT ta'lim
+#: **haqida** nima deyishdi" → `topic`, oynasi bir kun bo'lsa ham).
+TOPIC_MARK_RE = re.compile(
+    r"\bhaqida\w*\b|\bxususida\b|\bbo'yicha\b|\bmavzusida\b|\bdeyishdi\b|\bdeyish\w*\b"
+    r"|\bпро\b|\bнасч[её]т\b|\bо\s+теме\b|\bпо\s+теме\b"
+    r"|\babout\b|\bregarding\b|\bon\s+the\s+topic\b",
+    re.I,
+)
 
 # ─── server pog'onalari (3-bosqich) ──────────────────────────────────────────
 # Lokal indeks har doim birinchi. Serverga chiqish — qamrov yetmaganda, kodda
@@ -388,10 +444,26 @@ class DeepPlan:
     force_second_round: bool = False
     #: `repeat` — so'rovni kengaytirish (HyDE + query expansion) yoqiladi.
     expansion: bool = False
+    #: `topic | window | person` — quvurning **shakli** (`RETRIEVAL_KINDS`).
+    retrieval_kind: str = DEFAULT_RETRIEVAL_KIND
+    #: `window` turida: savol egasiga **yozilgan** xabarlar haqida.
+    inbox: bool = False
+    #: Oyna savolning o'zidan olindi (`timewin.parse_window`) — UI "vaqt
+    #: oralig'ini ko'rsating" ogohlantirishini aynan shunga qarab yashiradi.
+    window_from_question: bool = False
+    #: `timewin.TimeWindow.kind` (`today|yesterday|last_n|all_time|…`).
+    window_kind: str = ""
+    #: Oyna hisoblangan mintaqa (`accounts.tz`) — qamrov qatorida ko'rinadi.
+    window_tz: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "intent": self.intent,
+            "retrieval_kind": self.retrieval_kind,
+            "inbox": self.inbox,
+            "window_from_question": self.window_from_question,
+            "window_kind": self.window_kind,
+            "window_tz": self.window_tz,
             "standalone_question": self.standalone_question,
             "intent_follow_up": self.intent_follow_up,
             "needs_retrieval": self.needs_retrieval,
@@ -484,9 +556,29 @@ class Coverage:
     pull_stopped_by: str = ""
     filter_stopped_by: str = ""
     scan_cost_usd: float = 0.0
+    # ── oyna yo'li (`retrieval_kind="window"`) ──────────────────────────────
+    # "Hammasini ko'rdim" da'vosining oyna versiyasi: oyna qaysi, nechta
+    # xabar bor edi va nechtasi dalilga kirdi. Sanoq `count(*)` dan —
+    # taxmin emas.
+    retrieval_kind: str = DEFAULT_RETRIEVAL_KIND
+    inbox: bool = False
+    window_from: datetime | None = None
+    window_to: datetime | None = None
+    window_tz: str = ""
+    window_total: int = 0  # oynadagi **hamma** xabar
+    window_taken: int = 0  # shundan dalilga kirgani
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "retrieval_kind": self.retrieval_kind,
+            "inbox": self.inbox,
+            "window": {
+                "from": self.window_from.isoformat() if self.window_from else None,
+                "to": self.window_to.isoformat() if self.window_to else None,
+                "tz": self.window_tz,
+                "total": self.window_total,
+                "taken": self.window_taken,
+            },
             "buckets_scanned": self.buckets_scanned,
             "buckets_planned": self.buckets_planned,
             "filtered": self.filtered,
@@ -809,7 +901,14 @@ def _clean_terms(value: Any, *, limit: int, max_chars: int = 120) -> list[str]:
     return out
 
 
-def _parse_date(value: Any) -> datetime | None:
+def _parse_date(value: Any, *, end_of_day: bool = False) -> datetime | None:
+    """ISO sana/vaqt → UTC. `end_of_day` — yalang'och sana **kun oxiri**.
+
+    Nega `end_of_day`: model `until` ni sana bilan beradi ("2026-09-24") va
+    "shu kun **ichida**" degan ma'noni nazarda tutadi. Yarim tun deb o'qish
+    oynani o'sha kunning boshida yopib qo'yardi — jonli yugurishda
+    `since == until` bo'lib, "bugun" savoli bo'sh oyna bilan ketdi.
+    """
     if not isinstance(value, str) or not value.strip():
         return None
     raw = value.strip().replace("Z", "+00:00")
@@ -818,7 +917,12 @@ def _parse_date(value: Any) -> datetime | None:
             dt = datetime.fromisoformat(raw) if fmt is None else datetime.strptime(raw, fmt)
         except (ValueError, TypeError):
             continue
-        return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        bare_date = dt.hour == dt.minute == dt.second == dt.microsecond == 0
+        if end_of_day and bare_date:
+            dt += timedelta(days=1)
+        return dt
     return None
 
 
@@ -1016,6 +1120,8 @@ def parse_plan(
     question: str,
     known_chats: Sequence[int],
     history: Sequence[Turn] = (),
+    tz: str = TW.DEFAULT_TZ,
+    now: datetime | None = None,
 ) -> DeepPlan:
     """Model chiqishini **qattiq** validatsiya qiladi; har maydonda sukut bor."""
     data = _json_obj(raw)
@@ -1054,9 +1160,12 @@ def parse_plan(
     window = data.get("window")
     if isinstance(window, dict):
         plan.since = _parse_date(window.get("since"))
-        plan.until = _parse_date(window.get("until"))
+        plan.until = _parse_date(window.get("until"), end_of_day=True)
         if plan.since and plan.until and plan.since > plan.until:
             plan.since, plan.until = plan.until, plan.since
+
+    # ── oyna: savoldan **kodda** (planner ustidan) ─────────────────────────
+    apply_question_window(plan, question=question, tz=tz, now=now)
 
     chats = data.get("chats")
     if isinstance(chats, list) and known_chats:
@@ -1095,6 +1204,7 @@ def parse_plan(
     plan.use_hyde = bool(data.get("use_hyde")) and plan.intent == "lookup"
     plan.use_hyde = plan.use_hyde and len(plan.standalone_question.split()) < HYDE_MAX_WORDS
     plan.server_scope = parse_server_scope(data.get("server_scope"))
+    plan.retrieval_kind = apply_retrieval_kind(plan, data.get("retrieval_kind"), question=question)
     if DISCOVER_RE.search(plan.standalone_question):
         # Savolning o'zi "men ularda yo'qman" deyapti — model `global` deb
         # qo'ysa ham serverning ochiq qismiga chiqiladi.
@@ -1102,6 +1212,85 @@ def parse_plan(
             log.info("deep.plan_discover", was=plan.server_scope)
         plan.server_scope = "discover"
     return _apply_follow_up(plan, history)
+
+
+def apply_question_window(
+    plan: DeepPlan,
+    *,
+    question: str,
+    tz: str = TW.DEFAULT_TZ,
+    now: datetime | None = None,
+) -> DeepPlan:
+    """Savoldagi vaqt oynasini rejaga **qo'yadi** (planner ustidan).
+
+    Qoida: savolda vaqt havolasi topilsa — oyna **kodniki**. Model bergani
+    faqat savolda hech qanday vaqt havolasi bo'lmaganda qoladi.
+
+    Nega shunchalik qat'iy (avvalgi loyiha "modelniki torroq bo'lsa
+    qoldiriladi" edi): model sanani **kun aniqligida** va **UTC'da**
+    beradi, savol esa lokal kun haqida. Jonli yugurishda "bugun menga
+    kimlar yozgan?" da planner `{"since":"2026-09-24","until":"2026-09-24"}`
+    qaytardi — ikkala chegara ham UTC yarim tuni, ya'ni oyna **bo'sh** edi
+    va javob "hech narsa topilmadi" bo'lib chiqdi. Kod oynasi esa
+    Toshkent kunining boshidan hozirgacha. Bunday mos kelmaslikda
+    "torroq = aniqroq" degan farazning o'zi noto'g'ri.
+
+    Nega umuman kodda: o'sha jonli yugurishda planner ba'zan `window:
+    null` ham qaytarardi va `exhaustive` butun korpusni haftalik
+    bucket'lar bilan rejalashtirib, ustiga "vaqt oralig'ini savolda
+    ko'rsating" deb ogohlantirardi — savolda oraliq bor edi.
+    """
+    text = plan.standalone_question or question
+    parsed = TW.parse_window(text, tz=tz, now=now)
+    if parsed is None:
+        return plan
+    plan.window_from_question = True
+    plan.window_kind = parsed.kind
+    plan.window_tz = parsed.tz
+    before = (plan.since, plan.until)
+    plan.since = parsed.since  # `None` — "butun davr", quyi chegara yo'q
+    plan.until = parsed.until
+    log.info(
+        "deep.window_from_question",
+        kind=parsed.kind,
+        phrase=parsed.phrase[:40],
+        tz=parsed.tz,
+        days=None if parsed.since is None else round(parsed.days, 3),
+        changed=before != (plan.since, plan.until),
+    )
+    return plan
+
+
+def apply_retrieval_kind(plan: DeepPlan, value: Any, *, question: str) -> str:
+    """`topic | window | person` — model taklif qiladi, **kod** hal qiladi.
+
+    Kod ustunligi ikki tomonga ishlaydi:
+
+    * ro'yxat savoli ("kimlar yozgan", "qaysi chatlar faol edi") + savolda
+      topilgan oyna → `window`, mavzu belgisi (`haqida`, `про`, `about`)
+      bo'lmasa. Oyna uzunligi **muhim emas**: oyna yo'li aniq `count(*)`
+      bilan ishlaydi, ya'ni 2 yillik oyna ham, bir kunlik oyna ham bir
+      xil mantiq bilan kesiladi.
+    * model `window` desa-yu oyna umuman bo'lmasa → `topic`: chegarasiz
+      "oyna" degan narsa yo'q, u butun korpusni vaqt bo'yicha o'qish
+      bo'lardi.
+    """
+    kind = value if isinstance(value, str) and value in RETRIEVAL_KINDS else DEFAULT_RETRIEVAL_KIND
+    text = TW.fold(plan.standalone_question or question)
+    has_window = plan.window_from_question or plan.since is not None
+    if (
+        WINDOW_LIST_RE.search(text)
+        and has_window
+        and not TOPIC_MARK_RE.search(text)
+        and kind != "person"
+    ):
+        kind = "window"
+    if kind == "window" and not has_window:
+        kind = DEFAULT_RETRIEVAL_KIND
+    plan.inbox = kind == "window" and bool(INBOX_RE.search(text))
+    if kind != DEFAULT_RETRIEVAL_KIND:
+        log.info("deep.retrieval_kind", kind=kind, inbox=plan.inbox, model=value)
+    return kind
 
 
 def _standalone(value: Any, question: str) -> str:
@@ -1362,6 +1551,7 @@ async def plan_query(
     known_chats: Sequence[int],
     now: datetime | None = None,
     history: Sequence[Turn] = (),
+    tz: str = TW.DEFAULT_TZ,
 ) -> DeepPlan:
     taint.add_turns(history, question=question)
     when = now or datetime.now(UTC)
@@ -1383,10 +1573,22 @@ async def plan_query(
         )
     except LLMError as exc:
         log.warning("deep.plan_failed", error=str(exc)[:200])
-        return DeepPlan(
+        # Planner yiqilsa ham savoldagi oyna yo'qolmasin: u kodda
+        # hisoblanadi va LLM'ga bog'liq emas.
+        fallback = DeepPlan(
             subqueries=[question.strip()[:200]], standalone_question=question.strip()[:400]
         )
-    return parse_plan(res.text, question=question, known_chats=known_chats, history=history)
+        apply_question_window(fallback, question=question, tz=tz, now=when)
+        fallback.retrieval_kind = apply_retrieval_kind(fallback, None, question=question)
+        return fallback
+    return parse_plan(
+        res.text,
+        question=question,
+        known_chats=known_chats,
+        history=history,
+        tz=tz,
+        now=when,
+    )
 
 
 async def hyde_text(meter: _Meter, taint: _Taint, question: str) -> str:
@@ -2397,6 +2599,7 @@ async def synthesize(
     history: Sequence[Turn] = (),
     follow_up: str = "none",
     claims_block: str = "",
+    mode_note: str = "",
 ) -> tuple[str, list[DeepEvidence], ChatResult | None]:
     """Yagona begona matn ko'ruvchi bosqich.
 
@@ -2414,6 +2617,10 @@ async def synthesize(
     hist = render_history(history)
     head = f"{hist}\n\n" if hist else ""
     tail = f"\nfollow-up: {follow_up}" if follow_up and follow_up != "none" else ""
+    # Oyna yo'lining shakli — **user turn'ida**, system'da emas: system
+    # prompt kesh prefiksi va u har turn'da bir xil qolishi kerak.
+    if mode_note:
+        tail = f"\n{mode_note}{tail}"
     # Fakt satri **kodda** hisoblanadi (qamrov bilan bir mantiq): modelning
     # o'zi tashqi dalil bor-yo'qligini dalil satrlaridan taxmin qilmasin.
     fact = external_fact(kept)
@@ -2535,6 +2742,7 @@ def build_coverage(
     marginal_stop: bool,
     server: ServerOutcome | None = None,
     scan: dict[str, Any] | None = None,
+    window: dict[str, Any] | None = None,
 ) -> Coverage:
     # Halollik: bitta xabar ham ko'rilmagan bo'lsa "213/213 chat qaraldi" deb
     # yozish yolg'on. Fan-out nol nomzod bergan yugurishda `searched_chats`
@@ -2585,6 +2793,19 @@ def build_coverage(
 
         if scan.get("truncated") and (SC.is_truncating(cov.stopped_by) or cov.pool_capped):
             cov.truncated = True
+    if window:
+        # Oyna yo'li: "nechta bo'lak" emas, "oynada nechta xabar bor edi va
+        # nechtasi ko'rildi". Sanoq `count(*)` dan, ya'ni **aniq**.
+        cov.retrieval_kind = str(window.get("retrieval_kind") or "window")
+        cov.inbox = bool(window.get("inbox"))
+        cov.window_from = window.get("since")
+        cov.window_to = window.get("until")
+        cov.window_tz = str(window.get("tz") or "")
+        cov.window_total = int(window.get("total") or 0)
+        cov.window_taken = int(window.get("taken") or 0)
+        cov.messages_scanned = cov.window_total
+        cov.chats_searched = int(window.get("chats") or cov.chats_searched)
+        cov.kept = cov.window_taken
     cov.confidence = confidence_of(
         evidence=len(evidence),
         clusters=len(clusters),
@@ -2624,6 +2845,14 @@ _COVERAGE_LABELS: dict[str, dict[str, str]] = {
         "stop_wall": "vaqt tugadi",
         "stop_complete": "reja to'liq skanlandi",
         "stop_estimate_only": "faqat baho — skan boshlanmadi",
+        "window": "oyna",
+        "window_all": "hammasi ko'rildi",
+        "window_part": "{taken} / {total} ko'rildi (eng yangisidan)",
+        "window_msgs": "xabar",
+        "window_inbox": (
+            "faqat menga yozilganlar (shaxsiy chat yoki mening xabarimga javob; "
+            "@eslatmalar saqlanmaydi)"
+        ),
     },
     "ru": {
         "title": "Охват",
@@ -2654,6 +2883,13 @@ _COVERAGE_LABELS: dict[str, dict[str, str]] = {
         "stop_wall": "вышло время",
         "stop_complete": "план просканирован полностью",
         "stop_estimate_only": "только оценка — скан не запускался",
+        "window": "окно",
+        "window_all": "просмотрено полностью",
+        "window_part": "просмотрено {taken} из {total} (с самых новых)",
+        "window_msgs": "сообщений",
+        "window_inbox": (
+            "только написанное мне (личный чат или ответ на моё сообщение; @упоминания не хранятся)"
+        ),
     },
     "en": {
         "title": "Coverage",
@@ -2684,6 +2920,14 @@ _COVERAGE_LABELS: dict[str, dict[str, str]] = {
         "stop_wall": "out of time",
         "stop_complete": "the plan was scanned in full",
         "stop_estimate_only": "estimate only — the scan did not start",
+        "window": "window",
+        "window_all": "all of it was read",
+        "window_part": "{taken} of {total} read (newest first)",
+        "window_msgs": "messages",
+        "window_inbox": (
+            "only what was written to me (private chat or a reply to my message; "
+            "@mentions are not stored)"
+        ),
     },
 }
 
@@ -2741,7 +2985,27 @@ def render_coverage(cov: Coverage, *, locale: str = "uz") -> str:
         shown = ", ".join(cov.gaps[:8])
         more = f" (+{len(cov.gaps) - 8})" if len(cov.gaps) > 8 else ""
         out += f"\n\n⚠️ {lab['gaps']}: {shown}{more}"
-    if cov.buckets_planned:
+    if cov.retrieval_kind == "window" and cov.window_to:
+        # Oyna yo'li: bo'lak sanog'i emas, oynaning o'zi va **aniq** sanoq.
+        win = TW.TimeWindow(
+            since=cov.window_from,
+            until=cov.window_to,
+            kind="",
+            tz=cov.window_tz or TW.DEFAULT_TZ,
+        )
+        taken = (
+            lab["window_all"]
+            if cov.window_taken >= cov.window_total
+            else lab["window_part"].format(taken=cov.window_taken, total=cov.window_total)
+        )
+        out += (
+            f"\n\n{lab['window']}: {TW.format_window(win)} · "
+            f"{cov.chats_searched} {lab['chats']} · "
+            f"{cov.window_total} {lab['window_msgs']} · {taken}"
+        )
+        if cov.inbox:
+            out += f"\n\n{lab['window_inbox']}"
+    if cov.buckets_planned and cov.retrieval_kind != "window":
         # Skan bo'lgan bo'lsa qamrov "nechta chat" emas, "nechta bo'lak"
         # bilan o'lchanadi — va **nega to'xtaganini** ham aytadi.
         stop = lab.get(f"stop_{cov.stopped_by}", cov.stopped_by)
@@ -2989,6 +3253,8 @@ class RunContext:
     #: Oxirgi `DEEP_HISTORY_TURNS` turn — planner va sintezator uchun.
     #: Joriy savol bu yerda **yo'q**: `_persist` uni yugurish oxirida yozadi.
     history: list[Turn] = field(default_factory=list)
+    #: `accounts.tz` — "bugun" qaysi mintaqada boshlanishini shu hal qiladi.
+    tz: str = TW.DEFAULT_TZ
 
 
 async def load_run_context(
@@ -3008,7 +3274,14 @@ async def load_run_context(
     )
     lines = await T.chat_index(session, account_id, limit=T.CHAT_INDEX_LIMIT, compact=True)
     history = await load_history(session, conversation_id)
-    return RunContext(user_id=conv.user_id, chats=chats, chat_lines=lines, history=history)
+    account = await session.get(Account, account_id)
+    return RunContext(
+        user_id=conv.user_id,
+        chats=chats,
+        chat_lines=lines,
+        history=history,
+        tz=(account.tz if account and account.tz else TW.DEFAULT_TZ),
+    )
 
 
 async def run_deep_search(
@@ -3164,6 +3437,8 @@ async def _run_pipeline(
     claims_block = ""
     scan_meta: dict[str, Any] = {}
     estimate_meta: dict[str, Any] = {}
+    window_meta: dict[str, Any] = {}
+    window_used = False
     search_question = question
     server_out = ServerOutcome()
     server_calls_max = int(s.deep_server_max_calls or 0) if s.deep_server_rungs_enabled else 0
@@ -3357,6 +3632,7 @@ async def _run_pipeline(
                 known_chats=list(chats_by_id),
                 now=datetime.now(UTC),
                 history=history,
+                tz=ctx.tz,
             )
             search_question = plan.standalone_question or question
             if plan.use_hyde:
@@ -3383,6 +3659,83 @@ async def _run_pipeline(
                 reused_evidence = True
                 log.info("deep.reuse_evidence", refs=len(refs), hits=len(candidates))
                 await _emit(events, "search", subquery="", hits=len(candidates), reused=True)
+            elif plan.retrieval_kind == "window":
+                # Oyna yo'li: bucket rejasi ham, tirsak ham, mavzu filtri ham
+                # yo'q — oynadagi xabarlar vaqt bo'yicha olinadi. Rejim
+                # (`fast|deep|exhaustive`) bu yerda faqat narx qopqog'i va
+                # tasdiq chegarasini tanlaydi.
+                from app.services import scale_search as _SC
+                from app.services import window_search as WS
+
+                await _emit(events, "stages", stages=list(STAGES_WINDOW), mode=mode)
+                scale_used = True
+                window_used = True
+                outcome = await WS.run_window(
+                    session_factory,
+                    account_id=account_id,
+                    plan=plan,
+                    question=search_question,
+                    mode=mode,
+                    meter=meter,
+                    taint=taint,
+                    events=events,
+                    chat_titles={c.id: c.title for c in chat_rows},
+                    all_chats=sorted(chats_by_id),
+                    deadline=started + hard_wall - FAN_OUT_RESERVE_S,
+                    confirm=confirm,
+                    locale=locale,
+                )
+                estimate_meta = outcome.estimate.to_dict() if outcome.estimate else {}
+                scan_meta = {
+                    **outcome.stats.to_dict(),
+                    "mode": mode,
+                    "q_hash": _SC.question_hash(search_question),
+                    "est_cost_usd": outcome.stats.est_cost_usd,
+                }
+                spec = outcome.window
+                wcount = outcome.window_count
+                window_meta = {
+                    "retrieval_kind": "window",
+                    "inbox": bool(spec.inbox) if spec else plan.inbox,
+                    "since": spec.since if spec else plan.since,
+                    "until": spec.until if spec else plan.until,
+                    "tz": (spec.tz if spec else plan.window_tz) or TW.DEFAULT_TZ,
+                    "total": wcount.total if wcount else 0,
+                    "taken": len(outcome.evidence),
+                    "chats": wcount.chats if wcount else 0,
+                }
+                if outcome.stats.stopped_by == "estimate_only":
+                    await _emit(events, "done", needs_confirm=True, estimate=estimate_meta)
+                    state["status"] = "needs_confirm"
+                    state["needs_confirm"] = True
+                    log.info("deep.needs_confirm", kind="window", estimate=estimate_meta)
+                    await _persist_scan_only(
+                        session_factory,
+                        account_id=account_id,
+                        conversation_id=conversation_id,
+                        scan=scan_meta,
+                        elapsed_ms=int(elapsed() * 1000),
+                    )
+                    return DeepResult(
+                        answer="",
+                        mode=mode,
+                        needs_confirm=True,
+                        estimate=estimate_meta,
+                        scan=scan_meta,
+                        plan=plan.to_dict(),
+                        conversation_id=conversation_id,
+                        tokens_in=meter.tokens_in,
+                        tokens_out=meter.tokens_out,
+                        latency_ms=int(elapsed() * 1000),
+                    )
+                candidates = list(outcome.pool)
+                deduped = list(outcome.evidence)
+                clusters = []
+                ranked = list(outcome.evidence[: _SC.SYNTH_EVIDENCE_LINES])
+                # Sanoq bloki (kodda hisoblangan) + map da'volari — ikkalasi
+                # ham **bitta** dalil konvertining ichiga tushadi.
+                blocks = (outcome.window_stats, _SC.render_claims_block(outcome.claims, [], []))
+                claims_block = "\n\n".join(x for x in blocks if x)
             elif mode in SCALE_MODES:
                 # Korpus miqyosidagi kaskad: fan-out → dedup → rerank o'rniga
                 # bucket → pull → filter → select → map/reduce. Reja, taint,
@@ -3590,6 +3943,7 @@ async def _run_pipeline(
         history=history,
         follow_up=plan.intent_follow_up,
         claims_block=claims_block,
+        mode_note=WINDOW_SYNTH_NOTE if window_used else "",
     )
     state["answer"] = answer  # H2: uzilish javobdan keyin bo'lsa ham matn yo'qolmaydi
     if len(kept) < len(evidence):
@@ -3644,6 +3998,7 @@ async def _run_pipeline(
         marginal_stop=marginal_stop,
         server=server_out,
         scan=scan_meta,
+        window=window_meta or None,
     )
 
     # Javobni oqim bo'lib beramiz (fasadda streaming yo'q) — keyin qamrov.
@@ -3677,6 +4032,8 @@ async def _run_pipeline(
         "scale_mode": mode,
         "scan": scan_meta,
         "estimate": estimate_meta,
+        "retrieval_kind": plan.retrieval_kind,
+        "inbox": plan.inbox,
         "strategy": "deep",
         "source": "deep",
         "account_id": account_id,
@@ -3807,17 +4164,20 @@ async def stream_deep_search(
 __all__ = [
     "DEEP_HISTORY_TURNS",
     "DEEP_RESULT_TOKENS",
+    "DEFAULT_RETRIEVAL_KIND",
     "DIRECT_FOLLOW_UPS",
     "DIRECT_INTENTS",
     "DISCOVER_RE",
     "FOLLOW_UPS",
     "HARD_WALL_S",
+    "INBOX_RE",
     "MARGINAL_YIELD",
     "MAX_CANDIDATES",
     "MAX_ROUNDS",
     "MODES",
     "QUARANTINED_STAGES",
     "RERANK_KEEP",
+    "RETRIEVAL_KINDS",
     "SCALE_MODES",
     "SERVER_MAX_CALLS",
     "SERVER_MIN_LOCAL_HITS",
@@ -3828,6 +4188,9 @@ __all__ = [
     "STAGES_FAST",
     "STAGES_REUSE",
     "STAGES_SCALE",
+    "STAGES_WINDOW",
+    "TOPIC_MARK_RE",
+    "WINDOW_LIST_RE",
     "Coverage",
     "DeepEvent",
     "DeepEvidence",
@@ -3838,6 +4201,8 @@ __all__ = [
     "ServerOutcome",
     "Turn",
     "answer_direct",
+    "apply_question_window",
+    "apply_retrieval_kind",
     "build_coverage",
     "build_evidence_envelope",
     "build_plan_prompt",

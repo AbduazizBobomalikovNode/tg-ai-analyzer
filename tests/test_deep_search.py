@@ -2382,7 +2382,10 @@ def test_deep_prompts_describe_the_follow_up_contract() -> None:
     # "ochiq kanallardan" degan edi).
     # 2026-09-24.1 — intent avval, qidiruv keyin: `meta`/`chitchat`/`about_prior`
     # intentlari va qidiruvsiz javob prompt'i (`DEEP_DIRECT_PROMPT`).
-    assert DEEP_PROMPT_VERSION == "2026-09-24.1"
+    # 2026-09-24.2 — `retrieval_kind` (topic|window|person) va oyna qoidasi:
+    # nisbiy sanalar kodda tahlil qilinadi (`services/timewin.py`).
+    assert DEEP_PROMPT_VERSION == "2026-09-24.2"
+    assert "retrieval_kind" in DEEP_PLAN_PROMPT
     for field_name in ("standalone_question", "intent_follow_up", "needs_retrieval"):
         assert field_name in DEEP_PLAN_PROMPT
     for label in DS.FOLLOW_UPS:

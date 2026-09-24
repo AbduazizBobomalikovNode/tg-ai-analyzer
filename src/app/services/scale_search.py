@@ -137,6 +137,10 @@ BUCKET_FALLBACK_CHATS = 40  # tugunsiz chatlar uchun (chat, oy) zaxira yo'li
 #: haftalarda bor edi, ya'ni reja 5-7 bucket / 1 hafta bilan chegaralanardi —
 #: "burchakdan burchakka" degan rejim uchun bu yolg'on.
 BUCKET_FALLBACK_CHATS_FULL = 200
+#: Oyna shundan qisqa bo'lsa zaxira grid **kunlik** bo'ladi (oylik emas).
+#: Nega: "bugun" degan savolda oylik bucket butun oyni tortardi va reja
+#: "1 hafta / 34 bo'lak" bo'lib ko'rinardi — savolda esa bir kun bor edi.
+SHORT_WINDOW_DAYS = 31
 PLAN_CHAT_BONUS = 0.10  # reja aniq nomlagan chat — ballga qo'shimcha
 FALLBACK_SCORE = 0.35  # (chat, oy) bucket'ining bazaviy bali
 
@@ -437,10 +441,17 @@ class Estimate:
     #: Skan + sintez. Qopqoqqa kirmaydi (sintez rejimga bog'liq emas), lekin
     #: foydalanuvchi to'laydigan raqam shu — UI ikkalasini ko'rsatadi.
     est_total_usd: float = 0.0
-    weeks: int = 0  # reja qamragan alohida (ISO-hafta | oy) yorliqlari
+    weeks: int = 0  # reja qamragan alohida (ISO-hafta | oy | kun) yorliqlari
     range_from: datetime | None = None
     range_to: datetime | None = None
     breakdown: dict[str, float] = field(default_factory=dict)
+    #: `topic` (bucket skani) yoki `window` (oyna bo'yicha olish).
+    retrieval_kind: str = "topic"
+    #: Oyna **savolning o'zidan** olingan (`timewin.parse_window`). UI "vaqt
+    #: oralig'ini ko'rsating" ogohlantirishini aynan shunga qarab yashiradi:
+    #: ilgari u `weeks <= 2` da har doim chiqardi va "bugun" degan savolga
+    #: ham "oralig'ini ko'rsating" deb yozardi.
+    window_from_question: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -451,6 +462,8 @@ class Estimate:
             "est_total_usd": round(self.est_total_usd, 4),
             "ceiling_usd": self.ceiling_usd,
             "weeks": self.weeks,
+            "retrieval_kind": self.retrieval_kind,
+            "window_from_question": self.window_from_question,
             "range": {
                 "from": self.range_from.isoformat() if self.range_from else None,
                 "to": self.range_to.isoformat() if self.range_to else None,
@@ -584,6 +597,13 @@ class ScaleOutcome:
     buckets: list[Bucket] = field(default_factory=list)
     stats: ScanStats = field(default_factory=ScanStats)
     estimate: Estimate | None = None
+    #: Oyna yo'li (`window_search.run_window`) to'ldiradi — qamrov shundan
+    #: "oyna: … · N chat · M xabar · hammasi ko'rildi" qatorini yozadi.
+    window: Any = None
+    window_count: Any = None
+    #: Kodda hisoblangan sanoqlar bloki (`window_search.render_window_stats`) —
+    #: dalil konvertining ichiga `claims_block` bilan birga tushadi.
+    window_stats: str = ""
 
 
 class _Budget:
@@ -665,6 +685,19 @@ def iso_label(dt: datetime) -> str:
 
 def month_label(dt: datetime) -> str:
     return dt.strftime("%Y-%m")
+
+
+def _clamp(
+    start: datetime, end: datetime, since: datetime | None, until: datetime | None
+) -> tuple[datetime, datetime]:
+    """Bucket oralig'ini reja oynasiga qisadi (oynadan tashqariga chiqmasin)."""
+    lo = max(start, since) if since is not None else start
+    hi = min(end, until) if until is not None else end
+    return (lo, hi) if lo < hi else (start, end)
+
+
+def day_label(dt: datetime) -> str:
+    return dt.strftime("%Y-%m-%d")
 
 
 def _month_start(dt: datetime) -> datetime:
@@ -790,11 +823,16 @@ async def plan_buckets(
             score = 1.0 - float(distance or 0.0)
             found = by_key.get(key)
             if found is None:
+                # Bucket oynadan **tashqariga chiqmaydi**: hafta tuguni
+                # savoldagi bir kunni ham qamrasa, tortish o'sha bir kun
+                # bilan chegaralanadi (aks holda "bugun" so'rovi butun
+                # haftani tortardi).
+                b_since, b_until = _clamp(start, start + timedelta(days=7), since, until)
                 by_key[key] = Bucket(
                     chat_id=int(chat_id),
                     chat_title=titles.get(int(chat_id), ""),
-                    since=start,
-                    until=start + timedelta(days=7),
+                    since=b_since,
+                    until=b_until,
                     score=score,
                     est_messages=int(msg_count or 0),
                     source="node",
@@ -807,8 +845,13 @@ async def plan_buckets(
     full_grid = (mode == "exhaustive" and since is None) or all_corpus
     # Qamrov **(chat, oy)** bo'yicha: bitta tugun haftasi butun chatni
     # "qoplangan" deb belgilamaydi (jonli regressiya, docstring'ga qarang).
+    # Qisqa oyna → **kunlik** grid: "bugun" degan savol chat boshiga bitta
+    # kun bucket'i oladi, butun oy emas.
+    span_days = (until - since).total_seconds() / 86400.0 if (since and until) else None
+    grain = "day" if span_days is not None and span_days <= SHORT_WINDOW_DAYS else "month"
+    _label = day_label if grain == "day" else month_label
     covered: set[tuple[int, str]] = (
-        set() if full_grid else {(b.chat_id, month_label(b.since)) for b in by_key.values()}
+        set() if full_grid else {(b.chat_id, _label(b.since)) for b in by_key.values()}
     )
     fallback = await _month_buckets(
         session,
@@ -819,6 +862,7 @@ async def plan_buckets(
         exclude=covered,
         titles=titles,
         limit=BUCKET_FALLBACK_CHATS_FULL if full_grid else BUCKET_FALLBACK_CHATS,
+        grain=grain,
     )
     for bucket in fallback:
         by_key.setdefault((bucket.chat_id, bucket.label), bucket)
@@ -838,7 +882,8 @@ async def plan_buckets(
         all_corpus=all_corpus,
         follow_up=follow_up,
         node=sum(1 for b in out if b.source == "node"),
-        month=sum(1 for b in out if b.source == "month"),
+        grid=sum(1 for b in out if b.source != "node"),
+        grain=grain,
         kept=min(len(out), limit),
     )
     return out[:limit]
@@ -854,8 +899,13 @@ async def _month_buckets(
     exclude: set[tuple[int, str]],
     titles: dict[int, str],
     limit: int,
+    grain: str = "month",
 ) -> list[Bucket]:
     """Tuguni yo'q `(chat, oy)` juftliklari uchun bucket — xabar sanog'idan.
+
+    `grain="day"` — oyna `SHORT_WINDOW_DAYS` dan qisqa bo'lganda: "bugun"
+    degan savolga oylik bucket bermaslik uchun (u butun oyni tortardi va
+    reja "1 hafta" bo'lib ko'rinardi).
 
     Nega oy, hafta emas: tugun yo'q degani odatda chat kichik yoki yangi
     sinxronlangan. Hafta darajasida bo'lish ularni yuzlab bo'sh bucket'ga
@@ -873,7 +923,7 @@ async def _month_buckets(
     if until is not None:
         conds.append(Message.published_at < until)
 
-    month = func.date_trunc("month", Message.published_at).label("m")
+    month = func.date_trunc("day" if grain == "day" else "month", Message.published_at).label("m")
     stmt = (
         select(Message.chat_id, month, func.count().label("n"))
         .join(Chat, Chat.id == Message.chat_id)
@@ -890,24 +940,27 @@ async def _month_buckets(
 
     out: list[Bucket] = []
     seen_chats: set[int] = set()
+    label_of = day_label if grain == "day" else month_label
     for chat_id, start, n in rows:
         cid = int(chat_id)
         when = start if start.tzinfo else start.replace(tzinfo=UTC)
-        if (cid, month_label(when)) in exclude:
+        if (cid, label_of(when)) in exclude:
             continue
         if cid not in seen_chats and len(seen_chats) >= limit:
             continue
         seen_chats.add(cid)
+        end = when + timedelta(days=1) if grain == "day" else _next_month(when)
+        b_since, b_until = _clamp(when, end, since, until)
         out.append(
             Bucket(
                 chat_id=cid,
                 chat_title=titles.get(cid, ""),
-                since=when,
-                until=_next_month(when),
+                since=b_since,
+                until=b_until,
                 score=FALLBACK_SCORE,
                 est_messages=int(n or 0),
-                source="month",
-                label=month_label(when),
+                source=grain,
+                label=label_of(when),
             )
         )
     return out
@@ -1885,6 +1938,7 @@ def estimate(
     per_bucket_k: int = PER_BUCKET_K,
     prices: dict[str, tuple[float, float]] | None = None,
     follow_up: str = "none",
+    window_from_question: bool = False,
 ) -> Estimate:
     """Skan narxining **oldindan** bahosi: bucket sanog'i x k x narx jadvali.
 
@@ -1990,6 +2044,7 @@ def estimate(
         est_total_usd=round(scan + breakdown["synth"], 6),
         ceiling_usd=COST_CEILING.get(mode, COST_CEILING["deep"]),
         weeks=len({b.label for b in buckets}),
+        window_from_question=window_from_question,
         range_from=min((b.since for b in buckets), default=None),
         range_to=max((b.until for b in buckets), default=None),
         breakdown=breakdown,
@@ -2061,7 +2116,12 @@ async def run_scale(
     outcome.buckets = buckets
     stats.buckets_planned = len(buckets)
 
-    est = estimate(buckets, mode=mode, follow_up=follow_up)
+    est = estimate(
+        buckets,
+        mode=mode,
+        follow_up=follow_up,
+        window_from_question=plan.window_from_question,
+    )
     outcome.estimate = est
     stats.est_cost_usd = est.est_cost_usd
     stats.est_total_usd = est.est_total_usd
@@ -2248,6 +2308,7 @@ __all__ = [
     "PULL_CONCURRENCY",
     "PULL_RESERVE_S",
     "SCALE_MODES",
+    "SHORT_WINDOW_DAYS",
     "SOFT_MAX_EVIDENCE",
     "STOP_RANK",
     "STOP_REASONS",
@@ -2268,6 +2329,7 @@ __all__ = [
     "cache_lookup",
     "cache_store",
     "combine_stops",
+    "day_label",
     "dedup_banded",
     "dedup_fast",
     "deeper_window",

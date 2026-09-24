@@ -84,8 +84,8 @@ aytadi, qidirish kerakligini emas.
 | Hodisa | `data` |
 |---|---|
 | `stages` | `{stages: ["plan", …], mode, direct?}` — **birinchi** hodisa: shu turn'da yuguradigan bosqichlar. Reja tanlovdan oldin kelgani uchun ro'yxat bir marta kengayishi mumkin (`["plan"]` → to'liq ro'yxat) |
-| `plan` | `{standalone_question, intent, intent_follow_up, needs_retrieval, since, until, chats, subqueries, …}` |
-| `estimate` | `{mode, buckets, weeks, range, est_messages, est_cost_usd, est_total_usd, ceiling_usd}` — **faqat** kaskad rejimida va **faqat** qidiruv kerak bo'lganda |
+| `plan` | `{standalone_question, intent, intent_follow_up, needs_retrieval, retrieval_kind, inbox, window_from_question, window_kind, window_tz, since, until, chats, subqueries, …}` |
+| `estimate` | `{mode, buckets, weeks, range, est_messages, est_cost_usd, est_total_usd, ceiling_usd, retrieval_kind, window_from_question}` — **faqat** kaskad/oyna rejimida va **faqat** qidiruv kerak bo'lganda |
 | `buckets`/`pull`/`filter`/`select`/`map`/`reduce` | kaskad progressi (`scale_search`) |
 | `search`/`cluster`/`rerank` | fan-out (`fast`) progressi |
 | `token` | `{text}` — javob bo'laklari |
@@ -103,6 +103,26 @@ Uch ssenariy:
   "estimate_only"`);
 * **to'liq yugurish**: `stages` → `plan` → (`estimate` → kaskad | fan-out) →
   `token`* → `coverage` → `done`.
+
+`plan.retrieval_kind` quvurning **shaklini** aytadi:
+
+* `topic` (sukut) — mavzu skani: kaskad (`deep`/`exhaustive`) yoki fan-out
+  (`fast`), bosqichlar o'zgarmagan;
+* `window` — vaqt bilan chegaralangan ro'yxat ("bugun menga kimlar yozgan",
+  "kecha qaysi chatlar faol edi"). Bosqichlar: `stages ["plan","estimate",
+  "pull","select","map","write"]` — bucket rejasi, tirsak va mavzu filtri
+  **yo'q**. `coverage` da `retrieval_kind`, `inbox` va `window
+  {from,to,tz,total,taken}` bo'ladi ("oynada M xabardan N ko'rildi").
+  `exhaustive` bu yo'lda tasdiqni **faqat** skan bahosi `$0.05` dan oshsa
+  yoki oyna qopqoqqa sig'masa so'raydi;
+* `person` — nomi aytilgan odam/chat; hozircha `topic` quvuri bilan yuguradi.
+
+Oyna (`since`/`until`) savolning o'zidan **kodda** olinadi
+(`services/timewin.py`, akkaunt mintaqasida): planner bo'sh qoldirsa yoki
+kengroq bersa kod qo'yadi, torroq bergani qoladi. `window_from_question`
+shuni bildiradi — UI "vaqt oralig'ini ko'rsating" ogohlantirishini aynan shu
+bayroqqa qarab yashiradi. `since: null` + `window_kind: "all_time"` —
+"butun davr", ya'ni quyi chegara yo'q.
 
 ## Sozlamalar va akkaunt (ui/R1b)
 | Metod | Yo'l | Tana / javob |

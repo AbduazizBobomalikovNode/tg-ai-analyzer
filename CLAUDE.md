@@ -109,6 +109,24 @@ synth → qamrov. Web: `POST /api/conversations/{id}/messages` `mode="deep"`
 - **Bitta konvert.** Dalillar faqat bitta `<untrusted_data kind="evidence">`
   ichida, har satr `untrusted.neutralize` dan o'tgan. Ikkinchi konvert
   qo'shmang.
+- **Vaqt oynasi savoldan — kodda** (`services/timewin.py`, uz/ru/en, akkaunt
+  `tz` sida): bugun/kecha/shu hafta/oxirgi N daqiqa|soat|kun|hafta|oy|yil,
+  "…dan beri", aniq sana va oraliq, "butun davr" (`since=None`).
+  `parse_plan` uni planner ustidan qo'yadi (bo'sh yoki kengroq → kodniki,
+  torroq → modelniki) va `plan.window_from_question` ni yoqadi — UI "vaqt
+  oralig'ini ko'rsating" ogohlantirishi **faqat** shu bayroq bo'lmaganda
+  chiqadi. Oyna bucket gridiga ham o'tadi: ≤31 kunlik oyna → **kunlik**
+  bucket (oylik emas) va har bucket oynaga qisiladi.
+- **`plan.retrieval_kind`** (`topic|window|person`) — quvurning shakli.
+  `window` (`services/window_search.py`): "kimlar yozgan", "qaysi chatlar
+  faol edi" — bucket rejasi, tirsak va mavzu filtri **yo'q**, oynadagi
+  xabarlar `count(*)` bilan sanaladi, ≤`SOFT_MAX_EVIDENCE` bo'lsa hammasi
+  dalil, ko'pi `(chat, kun)` kvotasi bilan eng yangisidan olinadi va qamrov
+  "M dan N ko'rildi" deydi. `inbox` = `out=false` **va** (shaxsiy chat yoki
+  mening xabarimga javob) — `@eslatma` sxemada yo'q va buni qamrov aytadi.
+  Darvoza kodda (`WINDOW_LIST_RE` + oyna, `TOPIC_MARK_RE` bo'lsa `topic`):
+  "bugun IT ta'lim **haqida** nima deyishdi" — mavzu skani, oyna bir kun
+  bo'lsa ham.
 - **Qamrov (`Coverage`) kodda hisoblanadi**, modelga yozdirilmaydi. `gaps` =
   `synced_min_id != 1` chatlar; `server_rungs_used` / `server_calls` /
   `server_hits` / `server_skipped` / `external_hits` — server pog'onalarining

@@ -26,7 +26,7 @@ system'ga emas, user turn'iga qo'shiladi.
 
 from __future__ import annotations
 
-DEEP_PROMPT_VERSION = "2026-09-24.1"
+DEEP_PROMPT_VERSION = "2026-09-24.2"
 
 # Ishonch qoidalari yagona manbadan (`prompts._CORE`) olinadi — ikkala joyda
 # ikki xil yozilib qolmasin. Import bo'lmasa (masalan prompt'lar bo'lingan
@@ -91,6 +91,7 @@ Return ONLY a JSON object:
 | "reformat" | "explain" | "about_prior" | "meta" | "chitchat",
   "needs_retrieval": true | false,
   "intent": "lookup" | "summary" | "trend" | "compare" | "person",
+  "retrieval_kind": "topic" | "window" | "person",
   "window": {"since": "YYYY-MM-DD", "until": "YYYY-MM-DD"} | null,
   "chats": [12, 34] | "all",
   "subqueries": ["...", "..."],
@@ -138,7 +139,18 @@ the previous scope would only re-bill the same answer.
 - intent: "lookup" = find a specific fact, message or agreement; "summary" = what was \
 discussed; "trend" = how something changed over time; "compare" = two or more things side \
 by side; "person" = what one person said or did.
-- window: only when the question itself limits time ("last week", "in March"). Otherwise null.
+- retrieval_kind: the SHAPE of the search, not its subject. "topic" (the default) = there is \
+a subject to rank messages by, so the archive is searched for it. "window" = there is NO \
+subject, only a period: the answer is a roll-call of what is inside a time window — "bugun \
+menga kimlar yozgan", "kecha nima bo'ldi", "qaysi chatlar faol edi", "кто мне писал \
+сегодня", "which chats were most active last week", "who wrote to me". "person" = the \
+question is about one named person or chat. Pick "window" ONLY when the question also names \
+a period; a question that names a subject ("bugun IT ta'lim haqida nima deyishdi") is \
+"topic" even when it names a day. The system checks this itself and may override you.
+- window: only when the question itself limits time ("last week", "in March", "bugun", \
+"oxirgi 3 kun", "butun davr"). Otherwise null. The system parses relative dates from the \
+question on its own and will narrow or widen your window to match, so a wrong guess here is \
+recoverable — an invented one is not.
 - chats: "all" unless the user themselves points at particular chats. The shortlist is a \
 narrowing of the search, not a hint — every id you put here makes the rest of the archive \
 invisible for this question, so a wrong guess silently loses the answer. Put ids here ONLY \
@@ -213,6 +225,15 @@ no history / latest: "sen nimalar qila olasan!"
 no history / latest: "salom"
   -> {"standalone_question": "Salom", "intent_follow_up": "chitchat", \
 "needs_retrieval": false}
+
+no history / latest: "bugun menga kimlar yozgan? nima maqsadda?"
+  -> {"standalone_question": "Bugun menga kimlar yozgan va nima maqsadda?", \
+"intent_follow_up": "none", "needs_retrieval": true, "retrieval_kind": "window", \
+"intent": "summary", "window": {"since": "<today>", "until": "<today>"}}
+
+no history / latest: "bugun IT ta'lim haqida nima deyishdi?"
+  -> {"retrieval_kind": "topic", "intent": "summary", "window": {"since": "<today>", \
+"until": "<today>"}} — a named subject makes it a topic search even inside one day.
 
 history: assistant answered about payments / latest: "salom, kecha guruhda nima bo'ldi?"
   -> {"standalone_question": "Kecha guruhda nima bo'ldi?", "intent_follow_up": "none", \
@@ -575,6 +596,17 @@ to ask it directly instead of guessing an answer.
 - No <untrusted_data> tags in your output, no JSON, no headings unless a list is clearer."""
 )
 
+# ─── 9. Oyna yo'li uchun qo'shimcha ko'rsatma (user turn'ida) ────────────────
+# Nega system'da emas: system prompt kesh prefiksi — u har turn'da bir xil
+# qolishi kerak (CLAUDE.md, "Agent / tool'lar"). Bu satr esa faqat
+# `retrieval_kind="window"` yugurishida qo'shiladi.
+WINDOW_SYNTH_NOTE = """retrieval: window — the evidence is EVERY message in the asked time \
+window (or the newest slice of it), not a topical search result. Answer it as a roll-call, \
+not as an essay: group by sender (and chat), and for each one give who they are, how many \
+messages they sent, what they wanted (the purpose), and whether anything needs a reply or \
+an action from the owner. Keep the citation token on every line. End with the items that \
+need an answer, if there are any. If the window is empty, say so plainly."""
+
 __all__ = [
     "CAPABILITIES_EN",
     "CAPABILITIES_RU",
@@ -589,5 +621,6 @@ __all__ = [
     "SCALE_MAP_PROMPT",
     "SCALE_REDUCE_PROMPT",
     "TRUST_RULES",
+    "WINDOW_SYNTH_NOTE",
     "capabilities_text",
 ]
