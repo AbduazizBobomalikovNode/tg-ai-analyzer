@@ -1533,7 +1533,7 @@ async def test_window_stats_and_week_grid_sql_run_on_postgres(pg_engine: AsyncEn
         samples = await WS.stats_samples(
             session, out_spec, [r.chat_id for r in agg.per_chat], titles=titles
         )
-        assert len([h for h in samples if h.chat_id == chat_ids[0]]) == 3
+        assert len([h for h in samples if h.chat_id == chat_ids[0]]) == 2
         assert len([h for h in samples if h.chat_id == chat_ids[1]]) == 1
 
         both_spec = WS.WindowSpec(
@@ -1541,6 +1541,13 @@ async def test_window_stats_and_week_grid_sql_run_on_postgres(pg_engine: AsyncEn
         )
         both = await WS.stats_window(session, both_spec)
         assert {r.chat_id: r.n for r in both.per_chat} == {chat_ids[0]: 7, chat_ids[1]: 5}
+        # Mutual ranking: A (5 mine / 2 theirs -> min=2) chiqadi B (1 mine /
+        # 4 theirs -> min=1) dan yuqorida, garchi B'ning umumiy soni kamroq
+        # bo'lsa ham (chat C — kanal, mine=0 — allaqachon butunlay tashqarida).
+        assert [(r.chat_id, r.mine, r.theirs) for r in both.per_chat] == [
+            (chat_ids[0], 5, 2),
+            (chat_ids[1], 1, 4),
+        ]
         assert both.mine_total == 6
         assert both.per_sender[0] == ("Aziz", 4)
         assert ("user:77", 2) in both.per_sender
@@ -1565,3 +1572,62 @@ async def test_window_stats_and_week_grid_sql_run_on_postgres(pg_engine: AsyncEn
     assert summary.chats_total == 3
     assert summary.planned == 5
     assert summary.days == 267 and summary.weeks == 39
+
+
+async def test_both_direction_having_excludes_one_sided_chats_on_postgres(
+    pg_engine: AsyncEngine,
+) -> None:
+    """`direction="both"` ning `HAVING`/`func.least` SQL'i haqiqiy Postgres'da.
+
+    `FakeSession` (fake-DB testlari) SQL'ni bajarmaydi — SQL matniga qarab
+    javob beradi, shuning uchun `HAVING`/`ORDER BY least(...)` chindan ishlashi
+    faqat shu yerda tekshiriladi. "Suhbat" — ikki tomonlama (4 mening, 6
+    ularniki); "Javobsiz" — faqat men yozgan (9 mening, 0 ularniki): mutual
+    reytingdan chiqadi, lekin umumiy sonda qoladi.
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.services import window_search as WS
+
+    aid, chat_talk = await _fixture_chat(pg_engine)
+    base = datetime(2026, 5, 4, 10, tzinfo=UTC)
+    async with pg_engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE chats SET type = 'private', title = 'Suhbat' WHERE id = :c"),
+            {"c": chat_talk},
+        )
+        chat_silent = (
+            await conn.execute(
+                text(
+                    "INSERT INTO chats (account_id, tg_peer_id, type, title, "
+                    "write_mode, sync_state, synced_total) VALUES (:aid, "
+                    "floor(random() * 1e12)::bigint, 'private', 'Javobsiz', "
+                    "'read_only', 'idle', 0) RETURNING id"
+                ),
+                {"aid": aid},
+            )
+        ).scalar_one()
+        plan_rows = [(chat_talk, True)] * 4 + [(chat_talk, False)] * 6
+        plan_rows += [(chat_silent, True)] * 9
+        for i, (cid, out) in enumerate(plan_rows):
+            await conn.execute(
+                text(
+                    "INSERT INTO messages (chat_id, tg_msg_id, published_at, text, out) "
+                    "VALUES (:c, :m, :d, :t, :o)"
+                ),
+                {"c": cid, "m": 200 + i, "d": base + timedelta(hours=i), "t": f"m{i}", "o": out},
+            )
+
+    maker = async_sessionmaker(pg_engine, expire_on_commit=False)
+    since = datetime(2026, 1, 1, tzinfo=UTC)
+    until = datetime(2026, 9, 25, tzinfo=UTC)
+    async with maker() as session:
+        both_spec = WS.WindowSpec(
+            account_id=aid, chats=None, since=since, until=until, direction="both"
+        )
+        both = await WS.stats_window(session, both_spec)
+        # Faqat "Suhbat" reytingda — "Javobsiz" (theirs=0) chiqarilgan.
+        assert [(r.chat_id, r.mine, r.theirs) for r in both.per_chat] == [(chat_talk, 4, 6)]
+        count = await WS.count_window(session, both_spec)
+        # "Javobsiz"ning 9 ta xabari reytingdan tashqarida, lekin umumiy sonda qoladi.
+        assert count.total == 4 + 6 + 9

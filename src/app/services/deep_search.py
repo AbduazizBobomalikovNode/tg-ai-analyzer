@@ -2736,6 +2736,7 @@ async def synthesize(
     claims_block: str = "",
     mode_note: str = "",
     outside_asked: bool = False,
+    task: Task | None = None,
 ) -> tuple[str, list[DeepEvidence], ChatResult | None]:
     """Yagona begona matn ko'ruvchi bosqich.
 
@@ -2747,6 +2748,11 @@ async def synthesize(
     **bitta** davom ettirish chaqirig'i qilinadi va matn ulanadi. Qaytgan
     `ChatResult` — oxirgisi, ya'ni uning `finish_reason` i "hali ham
     kesilganmi" degan savolga javob beradi (`context_used.truncated_answer`).
+
+    `task` berilsa sukut (`Task.DEEP if deep else Task.SEARCH`) ustidan
+    yoziladi — sanoq yo'li (`window_stats`) javobi raqamlarni so'zga
+    aylantiradi xolos, kalit dalil topish emas, shuning uchun arzonroq
+    `Task.SEARCH` yetarli.
     """
     envelope, kept = build_evidence_envelope(evidence, clusters, claims_block=claims_block)
     note = f"(locale: {locale}; now: {(now or datetime.now(UTC)).strftime('%Y-%m-%d %H:%M UTC')})"
@@ -2761,7 +2767,7 @@ async def synthesize(
     # o'zi tashqi dalil bor-yo'qligini dalil satrlaridan taxmin qilmasin.
     fact = external_fact(kept, outside_asked=outside_asked)
     user_turn = f"{head}{envelope}\n\nQuestion: {U.neutralize(question)}\n{note}\n{fact}{tail}"
-    task = Task.DEEP if deep else Task.SEARCH
+    task = task if task is not None else (Task.DEEP if deep else Task.SEARCH)
     messages = [Msg.system(DEEP_SYNTH_PROMPT), Msg.user(user_turn)]
     try:
         res = await meter.chat(task, messages, max_tokens=SYNTH_MAX_TOKENS)
@@ -4108,6 +4114,9 @@ async def _run_pipeline(
             (STATS_SYNTH_NOTE if window_stats_used else WINDOW_SYNTH_NOTE) if window_used else ""
         ),
         outside_asked=question_asks_outside(plan),
+        # Sanoq javobi raqamlarni so'zga aylantiradi — arzonroq Task.SEARCH
+        # yetarli, `Task.DEEP` bu yo'lda ortiqcha xarajat.
+        task=Task.SEARCH if window_stats_used else None,
     )
     state["answer"] = answer  # H2: uzilish javobdan keyin bo'lsa ham matn yo'qolmaydi
     if len(kept) < len(evidence):

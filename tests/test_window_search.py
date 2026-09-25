@@ -240,15 +240,25 @@ class FakeSession:
             groups = len({(m.chat_id, m.published_at.date()) for m in self.messages})
             return _Result([(len(self.messages), self.chats, groups, first, last)])
         if "group by messages.chat_id, chats.type" in low:
-            # sanoq yo'li: (chat, n, mine, type, first, last)
+            # sanoq yo'li: (chat, n, mine, theirs, type, first, last)
             rows: dict[int, list[Any]] = {}
             for m in self.messages:
-                row = rows.setdefault(m.chat_id, [m.chat_id, 0, 0, "group", None, None])
+                row = rows.setdefault(m.chat_id, [m.chat_id, 0, 0, 0, "group", None, None])
                 row[1] += 1
-                row[2] += 1 if getattr(m, "out", False) else 0
-                row[4] = min(filter(None, (row[4], m.published_at)))
-                row[5] = max(filter(None, (row[5], m.published_at)))
-            return _Result([tuple(r) for r in sorted(rows.values(), key=lambda r: -r[1])])
+                out_flag = bool(getattr(m, "out", False))
+                row[2] += 1 if out_flag else 0
+                row[3] += 0 if out_flag else 1
+                row[5] = min(filter(None, (row[5], m.published_at)))
+                row[6] = max(filter(None, (row[6], m.published_at)))
+            values = list(rows.values())
+            if "least(" in low:
+                # `direction="both"`: real SQL excludes one-sided chats and
+                # ranks by min(mine, theirs), tie-break mine then total.
+                values = [r for r in values if r[2] > 0 and r[3] > 0]
+                values.sort(key=lambda r: (-min(r[2], r[3]), -r[2], -r[1]))
+            else:
+                values.sort(key=lambda r: -r[1])
+            return _Result([tuple(r) for r in values])
         if "group by messages.sender_id" in low:
             return _Result([])
         if "group by messages.chat_id" in low:
@@ -919,7 +929,7 @@ async def test_stats_path_ranks_recipients_from_db_counts() -> None:
     assert "3. Ish chat [group]: 1 (10.0%)" in block
     assert block.index("1. Nurbek") < block.index("2. Aziz") < block.index("3. Ish chat")
 
-    # Namuna: top chat boshiga ≤3 ta (SQL'da `row_number() … <= 3`), sitata
+    # Namuna: top chat boshiga ≤2 ta (SQL'da `row_number() … <= 2`), sitata
     # uchun. Soxta sessiya oynani bajarmaydi — shartning o'zi tekshiriladi.
     sample_sql = [s.lower() for s in session.seen if "row_number" in s.lower()]
     assert sample_sql
@@ -928,6 +938,80 @@ async def test_stats_path_ranks_recipients_from_db_counts() -> None:
     assert outcome.evidence
     assert all(h.tg_msg_id for h in outcome.evidence)
     assert not outcome.claims
+
+
+def _bmsg(mid: int, *, chat_id: int, out: bool) -> Any:
+    return SimpleNamespace(
+        id=mid,
+        tg_msg_id=6000 + mid,
+        chat_id=chat_id,
+        published_at=datetime(2026, 9, 20, 10, tzinfo=UTC),
+        text=f"xabar {mid}",
+        out=out,
+    )
+
+
+def _mutual_corpus() -> list[Any]:
+    """Chat 1 — deyarli bir tomonlama (1 mening, 50 ularniki): jonli
+    regressiyaning o'zi — katta jamoat kanali bitta mening xabarim bilan
+    "eng ko'p gaplashgan" reytingda birinchi chiqardi. Chat 2 — haqiqiy
+    o'zaro suhbat (12/11). Chat 3 — javobsiz (3 mening, 0 ularniki): suhbat
+    emas. Chat 4 — kichikroq, lekin ikki tomonlama suhbat (5/3)."""
+    msgs: list[Any] = []
+    counts = [
+        (1, True, 1),
+        (1, False, 50),
+        (2, True, 12),
+        (2, False, 11),
+        (3, True, 3),
+        (4, True, 5),
+        (4, False, 3),
+    ]
+    mid = 0
+    for chat_id, out, n in counts:
+        for _ in range(n):
+            msgs.append(_bmsg(mid, chat_id=chat_id, out=out))
+            mid += 1
+    return msgs
+
+
+@pytest.mark.asyncio
+async def test_both_direction_ranks_by_mutual_conversation_not_raw_count() -> None:
+    """Jonli regressiya: 13,805 xabarlik jamoat kanali (bitta mening xabarim
+    bilan) "kim bilan eng ko'p gaplashganman" reytingda birinchi chiqardi.
+    Endi ball `min(mening, ularniki)` — bir tomonlama chat (Kommunal) chuqur
+    cho'kadi, aynan suhbat (Nurbek) tepada chiqadi; javobsiz chat (Aziz)
+    reytingdan butunlay chiqariladi, lekin umumiy sonda qoladi.
+    """
+    session = FakeSession(messages=_mutual_corpus(), chats=4)
+    llm = FakeLLM()
+    question = "oxirgi 2 haftada kim bilan eng ko'p gaplashganman?"
+    plan = _plan25(question)
+    assert plan.direction == "both" and plan.window_stats is True
+
+    outcome = await WS.run_window(
+        session_factory_of(session),
+        account_id=1,
+        plan=plan,
+        question=question,
+        mode="exhaustive",
+        meter=DS._Meter(llm),
+        taint=DS._Taint(),
+        events=None,
+        confirm=False,
+        chat_titles={1: "Kommunal", 2: "Nurbek", 3: "Aziz", 4: "Ish guruhi"},
+    )
+    block = outcome.window_stats
+    assert "mutual conversation" in block
+    # Suhbat (Nurbek, min=11) va kichikroq suhbat (Ish guruhi, min=3) —
+    # bir tomonlama Kommunal'dan (min=1, lekin 51 xabar) yuqorida.
+    assert block.index("Nurbek") < block.index("Ish guruhi") < block.index("Kommunal")
+    assert "Aziz" not in block  # javobsiz — suhbat emas, reytingdan chiqarilgan
+    assert "sent by owner: 12, received: 11" in block  # Nurbek
+    assert "sent by owner: 1, received: 50" in block  # Kommunal — cho'kkan holda ham to'g'ri
+    assert "sent by owner: 5, received: 3" in block  # Ish guruhi
+    # Umumiy son Aziz'ning 3 ta xabarini ham o'z ichiga oladi (chiqarilmagan).
+    assert "total messages: 85" in block
 
 
 def test_stats_block_neutralizes_hostile_titles_and_counts_share() -> None:

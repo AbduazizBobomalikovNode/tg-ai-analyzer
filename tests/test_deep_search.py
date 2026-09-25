@@ -73,6 +73,7 @@ class FakeLLM:
             CLUSTER_LABEL_PROMPT: answers.get("labels", '{"labels":{"0":"to\'lov muddati"}}'),
         }
         self.prompts: list[tuple[str, str]] = []  # (system, user)
+        self.tasks: list[tuple[str, Any]] = []  # (system, Task) — har chaqiruv
         self.calls = 0
 
     async def chat(self, task: Any, messages: list[Any], **kw: Any) -> ChatResult:
@@ -80,6 +81,7 @@ class FakeLLM:
         system = messages[0].content
         user = messages[-1].content
         self.prompts.append((system, user))
+        self.tasks.append((system, task))
         return ChatResult(
             text=self.answers.get(system, "{}"),
             tool_calls=[],
@@ -99,6 +101,13 @@ class FakeLLM:
 
     def count(self, system: str) -> int:
         return sum(1 for s, _ in self.prompts if s == system)
+
+    def task_for(self, system: str) -> Any:
+        """Shu system prompt bilan chaqirilgan **oxirgi** `Task` (2-vazifa: narx)."""
+        for sys_prompt, task in reversed(self.tasks):
+            if sys_prompt == system:
+                return task
+        return None
 
 
 class _FakeSession:
@@ -2153,6 +2162,73 @@ async def test_run_window_inbox_question_never_asks_about_outside_channels(
     synth_turn = llm.user_turn(DEEP_SYNTH_PROMPT)
     assert "external_evidence: none" in synth_turn
     assert "outside_asked: no" in synth_turn
+
+
+@pytest.mark.asyncio
+async def test_stats_synthesis_uses_cheap_task_and_few_samples(
+    monkeypatch: pytest.MonkeyPatch, wired: dict[str, Any]
+) -> None:
+    """2-vazifa (narx): sanoq javobi raqamlarni so'zga aylantiradi xolos —
+
+    `Task.DEEP` emas, arzonroq `Task.SEARCH` yetarli, va namuna satrlari
+    `STATS_TOP_N=5 x STATS_SAMPLE_PER_CHAT=2 = 10` dan oshmaydi. Oddiy mavzu
+    yo'li (boshqa testlar) hamon `Task.DEEP` bilan sintez qiladi — bu yerda
+    faqat sanoq (`window_stats`) yo'li tekshiriladi.
+    """
+    from app.llm import Task
+
+    samples = [_hit(i, chat_id=1) for i in range(1, 11)]  # ≤10 — qopqoqning o'zi
+
+    async def fake_run_window(
+        _session_factory: Any,
+        *,
+        account_id: int,
+        plan: DS.DeepPlan,
+        question: str,
+        mode: str,
+        meter: Any,
+        taint: Any,
+        events: Any = None,
+        chat_titles: Any = None,
+        all_chats: Any = None,
+        deadline: Any = None,
+        confirm: bool = True,
+        locale: str = "uz",
+    ) -> SCS.ScaleOutcome:
+        assert plan.window_stats is True  # aynan sanoq yo'li chaqirilyapti
+        count = WIN.WindowCount(total=87, chats=3, groups=5)
+        return SCS.ScaleOutcome(
+            evidence=list(samples),
+            pool=list(samples),
+            stats=SCS.ScanStats(
+                pulled=87, candidates=len(samples), kept=len(samples), evidence=len(samples)
+            ),
+            window=WIN.WindowSpec(
+                account_id=account_id, chats=None, since=None, until=NOW, direction="out"
+            ),
+            window_count=count,
+            window_stats="## window stats\nrank by recipient chat (descending, top 3):\n"
+            "1. Nurbek: 40 (46.0%)\n2. Aziz: 30 (34.5%)\n3. Ish chat: 17 (19.5%)",
+        )
+
+    monkeypatch.setattr(WIN, "run_window", fake_run_window)
+    llm = FakeLLM(synth="Bu yilda eng ko'p Nurbekka yozgansiz #c1m101.")
+
+    result = await DS.run_deep_search(
+        factory,  # type: ignore[arg-type]
+        1,
+        10,
+        "men bu yilda kimga eng ko'p xabar yuborganman!",
+        locale="uz",
+        llm=llm,
+    )
+
+    assert result.plan["retrieval_kind"] == "window"
+    assert result.plan["window_stats"] is True
+    assert llm.task_for(DEEP_SYNTH_PROMPT) == Task.SEARCH
+    synth_turn = llm.user_turn(DEEP_SYNTH_PROMPT)
+    # Namuna satrlari dalil konvertida `#c<chat>m<tg_msg_id>` sifatida keladi.
+    assert synth_turn.count("#c1m") <= WIN.STATS_TOP_N * WIN.STATS_SAMPLE_PER_CHAT
     # Soxta LLM javobida ham jumla yo'q — regressiya aynan shu edi.
     assert "tashqaridagi ochiq kanallar" not in result.answer
     assert "external channel" not in result.answer.lower()

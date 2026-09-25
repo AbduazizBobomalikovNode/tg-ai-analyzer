@@ -617,9 +617,13 @@ envelope was computed by code with count(*) over EVERY message in the asked time
 estimate, never round them differently, never invent a name or a number that is not in the \
 block. Answer with a short ranked table taken from the block (rank, chat or person, \
 messages, share %), then the total for the window and the direction (messages the owner \
-sent / received / both). The message lines after the block are only a few newest samples \
-per top chat — use them at most as an illustration with their citation token, never as \
-the basis of a count. If the window is empty, say so plainly."""
+sent / received / both). When direction is "both", the block's rank is by MUTUAL \
+conversation — min(messages sent, messages received) — not by raw message count, so \
+mention that basis in one short clause when it matters (for example when a big, mostly \
+one-sided chat is visibly absent from the top of the ranking). The message lines after the \
+block are only a few newest samples per top chat — use them at most as an illustration \
+with their citation token, never as the basis of a count. If the window is empty, say so \
+plainly."""
 
 __all__ = [
     "CAPABILITIES_EN",

@@ -390,9 +390,11 @@ STATS_TOP_CHATS = 20
 STATS_TOP_SENDERS = 20
 
 #: Reytingda ko'rsatiladigan chat soni (namunalar ham shulardan olinadi).
-STATS_TOP_N = 10
+#: Sintez raqamlardan qiladi (`STATS_SYNTH_NOTE`), namuna faqat illyustratsiya —
+#: shuning uchun arzon: 5 chat x 2 xabar = ≤10 satr (narx o'lchovi, 2-vazifa).
+STATS_TOP_N = 5
 #: Har top chatdan illyustratsiya uchun eng yangi xabarlar soni.
-STATS_SAMPLE_PER_CHAT = 3
+STATS_SAMPLE_PER_CHAT = 2
 
 
 @dataclass(slots=True)
@@ -402,6 +404,7 @@ class ChatStat:
     chat_id: int
     n: int
     mine: int = 0  # shundan men yozganlarim (`messages.out`)
+    theirs: int = 0  # shundan ular yozganlari (`n - mine`)
     chat_type: str = ""
     first_at: datetime | None = None
     last_at: datetime | None = None
@@ -424,11 +427,13 @@ async def stats_window(
     """Chat va yuboruvchi bo'yicha agregatlar — **xabar tortilmaydi**."""
     out = WindowStats(direction=spec.direction)
     mine = func.count().filter(Message.out.is_(True))
+    theirs = func.count().filter(Message.out.is_(False))
     per = (
         select(
             Message.chat_id,
             func.count().label("n"),
             mine.label("mine"),
+            theirs.label("theirs"),
             Chat.type,
             func.min(Message.published_at),
             func.max(Message.published_at),
@@ -437,18 +442,34 @@ async def stats_window(
         .join(Chat, Chat.id == Message.chat_id)
         .where(*_conds(spec))
         .group_by(Message.chat_id, Chat.type)
-        .order_by(func.count().desc(), Message.chat_id)
-        .limit(top)
     )
+    if spec.direction == "both":
+        # "Kim bilan gaplashdim" — reyting **suhbat**, ya'ni ikki tomon ham
+        # yozgan chatlar bo'yicha bo'lishi kerak: bitta xabar yozib qo'ygan
+        # 13 mingta xabarli kanal "suhbatdosh" bo'lib chiqmasin. Ball —
+        # `min(mine, theirs)` (mutuallik), teng bo'lsa `mine`, keyin jami
+        # bo'yicha. `mine == 0` chatlar `_conds` semi-join'i bilan allaqachon
+        # tashlangan (invariant: faqat men yozgan chatlar keladi); qo'shimcha
+        # `theirs > 0` shartisiz esa "javobsiz yozganlarim" ham reytingga
+        # kirar edi. Bu chatlarning xabarlari **jami sanoqda** qoladi
+        # (`count_window`), faqat shu reytingdan chiqadi.
+        score = func.least(mine, theirs)
+        per = per.having(and_(mine > 0, theirs > 0)).order_by(
+            score.desc(), mine.desc(), func.count().desc(), Message.chat_id
+        )
+    else:
+        per = per.order_by(func.count().desc(), Message.chat_id)
+    per = per.limit(top)
     for row in (await session.execute(per)).all():
         out.per_chat.append(
             ChatStat(
                 chat_id=int(row[0]),
                 n=int(row[1] or 0),
                 mine=int(row[2] or 0),
-                chat_type=str(row[3] or ""),
-                first_at=row[4],
-                last_at=row[5],
+                theirs=int(row[3] or 0),
+                chat_type=str(row[4] or ""),
+                first_at=row[5],
+                last_at=row[6],
             )
         )
     if spec.direction != "out":
@@ -578,7 +599,9 @@ _DIRECTION_TEXT = {
     ),
     "both": (
         "all messages (sent and received) in chats where the owner wrote at least once "
-        "in this window"
+        "in this window; the ranking below is by MUTUAL conversation "
+        "(min(sent, received)), not by raw message count, so a chat with many messages "
+        "but only a one-sided reply does not outrank an actual back-and-forth"
     ),
     "": "all messages in the window (no direction filter)",
 }
@@ -613,16 +636,25 @@ def _render_stats(
         lines.append(f"of these sent by the owner: {stats.mine_total}")
     label = "recipient chat" if stats.direction == "out" else "chat"
     if stats.per_chat:
-        lines.append(f"rank by {label} (descending, top {len(stats.per_chat)}):")
+        if stats.direction == "both":
+            lines.append(
+                f"rank by chat (mutual conversation — ranked by min(sent, received), not "
+                f"by total message count; chats where only one side ever wrote are left "
+                f"out of this ranking even though their messages still count in the "
+                f"window total; top {len(stats.per_chat)}):"
+            )
+        else:
+            lines.append(f"rank by {label} (descending, top {len(stats.per_chat)}):")
         for i, row in enumerate(stats.per_chat, 1):
             title = U.attr(names.get(row.chat_id, "")) or f"chat {row.chat_id}"
             share = (100.0 * row.n / total) if total else 0.0
             kind = f" [{U.attr(row.chat_type)}]" if row.chat_type else ""
-            mine = (
-                f"; sent by owner: {row.mine}"
-                if stats.direction not in ("out", "in") and row.mine
-                else ""
-            )
+            if stats.direction == "both":
+                mine = f"; sent by owner: {row.mine}, received: {row.theirs}"
+            elif stats.direction not in ("out", "in") and row.mine:
+                mine = f"; sent by owner: {row.mine}"
+            else:
+                mine = ""
             lines.append(
                 f"{i}. {title}{kind}: {row.n} ({share:.1f}%){mine}; "
                 f"{_day(row.first_at)} … {_day(row.last_at)}"
