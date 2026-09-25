@@ -58,11 +58,11 @@ MODE_RANK = {"fast": 0, "deep": 1, "exhaustive": 2}
 
 # ─── chat_digest byudjetlari (kodda) ─────────────────────────────────────────
 DIGEST_MAX_CHATS = 3
-DIGEST_DAY_ROWS = 10  # keshdan olinadigan eng yangi kun dayjestlari
+DIGEST_DAY_ROWS = 7  # keshdan olinadigan eng yangi kun dayjestlari
 DIGEST_WEEK_ROWS = 8  # hafta tugunlari (level 3) — uzoq tarix uchun
-DIGEST_TEXT_CHARS = 600
+DIGEST_TEXT_CHARS = 450
 DIGEST_COMPUTE_DAYS = 5  # kesh bo'sh bo'lsa ko'pi bilan shuncha kun hisoblanadi
-DIGEST_SAMPLE_MSGS = 15  # sitata uchun eng yangi xabarlar
+DIGEST_SAMPLE_MSGS = 12  # sitata uchun eng yangi xabarlar
 WINDOW_DEFAULT_DAYS = 7  # oynasiz `window` → oxirgi 7 kun (izoh bilan)
 
 #: Foydalanuvchining **o'z** matnida yozish niyati — `write_propose` shu bo'lmasa
@@ -474,6 +474,8 @@ async def _chat_digest(ctx: RunState, args: dict[str, Any]) -> SkillResult:
     week_rows_used = 0
     computed_days = 0
     first_all: datetime | None = None
+    covered_from: datetime | None = None
+    covered_to: datetime | None = None
     last_all: datetime | None = None
     total_all = 0
     mine_all = 0
@@ -600,6 +602,16 @@ async def _chat_digest(ctx: RunState, args: dict[str, Any]) -> SkillResult:
             for day, n, text in sorted(day_items, key=lambda x: x[0], reverse=True):
                 body = U.neutralize(S.compact_text(text, max_chars=DIGEST_TEXT_CHARS))
                 lines.append(f"- {day.date().isoformat()} ({n} msgs): {body}")
+        spans = [d for d, _, _ in day_items] + [w.starts_at for w in weeks]
+        if spans:
+            lo, hi = min(spans), max(spans)
+            covered_from = lo if covered_from is None or lo < covered_from else covered_from
+            covered_to = hi if covered_to is None or hi > covered_to else covered_to
+            lines.insert(
+                2,
+                f"digests cover: {lo.date().isoformat()} → {hi.date().isoformat()} "
+                "(the message count above is the whole history)",
+            )
         if not weeks and not day_items:
             lines.append("(no digests cached for this chat — only the newest messages below)")
         blocks.append("\n".join(lines))
@@ -611,7 +623,23 @@ async def _chat_digest(ctx: RunState, args: dict[str, Any]) -> SkillResult:
         Fact("chat_mine", mine_all, label="of them sent by the owner", source="chat_digest")
     )
     span = period_facts(since or first_all, until or last_all, source="chat_digest", tz=ctx.tz)
-    facts.append(Fact("chat_days", span[0].value, label=span[0].label, source="chat_digest"))
+    facts.append(
+        Fact(
+            "chat_days",
+            span[0].value,
+            label="days from the first to the last message",
+            source="chat_digest",
+        )
+    )
+    if covered_from is not None and covered_to is not None:
+        facts.append(
+            Fact(
+                "digest_period",
+                f"{covered_from.date().isoformat()} → {covered_to.date().isoformat()}",
+                label="period the cached digests cover",
+                source="chat_digest",
+            )
+        )
     sample.sort(key=lambda h: h.date or datetime.min.replace(tzinfo=UTC))
     ctx.add_candidates(sample)
     ctx.add_evidence(sample)
