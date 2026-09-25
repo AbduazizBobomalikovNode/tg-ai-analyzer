@@ -61,6 +61,7 @@ from app.services import cluster as C
 from app.services import deep_search as DS
 from app.services import scale_search as SC
 from app.services import search as S
+from app.services import senders as SN
 from app.services import timewin as TW
 from app.services import untrusted as U
 from app.services.prompts_deep import (
@@ -589,10 +590,15 @@ class WindowStats:
 
 
 async def stats_window(
-    session: AsyncSession, spec: WindowSpec, *, top: int = STATS_TOP_CHATS
+    session: AsyncSession,
+    spec: WindowSpec,
+    *,
+    top: int = STATS_TOP_CHATS,
+    locale: str = "uz",
 ) -> WindowStats:
     """Chat va yuboruvchi bo'yicha agregatlar — **xabar tortilmaydi**."""
     out = WindowStats(direction=spec.direction)
+    owner_tg_id, owner_display = await SN.owner_info(session, spec.account_id)
     mine = func.count().filter(Message.out.is_(True))
     theirs = func.count().filter(Message.out.is_(False))
     per = (
@@ -661,7 +667,14 @@ async def stats_window(
             .limit(STATS_TOP_SENDERS)
         )
         for sender_id, display, n in (await session.execute(per_sender)).all():
-            label = (str(display).strip() if display else "") or f"user:{int(sender_id)}"
+            # Himoya qatlami: so'rov `out=False` bilan egasini chiqarib
+            # tashlaydi, lekin eski qatorlarda `out` ishonchsiz bo'lishi
+            # mumkin (CLAUDE.md) — `sender_id` to'g'ridan-to'g'ri
+            # `tg_account_id` bilan solishtiriladi.
+            if SN.is_owner_message(sender_id=sender_id, out=False, owner_tg_id=owner_tg_id):
+                label = SN.owner_label(locale, display_name=owner_display)
+            else:
+                label = (str(display).strip() if display else "") or f"user:{int(sender_id)}"
             out.per_sender.append((label, int(n or 0)))
     if spec.direction != "out":
         total_mine = (
@@ -993,6 +1006,7 @@ async def run_window(
             titles=titles,
             account_id=account_id,
             started=started,
+            locale=locale,
         )
     stats.buckets_planned = max(count.groups, 0)
 
@@ -1079,6 +1093,13 @@ async def run_window(
 
     async with session_factory() as session:
         pool = await DS._hydrate(session, pool, account_id=account_id)
+        owner_tg_id, owner_display = await SN.owner_info(session, account_id)
+    # Hydratsiya (`deep_search._hydrate`) egasini ham `user:<id>` deb
+    # yozadi — bu yerda render vaqtida "Men" bilan almashtiriladi (single
+    # source of truth: `services.senders`).
+    SN.relabel_owner_hits(
+        pool, owner_tg_id=owner_tg_id, owner_display_name=owner_display, locale=locale
+    )
     taint.add_hits(pool)
     # Kross-post / takror: bir xil uzun matn bir necha chatda (vakansiya
     # kanallari) — filtr, map va sintez uni har safar qayta o'qirdi.
@@ -1186,6 +1207,7 @@ async def _run_stats(
     titles: dict[int, str],
     account_id: int,
     started: float,
+    locale: str = "uz",
 ) -> SC.ScaleOutcome:
     """Sanoq yo'li: `count(*)` agregatlari + top chatlardan bir nechta namuna.
 
@@ -1216,13 +1238,17 @@ async def _run_stats(
     samples: list[S.Hit] = []
     if count.total:
         async with session_factory() as session:
-            agg = await stats_window(session, spec)
+            agg = await stats_window(session, spec, locale=locale)
         top_ids = [row.chat_id for row in agg.per_chat[:STATS_TOP_N]]
         async with session_factory() as session:
             samples = await stats_samples(session, spec, top_ids, titles=titles)
         if samples:
             async with session_factory() as session:
                 samples = await DS._hydrate(session, samples, account_id=account_id)
+                owner_tg_id, owner_display = await SN.owner_info(session, account_id)
+            SN.relabel_owner_hits(
+                samples, owner_tg_id=owner_tg_id, owner_display_name=owner_display, locale=locale
+            )
             taint.add_hits(samples)
     samples.sort(key=lambda h: h.date or datetime.min.replace(tzinfo=UTC))
     outcome.pool = list(samples)

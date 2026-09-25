@@ -532,8 +532,12 @@ async def test_search_messages_filters_before_ranking_not_after(
     async def fake_names(session: Any, account_id: int, ids: Any) -> dict[int, str]:
         return {5: "Nurbek (@nurbek)"}
 
+    async def fake_owner(session: Any, account_id: int) -> tuple[int | None, str]:
+        return None, ""
+
     monkeypatch.setattr(S, "hybrid_search", fake_hybrid)
     monkeypatch.setattr(T, "sender_names", fake_names)
+    monkeypatch.setattr(T.SN, "owner_info", fake_owner)
 
     chat = _chat_row()
 
@@ -1203,12 +1207,16 @@ async def test_search_messages_lists_recent_messages_when_only_from_user_is_give
     async def names(session: Any, account_id: int, ids: Any) -> dict[int, str]:
         return {5: "Nurbek (@nurbek)"}
 
+    async def owner(session: Any, account_id: int) -> tuple[int | None, str]:
+        return None, ""
+
     async def boom(*a: Any, **kw: Any) -> Any:  # pragma: no cover
         raise AssertionError("bo'sh so'rovda `hybrid_search` chaqirilmaydi")
 
     _wire_chat(monkeypatch, _chat_row())
     monkeypatch.setattr(T, "resolve_senders", senders)
     monkeypatch.setattr(T, "sender_names", names)
+    monkeypatch.setattr(T.SN, "owner_info", owner)
     monkeypatch.setattr(S, "hybrid_search", boom)
 
     session = _SqlSession(rows)
@@ -1241,9 +1249,13 @@ async def test_get_recent_messages_narrows_to_one_sender(monkeypatch: pytest.Mon
     async def names(session: Any, account_id: int, ids: Any) -> dict[int, str]:
         return {5: "Nurbek (@nurbek)"}
 
+    async def owner(session: Any, account_id: int) -> tuple[int | None, str]:
+        return None, ""
+
     _wire_chat(monkeypatch, _chat_row())
     monkeypatch.setattr(T, "resolve_senders", senders)
     monkeypatch.setattr(T, "sender_names", names)
+    monkeypatch.setattr(T.SN, "owner_info", owner)
 
     session = _SqlSession([_msg(1, 5), _msg(2, 5)])
     ctx = T.ToolContext(session=session, account_id=1, now=NOW)  # type: ignore[arg-type]

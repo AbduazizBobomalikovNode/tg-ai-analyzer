@@ -28,6 +28,7 @@ from app.llm import LLM, ToolSpec
 from app.logging import get_logger
 from app.mtproto.ratelimit import MethodBuckets
 from app.services import search as S
+from app.services import senders as SN
 from app.services import tg_search as TS
 from app.services import untrusted as U
 from app.services.analytics import chat_stats, msg_link
@@ -211,13 +212,27 @@ async def resolve_senders(session: AsyncSession, account_id: int, needle: str) -
 
 
 def _line(
-    chat: Chat, m: Message, *, with_link: bool = True, names: Mapping[int, str] | None = None
+    chat: Chat,
+    m: Message,
+    *,
+    with_link: bool = True,
+    names: Mapping[int, str] | None = None,
+    owner_tg_id: int | None = None,
+    owner_display_name: str | None = None,
+    locale: str | None = None,
 ) -> str:
     when = m.published_at.strftime("%Y-%m-%d %H:%M") if m.published_at else "?"
     who = (
         chat.title
         if chat.type == "channel" and not m.sender_id
-        else ((names or {}).get(int(m.sender_id)) or f"user:{m.sender_id}" if m.sender_id else "—")
+        else SN.sender_label(
+            m.sender_id,
+            out=bool(getattr(m, "out", False)),
+            owner_tg_id=owner_tg_id,
+            owner_display_name=owner_display_name,
+            names=names,
+            locale=locale,
+        )
     )
     body = S.compact_text(m.text or "", max_chars=500) or (
         f"[{m.media_type}]" if m.media_type else ""
@@ -339,6 +354,7 @@ async def search_messages(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     chat = await _resolve_chat(ctx, args)
     if chat is None:
         return _no_chat()
+    owner_tg_id, owner_display = await SN.owner_info(ctx.session, ctx.account_id)
     query = str(args.get("query") or "").strip()
     limit = max(1, min(int(args.get("limit") or 15), SEARCH_LIMIT_MAX))
     window = _parse_days(args.get("days"))
@@ -367,7 +383,10 @@ async def search_messages(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         names = await sender_names(
             ctx.session, ctx.account_id, (m.sender_id for m in msgs if m.sender_id)
         )
-        lines = [_line(chat, m, names=names) for m in msgs]
+        lines = [
+            _line(chat, m, names=names, owner_tg_id=owner_tg_id, owner_display_name=owner_display)
+            for m in msgs
+        ]
         head = (
             f'chat="{chat.title}" from="{from_user}" messages={len(lines)} '
             "(newest last, no query — not ranked)"
@@ -391,7 +410,11 @@ async def search_messages(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     names = await sender_names(
         ctx.session, ctx.account_id, (m.sender_id for m in rows.values() if m.sender_id)
     )
-    lines = [_line(chat, rows[i], names=names) for i in ids if i in rows]
+    lines = [
+        _line(chat, rows[i], names=names, owner_tg_id=owner_tg_id, owner_display_name=owner_display)
+        for i in ids
+        if i in rows
+    ]
     head = f'chat="{chat.title}" query="{query}" hits={len(lines)} (ranked, best first)'
     return ToolResult(
         _clip(head + "\n" + "\n".join(lines)), meta={"chat": chat.title, "hits": len(lines)}
@@ -402,6 +425,7 @@ async def get_recent_messages(ctx: ToolContext, args: dict[str, Any]) -> ToolRes
     chat = await _resolve_chat(ctx, args)
     if chat is None:
         return _no_chat()
+    owner_tg_id, owner_display = await SN.owner_info(ctx.session, ctx.account_id)
     limit = max(1, min(int(args.get("limit") or 30), RECENT_LIMIT_MAX))
     from_user = str(args.get("from_user") or "").strip()
     sender_ids: list[int] | None = None
@@ -418,7 +442,10 @@ async def get_recent_messages(ctx: ToolContext, args: dict[str, Any]) -> ToolRes
     names = await sender_names(
         ctx.session, ctx.account_id, (m.sender_id for m in msgs if m.sender_id)
     )
-    lines = [_line(chat, m, names=names) for m in msgs]
+    lines = [
+        _line(chat, m, names=names, owner_tg_id=owner_tg_id, owner_display_name=owner_display)
+        for m in msgs
+    ]
     who = f' from="{from_user}"' if from_user else ""
     head = f'chat="{chat.title}"{who} latest {len(lines)} messages (oldest first)'
     return ToolResult(
@@ -443,10 +470,15 @@ async def get_message_context(ctx: ToolContext, args: dict[str, Any]) -> ToolRes
     msgs = rows.scalars().all()
     if not msgs:
         return ToolResult(f'no messages around #{mid} in "{chat.title}"', ok=False)
+    owner_tg_id, owner_display = await SN.owner_info(ctx.session, ctx.account_id)
     names = await sender_names(
         ctx.session, ctx.account_id, (m.sender_id for m in msgs if m.sender_id)
     )
-    lines = [("→ " if m.tg_msg_id == mid else "  ") + _line(chat, m, names=names) for m in msgs]
+    lines = [
+        ("→ " if m.tg_msg_id == mid else "  ")
+        + _line(chat, m, names=names, owner_tg_id=owner_tg_id, owner_display_name=owner_display)
+        for m in msgs
+    ]
     return ToolResult(
         _clip(f'chat="{chat.title}" around #{mid}\n' + "\n".join(lines)), meta={"chat": chat.title}
     )
@@ -601,6 +633,9 @@ def _hit_line(
     chat_title: str | None = None,
     with_chat: bool = False,
     with_link: bool = True,
+    owner_tg_id: int | None = None,
+    owner_display_name: str | None = None,
+    locale: str | None = None,
 ) -> str:
     """`ServerHit` → bitta qator. Manba — javobdagi entity ro'yxatlari.
 
@@ -608,12 +643,20 @@ def _hit_line(
     to'qiydi (`t.me/c/<lokal id>/<msg>` — lokal DB id bilan, ya'ni har doim
     noto'g'ri). `ServerHit.link` allaqachon to'ldirilgan (`tg_search.tg_link`,
     `persist_server_hits`) — shuni beramiz.
+
+    `h.sender` `tg_search.who_of` dan keladi va entity nomi topilmasa
+    `user:<id>` bo'ladi — akkaunt egasining o'zi shu holatga tushsa (masalan
+    Saved Messages'da), `owner_tg_id` berilganda "Men" bilan almashtiriladi
+    (`services.senders`).
     """
     ts = h.date.strftime("%Y-%m-%d %H:%M") if h.date else "?"
     title = chat_title or h.chat_title
     where = f' in "{title}"' if (chat_title or with_chat) else ""
     link = f" {h.link}" if with_link and h.link else ""
-    return f"[{ts}] #{h.tg_msg_id} {h.sender}{where}: {h.text}{link}"
+    who = h.sender
+    if owner_tg_id is not None and who == SN.owner_marker(owner_tg_id):
+        who = SN.owner_label(locale, display_name=owner_display_name)
+    return f"[{ts}] #{h.tg_msg_id} {who}{where}: {h.text}{link}"
 
 
 # ─── shift (bucket) ──────────────────────────────────────────────────────────
@@ -829,11 +872,24 @@ def _render_hits(
     *,
     chat_title: str | None = None,
     with_chat: bool = False,
+    owner_tg_id: int | None = None,
+    owner_display_name: str | None = None,
+    locale: str | None = None,
 ) -> ToolResult:
     """`ServerHits` → model uchun matn. Tool'lar shu yerda yagona formatni oladi."""
     if result.error_text is not None:
         return ToolResult(result.error_text, ok=False)
-    lines = [_hit_line(h, chat_title=chat_title, with_chat=with_chat) for h in result.hits]
+    lines = [
+        _hit_line(
+            h,
+            chat_title=chat_title,
+            with_chat=with_chat,
+            owner_tg_id=owner_tg_id,
+            owner_display_name=owner_display_name,
+            locale=locale,
+        )
+        for h in result.hits
+    ]
     if not lines:
         return ToolResult(
             f"no matches for {_what(opts)} ({scope}) on Telegram server",
@@ -889,7 +945,15 @@ async def search_telegram(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         peer=peer,
         chat_title=chat.title,
     )
-    return _render_hits(result, opts, f'chat="{chat.title}"', chat_title=chat.title)
+    owner_tg_id, owner_display = await SN.owner_info(ctx.session, ctx.account_id)
+    return _render_hits(
+        result,
+        opts,
+        f'chat="{chat.title}"',
+        chat_title=chat.title,
+        owner_tg_id=owner_tg_id,
+        owner_display_name=owner_display,
+    )
 
 
 _GLOBAL_SCOPES = TS.GLOBAL_SCOPES
@@ -918,7 +982,15 @@ async def search_global(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         limit=opts["limit"],
     )
     scope = f"scope={scope_name} chats" + (" (archived folder)" if archived else "")
-    return _render_hits(result, opts, scope, with_chat=True)
+    owner_tg_id, owner_display = await SN.owner_info(ctx.session, ctx.account_id)
+    return _render_hits(
+        result,
+        opts,
+        scope,
+        with_chat=True,
+        owner_tg_id=owner_tg_id,
+        owner_display_name=owner_display,
+    )
 
 
 # ─── a'zolar ro'yxati ────────────────────────────────────────────────────────
@@ -1482,7 +1554,16 @@ async def saved_messages_search(ctx: ToolContext, args: dict[str, Any]) -> ToolR
             f"no matches for {_what(opts)} in Saved Messages",
             meta={"query": opts["q"], "hits": 0, "source": "telegram"},
         )
-    lines = [_hit_line(h, chat_title="Saved Messages") for h in result.hits]
+    owner_tg_id, owner_display = await SN.owner_info(ctx.session, ctx.account_id)
+    lines = [
+        _hit_line(
+            h,
+            chat_title="Saved Messages",
+            owner_tg_id=owner_tg_id,
+            owner_display_name=owner_display,
+        )
+        for h in result.hits
+    ]
     return ToolResult(
         _clip(_search_head('chat="Saved Messages"', opts, len(lines)) + "\n" + "\n".join(lines)),
         meta={"query": opts["q"], "hits": len(lines), "source": "telegram"},

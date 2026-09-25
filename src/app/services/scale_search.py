@@ -82,6 +82,7 @@ from app.services import cluster as C
 from app.services import deep_search as DS
 from app.services import nodes as N
 from app.services import search as S
+from app.services import senders as SN
 from app.services import untrusted as U
 from app.services.prompts_deep import (
     DEEP_SYNTH_PROMPT,
@@ -2421,6 +2422,14 @@ async def run_scale(
     # ── gidratatsiya + (c) dedup ────────────────────────────────────────────
     async with session_factory() as session:
         pool = await DS._hydrate(session, pool, account_id=account_id)
+        owner_tg_id, owner_display = await SN.owner_info(session, account_id)
+    # Hydratsiya egasini ham `user:<id>` deb yozadi — render vaqtida "Men"
+    # bilan almashtiriladi (yagona joy: `services.senders`), shu bilan
+    # `filter_line`/`build_map_envelope` qo'shimcha o'zgarishsiz to'g'ri
+    # yorliq oladi.
+    SN.relabel_owner_hits(
+        pool, owner_tg_id=owner_tg_id, owner_display_name=owner_display, locale=locale
+    )
     taint.add_hits(pool)  # begona matn quvurga kirdi — reja/refleksiya uchun qopqoq
     pool = dedup_fast(pool)
     stats.candidates = len(pool)
