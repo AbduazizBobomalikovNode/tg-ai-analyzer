@@ -1,11 +1,14 @@
 """Taxminiy narxlar (USD / 1M token) — dashboard uchun xarajat bahosi.
 
-Bu **taxmin**: provider narxlari o'zgaradi, cache/batch chegirmalari hisobga
-olinmaydi. `claude_code` — obuna, marginal xarajat 0. Noma'lum model → None.
+Bu **taxmin**: provider narxlari o'zgaradi. Batch (`BATCH_PRICES`), kontekst keshi
+(`CACHED_PRICES`), thinking (output narxida) va Flex tier hisobga olinadi;
+`claude_code` — obuna, marginal xarajat 0. Noma'lum model → None.
 Yangilash: shu jadval; kod boshqa joyda narx bilmaydi.
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 # (input, output) USD per 1M token
 PRICES: dict[str, tuple[float, float]] = {
@@ -102,10 +105,55 @@ BATCH_PRICES: dict[str, float] = {
 }
 
 
+# Kontekst keshi (implicit/explicit) — **o'qilgan** kesh tokeni narxi, USD / 1M.
+# Manba: ai.google.dev/gemini-api/docs/pricing, 2026-09-25 tekshirilgan
+# ("Context caching price", Standard, ≤200k prompt). Gemini'da
+# `cached_content_token_count` `prompt_token_count` ning **qismi** — ya'ni
+# keshlangan tokenlar input narxi o'rniga shu narxda hisoblanadi.
+# Jadvalda yo'q model (masalan 3.5-flash-lite: "Not available", Claude —
+# `input_tokens` kesh o'qishini o'z ichiga olmaydi) → kesh tokeni to'liq
+# input narxida qoladi va jarayonda bir marta `pricing.no_cached_price` log'i.
+CACHED_PRICES: dict[str, float] = {
+    "gemini-3.5-flash": 0.15,
+    "gemini-3.1-pro-preview": 0.20,
+    "gemini-pro-latest": 0.20,
+    "gemini-3.1-flash-lite": 0.025,
+    "gemini-3.6-flash": 0.075,
+    "gemini-3.7-flash": 0.075,
+    "gemini-3.8-flash": 0.075,
+    "gemini-flash-latest": 0.075,
+}
+
+#: Flex tier (`service_tier="flex"`) — Google e'lon qilgan narx Standard'ning
+#: **yarmi** (input, output+thinking, kesh — hammasi), 2026-09-25 tekshirilgan.
+#: Faqat Gemini'da; boshqa provider'da tier e'tiborsiz.
+FLEX_MULTIPLIER = 0.5
+TIER_STANDARD = "standard"
+TIER_FLEX = "flex"
+
+_no_cached_warned: set[str] = set()
+
+
 def estimate_cost(
-    provider: str, model: str, tokens_in: int, tokens_out: int, *, batch: bool = False
+    provider: str,
+    model: str,
+    tokens_in: int,
+    tokens_out: int,
+    *,
+    batch: bool = False,
+    tokens_thinking: int = 0,
+    tokens_cached: int = 0,
+    tier: str = TIER_STANDARD,
 ) -> float | None:
-    """Taxminiy xarajat. `batch=True` — Batch API (arzonroq, `BATCH_PRICES`)."""
+    """Taxminiy xarajat. `batch=True` — Batch API (arzonroq, `BATCH_PRICES`).
+
+    * `tokens_thinking` — **output narxida** (Google: "output price includes
+      thinking tokens"). Gemini `candidates_token_count` ularni o'z ichiga
+      olmaydi, shuning uchun alohida qo'shiladi.
+    * `tokens_cached` — `tokens_in` ning keshdan o'qilgan qismi; narx
+      `CACHED_PRICES` da bo'lsa shu narxda, bo'lmasa to'liq input narxida.
+    * `tier="flex"` — Gemini'da hammasi `FLEX_MULTIPLIER` bilan.
+    """
     if provider == "claude_code":
         return 0.0
     key = _normalize(model)
@@ -113,7 +161,41 @@ def estimate_cost(
     if price is None:
         return None
     price_in = BATCH_PRICES[key] if batch and key in BATCH_PRICES else price[0]
-    return round((tokens_in * price_in + tokens_out * price[1]) / 1_000_000, 6)
+    cached = max(0, min(int(tokens_cached or 0), int(tokens_in or 0)))
+    cached_price = CACHED_PRICES.get(key)
+    if cached and cached_price is None:
+        if key not in _no_cached_warned:
+            _no_cached_warned.add(key)
+            from app.logging import get_logger
+
+            get_logger(__name__).info("pricing.no_cached_price", model=key, cached=cached)
+        cached = 0
+    cost_in = (tokens_in - cached) * price_in + cached * (cached_price or 0.0)
+    cost_out = (tokens_out + max(0, int(tokens_thinking or 0))) * price[1]
+    total = (cost_in + cost_out) / 1_000_000
+    if tier == TIER_FLEX and provider == "gemini":
+        total *= FLEX_MULTIPLIER
+    return round(total, 6)
+
+
+def usage_cost(provider: str, model: str, usage: Any, *, tier: str = TIER_STANDARD) -> float | None:
+    """`Usage` obyektidan to'g'ridan-to'g'ri narx (thinking va kesh bilan)."""
+    return estimate_cost(
+        provider,
+        model,
+        int(getattr(usage, "tokens_in", 0) or 0),
+        int(getattr(usage, "tokens_out", 0) or 0),
+        tokens_thinking=int(getattr(usage, "thinking_tokens", 0) or 0),
+        tokens_cached=int(getattr(usage, "cached_tokens", 0) or 0),
+        tier=tier,
+    )
+
+
+def result_cost(res: Any) -> float | None:
+    """`ChatResult` narxi — provider, model, usage va ishlatilgan tier bilan."""
+    return usage_cost(
+        res.provider, res.model, res.usage, tier=getattr(res, "service_tier", "") or TIER_STANDARD
+    )
 
 
 def _normalize(model: str) -> str:

@@ -30,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.db.models import AgentRun, Chat, ChatType, Conversation, ConversationMessage, Message
 from app.llm import LLM, LLMError, Msg, Task
-from app.llm.pricing import estimate_cost
+from app.llm.pricing import estimate_cost, result_cost
 from app.logging import get_logger
 from app.mtproto.pool import MessageInfo, PoolError, pool
 from app.observability import AGENT_FALLBACKS
@@ -506,9 +506,7 @@ async def send_message(
     latency_ms = int((time.monotonic() - started) * 1000)
     tokens_in = result.usage.tokens_in + extra_in
     tokens_out = result.usage.tokens_out + extra_out
-    cost = estimate_cost(
-        result.provider, result.model, result.usage.tokens_in, result.usage.tokens_out
-    )
+    cost = result_cost(result)
     answer = result.text.strip() or _empty_answer(result.finish_reason)
     assistant_row = ConversationMessage(
         conversation_id=conversation.id,
@@ -518,6 +516,8 @@ async def send_message(
         provider=result.provider,
         tokens_in=tokens_in,
         tokens_out=tokens_out,
+        tokens_thinking=result.usage.thinking_tokens,
+        tokens_cached=result.usage.cached_tokens,
         context=context_used,
         task=str(task),
         latency_ms=latency_ms,
@@ -716,7 +716,14 @@ async def _send_via_agent(
         conversation_id=conversation.id,
     )
     answer = outcome.text or _empty_answer(outcome.finish_reason)
-    cost = estimate_cost(outcome.provider, outcome.model, outcome.tokens_in, outcome.tokens_out)
+    cost = estimate_cost(
+        outcome.provider,
+        outcome.model,
+        outcome.tokens_in,
+        outcome.tokens_out,
+        tokens_thinking=outcome.tokens_thinking,
+        tokens_cached=outcome.tokens_cached,
+    )
     context_used: dict[str, Any] = {
         "mode": "agent",
         "account_id": account_id,
@@ -741,6 +748,12 @@ async def _send_via_agent(
         "cache_hits": outcome.cache_hits,
         "est_tokens": outcome.result_tokens,
         "run_id": outcome.run_id,
+        # Token hisobi (docs/cost-research.md, 1-band): thinking output narxida,
+        # cached — `tokens_in` ning keshdan o'qilgan qismi.
+        "tokens_in": outcome.tokens_in,
+        "tokens_out": outcome.tokens_out,
+        "tokens_thinking": outcome.tokens_thinking,
+        "tokens_cached": outcome.tokens_cached,
         "action_ids": outcome.action_ids,
         "messages": sum(int(c.get("hits") or c.get("n") or 0) for c in outcome.tool_calls) or None,
     }
@@ -753,6 +766,8 @@ async def _send_via_agent(
         provider=outcome.provider,
         tokens_in=outcome.tokens_in,
         tokens_out=outcome.tokens_out,
+        tokens_thinking=outcome.tokens_thinking,
+        tokens_cached=outcome.tokens_cached,
         context=context_used,
         task="tools",
         latency_ms=int((time.monotonic() - started) * 1000),
@@ -771,6 +786,8 @@ async def _send_via_agent(
         model=outcome.model,
         tokens_in=outcome.tokens_in,
         tokens_out=outcome.tokens_out,
+        tokens_thinking=outcome.tokens_thinking,
+        tokens_cached=outcome.tokens_cached,
         latency_ms=assistant_row.latency_ms,
         strategy="agent",
         tools=len(outcome.tool_calls),

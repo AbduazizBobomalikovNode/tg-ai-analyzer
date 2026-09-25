@@ -55,7 +55,7 @@ from app.db.models import (
     User,
 )
 from app.llm import LLM, LLMError, Msg, Task
-from app.llm.pricing import estimate_cost
+from app.llm.pricing import result_cost
 from app.logging import get_logger
 from app.services import untrusted as U
 from app.services.nodes import LEVEL_DAY
@@ -471,6 +471,8 @@ def validate_draft(draft: dict[str, Any], items: list[ChatSalience], *, top: int
 class _Cost:
     tokens_in: int = 0
     tokens_out: int = 0
+    tokens_thinking: int = 0
+    tokens_cached: int = 0
     cost_usd: float = 0.0
     model: str = ""
     provider: str = ""
@@ -479,9 +481,11 @@ class _Cost:
     def add(self, res: Any, task: str) -> None:
         self.tokens_in += int(res.usage.tokens_in)
         self.tokens_out += int(res.usage.tokens_out)
+        self.tokens_thinking += int(getattr(res.usage, "thinking_tokens", 0) or 0)
+        self.tokens_cached += int(getattr(res.usage, "cached_tokens", 0) or 0)
         self.model = self.model or res.model
         self.provider = self.provider or res.provider
-        c = estimate_cost(res.provider, res.model, res.usage.tokens_in, res.usage.tokens_out)
+        c = result_cost(res)
         if c:
             self.cost_usd += c
         self.calls.append(task)
@@ -615,7 +619,7 @@ async def build_briefing(
         day=str(day),
         chats=len(items),
         calls=len(cost.calls),
-        tokens=cost.tokens_in + cost.tokens_out,
+        tokens=cost.tokens_in + cost.tokens_out + cost.tokens_thinking,
     )
     BRIEFING_BUILDS.labels("ok").inc()
     return row
@@ -686,6 +690,8 @@ async def record_usage(session: AsyncSession, account: Account, cost: _Cost, tex
             provider=cost.provider,
             tokens_in=cost.tokens_in,
             tokens_out=cost.tokens_out,
+            tokens_thinking=cost.tokens_thinking,
+            tokens_cached=cost.tokens_cached,
             task="briefing",
             cost_usd=round(cost.cost_usd, 6) or None,
         )

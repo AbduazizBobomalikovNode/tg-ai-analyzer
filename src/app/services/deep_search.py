@@ -66,7 +66,7 @@ from app.db.models import (
 )
 from app.llm import LLM, ChatResult, EmbedResult, LLMError, Msg, Task
 from app.llm.base import EMBED_DOCUMENT, EmbedTaskType, ToolSpec
-from app.llm.pricing import estimate_cost
+from app.llm.pricing import result_cost, usage_cost
 from app.logging import get_logger
 from app.observability import DEEP_CANDIDATES, DEEP_COST, DEEP_LATENCY, DEEP_ROUNDS, DEEP_RUNS
 from app.services import cluster as C
@@ -709,6 +709,8 @@ class DeepResult:
     evidence_count: int = 0
     tokens_in: int = 0
     tokens_out: int = 0
+    tokens_thinking: int = 0
+    tokens_cached: int = 0
     cost_usd: float | None = None
     model: str = ""
     provider: str = ""
@@ -747,6 +749,8 @@ class DeepResult:
             "evidence": self.evidence_count,
             "tokens_in": self.tokens_in,
             "tokens_out": self.tokens_out,
+            "tokens_thinking": self.tokens_thinking,
+            "tokens_cached": self.tokens_cached,
             "cost_usd": self.cost_usd,
             "model": self.model,
             "provider": self.provider,
@@ -877,10 +881,17 @@ class _Meter:
     hisobiga tushadi (aks holda `agent_runs` yarim rost bo'ladi).
     """
 
+    #: Sinf darajasidagi sukut — `__init__` siz yasalgan o'lchagich (testlar,
+    #: eski serializatsiya) ham yangi maydonlarsiz yiqilmasin.
+    tokens_thinking: int = 0
+    tokens_cached: int = 0
+
     def __init__(self, inner: LLM) -> None:
         self.inner = inner
         self.tokens_in = 0
         self.tokens_out = 0
+        self.tokens_thinking = 0
+        self.tokens_cached = 0
         self.cost_usd = 0.0
         self.calls = 0
 
@@ -888,7 +899,9 @@ class _Meter:
         self.calls += 1
         self.tokens_in += res.usage.tokens_in
         self.tokens_out += res.usage.tokens_out
-        cost = estimate_cost(res.provider, res.model, res.usage.tokens_in, res.usage.tokens_out)
+        self.tokens_thinking += res.usage.thinking_tokens
+        self.tokens_cached += res.usage.cached_tokens
+        cost = result_cost(res)
         if cost:
             self.cost_usd += cost
 
@@ -930,14 +943,16 @@ class _Meter:
         self.calls += 1
         self.tokens_in += res.usage.tokens_in
         self.tokens_out += res.usage.tokens_out
-        cost = estimate_cost(res.provider, res.model, res.usage.tokens_in, res.usage.tokens_out)
+        self.tokens_thinking += res.usage.thinking_tokens
+        self.tokens_cached += res.usage.cached_tokens
+        cost = usage_cost(res.provider, res.model, res.usage)
         if cost:
             self.cost_usd += cost
         return res
 
     @property
     def tokens(self) -> int:
-        return self.tokens_in + self.tokens_out
+        return self.tokens_in + self.tokens_out + self.tokens_thinking
 
 
 # ─── umumiy yordamchilar ─────────────────────────────────────────────────────
@@ -3223,6 +3238,14 @@ async def _persist(
         session.add(run)
         await session.flush()
         context_meta["run_id"] = run.id
+        # Token hisobi kontekstda ham (agent yo'li bilan bir xil to'rt maydon):
+        # thinking output narxida, cached — `tokens_in` ning keshdan qismi.
+        context_meta.update(
+            tokens_in=result.tokens_in,
+            tokens_out=result.tokens_out,
+            tokens_thinking=result.tokens_thinking,
+            tokens_cached=result.tokens_cached,
+        )
         user_row = ConversationMessage(
             conversation_id=conversation_id, role="user", content=question, context=context_meta
         )
@@ -3235,6 +3258,8 @@ async def _persist(
             provider=result.provider,
             tokens_in=result.tokens_in,
             tokens_out=result.tokens_out,
+            tokens_thinking=result.tokens_thinking,
+            tokens_cached=result.tokens_cached,
             context=context_meta,
             task="deep",
             latency_ms=result.latency_ms,
@@ -3372,6 +3397,8 @@ async def _persist_usage(
                 content=partial,
                 tokens_in=meter.tokens_in,
                 tokens_out=meter.tokens_out,
+                tokens_thinking=meter.tokens_thinking,
+                tokens_cached=meter.tokens_cached,
                 task="deep",
                 latency_ms=latency_ms,
                 cost_usd=cost,
@@ -3392,6 +3419,8 @@ async def _persist_usage(
         status=status,
         tokens_in=meter.tokens_in,
         tokens_out=meter.tokens_out,
+        tokens_thinking=meter.tokens_thinking,
+        tokens_cached=meter.tokens_cached,
         llm_calls=meter.calls,
     )
 
@@ -3624,6 +3653,8 @@ async def _run_pipeline(
             intent=intent,
             tokens_in=meter.tokens_in,
             tokens_out=meter.tokens_out,
+            tokens_thinking=meter.tokens_thinking,
+            tokens_cached=meter.tokens_cached,
             cost_usd=round(meter.cost_usd, 6) if meter.cost_usd else None,
             model=res_direct.model if res_direct else "",
             provider=res_direct.provider if res_direct else "",
@@ -3684,6 +3715,8 @@ async def _run_pipeline(
             cost_usd=direct_result.cost_usd,
             tokens_in=direct_result.tokens_in,
             tokens_out=direct_result.tokens_out,
+            tokens_thinking=direct_result.tokens_thinking,
+            tokens_cached=direct_result.tokens_cached,
             model=direct_result.model,
             provider=direct_result.provider,
             latency_ms=direct_result.latency_ms,
@@ -3893,6 +3926,8 @@ async def _run_pipeline(
                         conversation_id=conversation_id,
                         tokens_in=meter.tokens_in,
                         tokens_out=meter.tokens_out,
+                        tokens_thinking=meter.tokens_thinking,
+                        tokens_cached=meter.tokens_cached,
                         latency_ms=int(elapsed() * 1000),
                     )
                 candidates = list(outcome.pool)
@@ -3956,6 +3991,8 @@ async def _run_pipeline(
                         conversation_id=conversation_id,
                         tokens_in=meter.tokens_in,
                         tokens_out=meter.tokens_out,
+                        tokens_thinking=meter.tokens_thinking,
+                        tokens_cached=meter.tokens_cached,
                         latency_ms=int(elapsed() * 1000),
                     )
                 candidates = list(outcome.pool)
@@ -4191,6 +4228,8 @@ async def _run_pipeline(
         evidence_count=len(kept),
         tokens_in=meter.tokens_in,
         tokens_out=meter.tokens_out,
+        tokens_thinking=meter.tokens_thinking,
+        tokens_cached=meter.tokens_cached,
         cost_usd=round(meter.cost_usd, 6) if meter.cost_usd else None,
         model=res.model if res else "",
         provider=res.provider if res else "",
@@ -4262,6 +4301,8 @@ async def _run_pipeline(
         llm_calls=meter.calls,
         tokens_in=meter.tokens_in,
         tokens_out=meter.tokens_out,
+        tokens_thinking=meter.tokens_thinking,
+        tokens_cached=meter.tokens_cached,
         latency_ms=result.latency_ms,
     )
     await _emit(
@@ -4272,6 +4313,8 @@ async def _run_pipeline(
         cost_usd=result.cost_usd,
         tokens_in=result.tokens_in,
         tokens_out=result.tokens_out,
+        tokens_thinking=result.tokens_thinking,
+        tokens_cached=result.tokens_cached,
         model=result.model,
         provider=result.provider,
         latency_ms=result.latency_ms,

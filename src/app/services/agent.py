@@ -87,6 +87,9 @@ class AgentOutcome:
     #: bitta server qidiruvi to'sildi (eval `econ-01`).
     repeat_guard: bool = False
     cost_usd: float | None = None  # taxminiy yig'ma narx (pricing.estimate_cost)
+    #: Fikrlash (output narxida) va keshdan o'qilgan input tokenlari — yig'ma.
+    tokens_thinking: int = 0
+    tokens_cached: int = 0
 
 
 async def _mark_failed(
@@ -350,6 +353,7 @@ async def run_agent(
     action_ids: list[int] = []
 
     tokens_in = tokens_out = 0
+    tokens_thinking = tokens_cached = 0
     used_result_tokens = 0
     seen_calls: set[tuple[str, str]] = set()  # (tool, args) — takrorni to'sish
     per_tool: Counter[str] = Counter()
@@ -398,8 +402,17 @@ async def run_agent(
             raise
         tokens_in += res.usage.tokens_in
         tokens_out += res.usage.tokens_out
+        tokens_thinking += res.usage.thinking_tokens
+        tokens_cached += res.usage.cached_tokens
         model, provider, finish = res.model, res.provider, res.finish_reason
-        cost_usd = estimate_cost(provider, model, tokens_in, tokens_out)
+        cost_usd = estimate_cost(
+            provider,
+            model,
+            tokens_in,
+            tokens_out,
+            tokens_thinking=tokens_thinking,
+            tokens_cached=tokens_cached,
+        )
 
         if not res.tool_calls or not allow_tools:
             # tool'siz raundda tool so'ralsa ham bajarilmaydi — matn yo'q bo'lsa majburiy javob
@@ -572,9 +585,18 @@ async def run_agent(
             raise
         tokens_in += res.usage.tokens_in
         tokens_out += res.usage.tokens_out
+        tokens_thinking += res.usage.thinking_tokens
+        tokens_cached += res.usage.cached_tokens
         model, provider, finish = res.model, res.provider, res.finish_reason
         final_text = res.text.strip()
-        cost_usd = estimate_cost(provider, model, tokens_in, tokens_out)
+        cost_usd = estimate_cost(
+            provider,
+            model,
+            tokens_in,
+            tokens_out,
+            tokens_thinking=tokens_thinking,
+            tokens_cached=tokens_cached,
+        )
         iterations += 1
 
     run.model = model
@@ -589,6 +611,8 @@ async def run_agent(
         provider=provider,
         tokens_in=tokens_in,
         tokens_out=tokens_out,
+        tokens_thinking=tokens_thinking,
+        tokens_cached=tokens_cached,
         iterations=iterations,
         tool_calls=calls_log,
         finish_reason=finish,
@@ -614,6 +638,8 @@ async def run_agent(
         cost_usd=cost_usd,
         tokens_in=tokens_in,
         tokens_out=tokens_out,
+        tokens_thinking=tokens_thinking,
+        tokens_cached=tokens_cached,
         result_tokens=used_result_tokens,
         latency_ms=outcome.latency_ms,
     )

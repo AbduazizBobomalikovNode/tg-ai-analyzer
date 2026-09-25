@@ -421,6 +421,9 @@ class LLM:
             ok=True,
             tokens_in=result.usage.tokens_in,
             tokens_out=result.usage.tokens_out,
+            tokens_thinking=result.usage.thinking_tokens,
+            tokens_cached=result.usage.cached_tokens,
+            tier=result.service_tier or "standard",
             seconds=time.perf_counter() - t0,
         )
         log.info(
@@ -430,7 +433,9 @@ class LLM:
             model=result.model,
             tokens_in=result.usage.tokens_in,
             tokens_out=result.usage.tokens_out,
-            cached=result.usage.cached_tokens,
+            tokens_thinking=result.usage.thinking_tokens,
+            tokens_cached=result.usage.cached_tokens,
+            tier=result.service_tier or "standard",
             tool_calls=len(result.tool_calls),
         )
         return result

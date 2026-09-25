@@ -127,9 +127,24 @@ class ToolSpec:
 
 @dataclass(slots=True)
 class Usage:
+    """Token hisobi. `tokens_out` — **ko'rinadigan** chiqish; fikrlash
+    (`thinking_tokens`, Gemini `thoughts_token_count`) alohida, lekin output
+    narxida hisoblanadi (`pricing.estimate_cost`). `cached_tokens` —
+    `tokens_in` ning keshdan o'qilgan qismi (Gemini/DeepSeek semantikasi).
+    """
+
     tokens_in: int = 0
     tokens_out: int = 0
     cached_tokens: int = 0
+    thinking_tokens: int = 0
+
+    @property
+    def tokens_thinking(self) -> int:
+        return self.thinking_tokens
+
+    @property
+    def tokens_cached(self) -> int:
+        return self.cached_tokens
 
 
 @dataclass(slots=True)
@@ -147,6 +162,17 @@ class ChatResult:
     #: ko'chiriladi (`ToolCall.signature` izohiga qarang). Boshqa provider'larda
     #: doim `None`.
     signature: bytes | str | None = None
+    #: Qaysi xizmat tier'ida bajarildi (`standard` / `flex`) — narx shunga
+    #: qarab hisoblanadi (`pricing.result_cost`). Bo'sh = standard.
+    service_tier: str = ""
+
+    @property
+    def tokens_thinking(self) -> int:
+        return self.usage.thinking_tokens
+
+    @property
+    def tokens_cached(self) -> int:
+        return self.usage.cached_tokens
 
 
 # Embedding vazifasi: indekslashda hujjat, qidiruvda so'rov (asimmetrik retrieval).

@@ -69,6 +69,10 @@ class Judgement:
     tokens_out: int = 0
     model: str = ""
     provider: str = ""
+    tokens_thinking: int = 0
+    tokens_cached: int = 0
+    #: Qaysi tier'da bajarildi (`standard`/`flex`) — narx shunga qarab.
+    tier: str = ""
 
 
 def _clamp(v: Any, lo: int = 1, hi: int = 5) -> int:
@@ -149,6 +153,9 @@ async def judge(
         j = cap_for_degraded(j, degraded=degraded, answer=answer)
         j.tokens_in, j.tokens_out = res.usage.tokens_in, res.usage.tokens_out
         j.model, j.provider = res.model, res.provider
+        j.tokens_thinking = int(getattr(res.usage, "thinking_tokens", 0) or 0)
+        j.tokens_cached = int(getattr(res.usage, "cached_tokens", 0) or 0)
+        j.tier = str(getattr(res, "service_tier", "") or "")
     return j
 
 
@@ -189,7 +196,18 @@ async def _record_judge_usage(db: AsyncSession, row: ConversationMessage, j: Jud
         )
         db.add(conv)
         await db.flush()
-    cost = estimate_cost(j.provider, j.model, j.tokens_in, j.tokens_out) or 0.0
+    cost = (
+        estimate_cost(
+            j.provider,
+            j.model,
+            j.tokens_in,
+            j.tokens_out,
+            tokens_thinking=j.tokens_thinking,
+            tokens_cached=j.tokens_cached,
+            tier=j.tier or "standard",
+        )
+        or 0.0
+    )
     db.add(
         ConversationMessage(
             conversation_id=conv.id,
@@ -199,6 +217,8 @@ async def _record_judge_usage(db: AsyncSession, row: ConversationMessage, j: Jud
             provider=j.provider,
             tokens_in=j.tokens_in,
             tokens_out=j.tokens_out,
+            tokens_thinking=j.tokens_thinking,
+            tokens_cached=j.tokens_cached,
             task="judge",
             cost_usd=round(cost, 6) or None,
         )
@@ -255,7 +275,7 @@ async def auto_evaluate(
         relevance=j.relevance,
         usefulness=j.usefulness,
         grounded=j.grounded,
-        tokens=j.tokens_in + j.tokens_out,
+        tokens=j.tokens_in + j.tokens_out + j.tokens_thinking,
     )
 
 

@@ -63,6 +63,14 @@ _KEY_ALLOW = frozenset(
         "next_type",
         "exit_code",
         "reason_code",
+        # Token **soni** (LLM hisobi), sir emas — `token` bo'lagi ularni
+        # maskalardi va bosqich bo'yicha xarajatni log'dan tiklab bo'lmasdi
+        # (docs/cost-research.md, A3). Faqat shu aniq nomlar: `token`,
+        # `bot_token`, `refresh_token` va boshqalar maskalanishda qoladi.
+        "tokens_in",
+        "tokens_out",
+        "tokens_thinking",
+        "tokens_cached",
     }
 )
 

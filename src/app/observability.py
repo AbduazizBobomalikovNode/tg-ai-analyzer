@@ -106,6 +106,9 @@ def record_llm(
     tokens_in: int,
     tokens_out: int,
     seconds: float,
+    tokens_thinking: int = 0,
+    tokens_cached: int = 0,
+    tier: str = "standard",
 ) -> None:
     from app.llm.pricing import estimate_cost
 
@@ -114,8 +117,20 @@ def record_llm(
         LLM_TOKENS.labels(provider or "?", model or "?", "in").inc(tokens_in)
     if tokens_out:
         LLM_TOKENS.labels(provider or "?", model or "?", "out").inc(tokens_out)
+    if tokens_thinking:
+        LLM_TOKENS.labels(provider or "?", model or "?", "thinking").inc(tokens_thinking)
+    if tokens_cached:
+        LLM_TOKENS.labels(provider or "?", model or "?", "cached").inc(tokens_cached)
     LLM_LATENCY.labels(task).observe(seconds)
-    cost = estimate_cost(provider, model, tokens_in, tokens_out)
+    cost = estimate_cost(
+        provider,
+        model,
+        tokens_in,
+        tokens_out,
+        tokens_thinking=tokens_thinking,
+        tokens_cached=tokens_cached,
+        tier=tier,
+    )
     if cost:
         LLM_COST.labels(provider, model).inc(cost)
 

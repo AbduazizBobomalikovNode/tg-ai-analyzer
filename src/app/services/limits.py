@@ -59,15 +59,27 @@ class Usage:
         return None
 
 
+def _tokens_expr() -> Any:
+    """Kunlik token hisobi: in + out + **thinking** (migratsiya 0022).
+
+    Fikrlash tokenlari provider tomonida to'lanadi (output narxida); ular
+    sanalmasa token byudjeti haqiqiy sarfdan past ko'rinardi. Eski qatorlarda
+    ustun `NULL` — `coalesce` bilan 0.
+    """
+    return (
+        ConversationMessage.tokens_in
+        + ConversationMessage.tokens_out
+        + func.coalesce(ConversationMessage.tokens_thinking, 0)
+    )
+
+
 async def daily_usage(session: AsyncSession, user_id: int) -> Usage:
     s = get_settings()
     since = datetime.now(UTC) - timedelta(days=1)
     row = (
         await session.execute(
             select(
-                func.coalesce(
-                    func.sum(ConversationMessage.tokens_in + ConversationMessage.tokens_out), 0
-                ),
+                func.coalesce(func.sum(_tokens_expr()), 0),
                 func.coalesce(func.sum(ConversationMessage.cost_usd), 0.0),
                 func.count(ConversationMessage.id),
             )
@@ -105,9 +117,7 @@ async def blocked_user_ids(session: AsyncSession) -> set[int]:
         await session.execute(
             select(
                 Conversation.user_id,
-                func.coalesce(
-                    func.sum(ConversationMessage.tokens_in + ConversationMessage.tokens_out), 0
-                ),
+                func.coalesce(func.sum(_tokens_expr()), 0),
                 func.coalesce(func.sum(ConversationMessage.cost_usd), 0.0),
             )
             .join(ConversationMessage, ConversationMessage.conversation_id == Conversation.id)

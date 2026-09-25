@@ -527,6 +527,11 @@ class ConversationMessage(Base):
     provider: Mapped[str] = mapped_column(String(32), default="")
     tokens_in: Mapped[int] = mapped_column(Integer, default=0)
     tokens_out: Mapped[int] = mapped_column(Integer, default=0)
+    # Fikrlash (Gemini `thoughts_token_count`, output narxida) va keshdan
+    # o'qilgan input tokenlari (`tokens_in` ning qismi). NULL = eski qator /
+    # provider bermagan (migratsiya 0022).
+    tokens_thinking: Mapped[int | None] = mapped_column(Integer)
+    tokens_cached: Mapped[int | None] = mapped_column(Integer)
     # kontekst: qaysi chat, nechta xabar, strategiya — kontent emas (u qayta olinadi)
     context: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now())

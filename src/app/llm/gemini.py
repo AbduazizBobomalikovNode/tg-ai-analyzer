@@ -689,6 +689,10 @@ def _parse_chat(resp: Any, *, model: str) -> ChatResult:
             tokens_in=int(getattr(u, "prompt_token_count", 0) or 0),
             tokens_out=int(getattr(u, "candidates_token_count", 0) or 0),
             cached_tokens=int(getattr(u, "cached_content_token_count", 0) or 0),
+            # Fikrlash tokenlari `candidates_token_count` ga kirmaydi, lekin
+            # Google ularni output narxida hisoblaydi — ilgari umuman olinmasdi
+            # va xarajat pastki chegara bo'lib qolardi (docs/cost-research.md).
+            thinking_tokens=int(getattr(u, "thoughts_token_count", 0) or 0),
         ),
         finish_reason=finish,
         signature=text_signature,
