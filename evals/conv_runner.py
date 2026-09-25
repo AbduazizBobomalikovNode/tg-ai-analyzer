@@ -491,7 +491,10 @@ def check_turn(
         # "o'tdi" deb belgilanmasligi kerak: o'lchov shu yo'l uchun emas.
         add("degraded", False, f"run degraded: {ctx.get('degraded')}")
 
-    if not (answer or "").strip():
+    # Tasdiqsiz `exhaustive`: `needs_confirm=true` bilan **ataylab** bo'sh
+    # javob qaytadi (baho ekrani, CLAUDE.md "estimate() bitta skan
+    # tokenidan oldin hisoblanadi") — bu "empty answer" xatosi emas.
+    if not (answer or "").strip() and not (is_deep and ctx.get("needs_confirm")):
         add("non_empty", False, "empty answer")
     return checks
 

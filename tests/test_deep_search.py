@@ -2569,7 +2569,11 @@ def test_deep_prompts_describe_the_follow_up_contract() -> None:
     # doim "tashqi ochiq kanallardan dalil topilmadi" deb boshlardi, savol
     # tashqi kanal haqida bo'lmasa ham; endi kod hisoblaydi va yo'q bo'lsa
     # model mavzuni umuman ko'tarmasligi kerak).
-    assert DEEP_PROMPT_VERSION == "2026-09-24.3"
+    # 2026-09-25.1 — "2-bandni batafsil tushuntir" endi `explain` misoli
+    # (`about_prior` — javobning **kelib chiqishi** haqida, "bu qaysi
+    # chatdan edi" kabi, mazmunini kengaytirish emas; jonli regressiya:
+    # eval `daily-30` planner "2-band"ni `about_prior` deb hal qilardi).
+    assert DEEP_PROMPT_VERSION == "2026-09-25.1"
     assert "retrieval_kind" in DEEP_PLAN_PROMPT
     for field_name in ("standalone_question", "intent_follow_up", "needs_retrieval"):
         assert field_name in DEEP_PLAN_PROMPT
@@ -2721,7 +2725,7 @@ def test_direct_intent_gate_table() -> None:
         "Nurbek",  # yalang'och ism — bu qidiruv
         "to'lov?",
         "что писали в чате?",
-        "2-bandni batafsil tushuntir",  # planner `about_prior` deb hal qiladi
+        "2-bandni batafsil tushuntir",  # planner `explain` deb hal qiladi
         "chuqurroq qidir",
         "what can you do with chat 5?",  # kontent belgisi (raqam + "chat")
         "",
@@ -2749,8 +2753,8 @@ def test_parse_plan_accepts_meta_and_about_prior_intents() -> None:
 
     prior = DS.parse_plan(
         '{"intent_follow_up":"about_prior","needs_retrieval":false,'
-        '"standalone_question":"Oldingi javobdagi 2-band"}',
-        question="2-bandni batafsil",
+        '"standalone_question":"Oldingi javobdagi ma\'lumot qaysi chatdan edi?"}',
+        question="bu ma'lumot qaysi chatdan edi?",
         known_chats=[1],
         history=_history(),
     )
@@ -2759,7 +2763,7 @@ def test_parse_plan_accepts_meta_and_about_prior_intents() -> None:
     # Havola yo'q — model yolg'on aytsa ham quvur baribir qidiradi.
     no_refs = DS.parse_plan(
         '{"intent_follow_up":"about_prior","needs_retrieval":false}',
-        question="2-bandni batafsil",
+        question="bu ma'lumot qaysi chatdan edi?",
         known_chats=[1],
         history=_history(refs=[]),
     )
@@ -2885,7 +2889,7 @@ async def test_planner_meta_intent_answers_directly_without_scan(
 async def test_about_prior_reuses_evidence_without_fan_out(
     monkeypatch: pytest.MonkeyPatch, wired: dict[str, Any]
 ) -> None:
-    """2-bandni batafsil — yangi qidiruv yo'q, oldingi dalillar qayta o'qiladi."""
+    """Bu qaysi chatdan edi — yangi qidiruv yo'q, oldingi dalillar qayta o'qiladi."""
     _no_scale(monkeypatch)
     searched = use_multi(monkeypatch, lambda q: [_hit(1)])
     asked_refs: list[Any] = []
@@ -2903,13 +2907,13 @@ async def test_about_prior_reuses_evidence_without_fan_out(
 
     llm = FakeLLM(
         plan='{"intent_follow_up":"about_prior","needs_retrieval":false,'
-        '"standalone_question":"Oldingi javobdagi 2-bandni tushuntir"}'
+        '"standalone_question":"Oldingi javobdagi ma\'lumot qaysi chatdan edi?"}'
     )
     result = await DS.run_deep_search(
         factory,  # type: ignore[arg-type]
         1,
         10,
-        "oldingi javobdagi 2-bandni batafsil",
+        "bu ma'lumot qaysi chatdan edi?",
         locale="uz",
         llm=llm,  # type: ignore[arg-type]
         events=sink,  # type: ignore[arg-type]

@@ -570,6 +570,7 @@ def render_window_stats(
         return _render_stats(count, stats, names=names, spec=spec, samples=len(evidence))
     lines = [
         "## window totals (counted in code, exact — trust these over the lines below)",
+        f"period: {_period_text(spec)}",
         f"messages in window: {count.total}; chats: {count.chats}; "
         f"evidence lines shown: {taken or len(evidence)}",
     ]
@@ -611,6 +612,23 @@ def _day(dt: datetime | None) -> str:
     return dt.strftime("%Y-%m-%d") if dt else "—"
 
 
+def _period_text(spec: WindowSpec | None) -> str:
+    """`period: <since → until | butun davr>` — model o'qigan aniq oraliq.
+
+    Sintez prompti javobning **birinchi gapida** shu oraliqni aytishni talab
+    qiladi (`STATS_SYNTH_NOTE`/`WINDOW_SYNTH_NOTE`): oyna savoldan kelmagan
+    bo'lsa (`window_from_question=False`), model "eng faol chat" kabi
+    javobni qaysi davr bo'yicha berganini aytmay qo'yardi (jonli regressiya,
+    `daily-04`).
+    """
+    if spec is None:
+        return "butun davr"
+    until = _day(spec.until)
+    if spec.since is None:
+        return f"butun davr … → {until}"
+    return f"{_day(spec.since)} → {until}"
+
+
 def _render_stats(
     count: WindowCount,
     stats: WindowStats,
@@ -627,6 +645,7 @@ def _render_stats(
     lines = [
         "## window stats (counted in code with count(*) over EVERY message in the window "
         "— exact and complete; use these numbers verbatim, do not recount)",
+        f"period: {_period_text(spec)}",
         f"direction: {_DIRECTION_TEXT.get(stats.direction, _DIRECTION_TEXT[''])}",
         f"window: {window or '—'}; first message: {_day(count.first_at)}; "
         f"last message: {_day(count.last_at)}",

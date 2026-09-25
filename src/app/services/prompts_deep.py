@@ -26,7 +26,7 @@ system'ga emas, user turn'iga qo'shiladi.
 
 from __future__ import annotations
 
-DEEP_PROMPT_VERSION = "2026-09-24.3"
+DEEP_PROMPT_VERSION = "2026-09-25.1"
 
 # Ishonch qoidalari yagona manbadan (`prompts._CORE`) olinadi — ikkala joyda
 # ikki xil yozilib qolmasin. Import bo'lmasa (masalan prompt'lar bo'lingan
@@ -112,9 +112,11 @@ history); "deeper" = the same question, they want more ("chuqurroq qidir", "по
 tutdim"); "context_switch" = the same question in a different chat or period ("endi shu \
 savolni ish chatida ko'r"); "reformat" = change the shape of the last answer ("qisqartir", \
 "ruscha ayt", "jadval qilib ber"); "explain" = explain or expand something that is already \
-in the last answer, with no new facts needed; "about_prior" = a question ABOUT the previous \
-answer that its own evidence already covers ("2-bandni batafsil", "bu qaysi chatdan edi", \
-"kim aytgan edi shuni", "откуда это", "which chat was that from"); "meta" = a question about \
+in the last answer, with no new facts needed ("2-bandni batafsil tushuntir", "подробнее про \
+второй пункт", "expand on point 2"); "about_prior" = a question ABOUT the previous answer's \
+own provenance or facts that its evidence already covers — not its content, but where it \
+came from ("bu qaysi chatdan edi", "buni kim yozgan edi", "откуда это", "which chat was that \
+from"); "meta" = a question about \
 this assistant itself — what it can do, who it is, how it works, a request for help \
 ("nimalar qila olasan", "что ты умеешь", "what can you do", "help"); "chitchat" = a \
 greeting, thanks, an apology or small talk with no request in it ("salom", "rahmat", \
@@ -216,7 +218,13 @@ qilib ayt", "intent_follow_up": "reformat", "needs_retrieval": false}
 
 history: assistant answered with a numbered list / latest: "2-bandni batafsil tushuntir"
   -> {"standalone_question": "Oldingi javobdagi 2-bandni batafsil tushuntir", \
-"intent_follow_up": "about_prior", "needs_retrieval": false}
+"intent_follow_up": "explain", "needs_retrieval": false} — expanding on something already \
+in the answer, not a question about where it came from.
+
+history: assistant answered about rent prices / latest: "bu ma'lumot qaysi chatdan edi?"
+  -> {"standalone_question": "Oldingi javobdagi ma'lumot qaysi chatdan edi?", \
+"intent_follow_up": "about_prior", "needs_retrieval": false} — a question about the prior \
+answer's provenance (which chat, who said it), not a request to expand its content.
 
 no history / latest: "sen nimalar qila olasan!"
   -> {"standalone_question": "Sen nimalar qila olasan?", "intent_follow_up": "meta", \
@@ -604,26 +612,35 @@ to ask it directly instead of guessing an answer.
 # qolishi kerak (CLAUDE.md, "Agent / tool'lar"). Bu satr esa faqat
 # `retrieval_kind="window"` yugurishida qo'shiladi.
 WINDOW_SYNTH_NOTE = """retrieval: window — the evidence is EVERY message in the asked time \
-window (or the newest slice of it), not a topical search result. Answer it as a roll-call, \
-not as an essay: group by sender (and chat), and for each one give who they are, how many \
-messages they sent, what they wanted (the purpose), and whether anything needs a reply or \
-an action from the owner. Keep the citation token on every line. End with the items that \
-need an answer, if there are any. If the window is empty, say so plainly."""
+window (or the newest slice of it), not a topical search result. The block carries a \
+"period: <since> → <until>" line computed by code — your very FIRST sentence must name that \
+exact period in the user's language (for example "oxirgi 7 kunda (2026-09-18 → 2026-09-25)" \
+or, when the line reads "butun davr", "butun sinxronlangan tarix bo'yicha"), because the \
+question itself named no time range and the reader cannot otherwise tell which period the \
+ranking or roll-call covers. Answer it as a roll-call, not as an essay: group by sender (and \
+chat), and for each one give who they are, how many messages they sent, what they wanted \
+(the purpose), and whether anything needs a reply or an action from the owner. Keep the \
+citation token on every line. End with the items that need an answer, if there are any. If \
+the window is empty, say so plainly."""
 
 #: Sanoq yo'li (`plan.window_stats`) — reyting/son savoli, javob `count(*)` dan.
 STATS_SYNTH_NOTE = """retrieval: window stats — the "window stats" block inside the evidence \
 envelope was computed by code with count(*) over EVERY message in the asked time window \
 (direction as stated there). Its numbers are exact and complete: never recount, never \
 estimate, never round them differently, never invent a name or a number that is not in the \
-block. Answer with a short ranked table taken from the block (rank, chat or person, \
-messages, share %), then the total for the window and the direction (messages the owner \
-sent / received / both). When direction is "both", the block's rank is by MUTUAL \
-conversation — min(messages sent, messages received) — not by raw message count, so \
-mention that basis in one short clause when it matters (for example when a big, mostly \
-one-sided chat is visibly absent from the top of the ranking). The message lines after the \
-block are only a few newest samples per top chat — use them at most as an illustration \
-with their citation token, never as the basis of a count. If the window is empty, say so \
-plainly."""
+block. The block carries a "period: <since> → <until>" line computed by code — your very \
+FIRST sentence must name that exact period in the user's language (for example "oxirgi 7 \
+kunda (2026-09-18 → 2026-09-25)" or, when the line reads "butun davr", "butun sinxronlangan \
+tarix bo'yicha"), especially when the question itself named no time range: a ranking or \
+"most active" answer with no period attached is misleading. Answer with a short ranked table \
+taken from the block (rank, chat or person, messages, share %), then the total for the \
+window and the direction (messages the owner sent / received / both). When direction is \
+"both", the block's rank is by MUTUAL conversation — min(messages sent, messages received) \
+— not by raw message count, so mention that basis in one short clause when it matters (for \
+example when a big, mostly one-sided chat is visibly absent from the top of the ranking). \
+The message lines after the block are only a few newest samples per top chat — use them at \
+most as an illustration with their citation token, never as the basis of a count. If the \
+window is empty, say so plainly."""
 
 __all__ = [
     "CAPABILITIES_EN",

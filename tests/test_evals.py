@@ -605,6 +605,47 @@ def test_check_turn_needs_confirm_and_direct_for_exhaustive_estimate() -> None:
     assert by_name["direct"].ok is True
 
 
+def test_check_turn_empty_answer_ok_when_exhaustive_needs_confirm() -> None:
+    """Tasdiqsiz `exhaustive` — bo'sh javob **ataylab** (faqat baho ekrani),
+    `non_empty` tekshiruvi bu holatda umuman chiqmaydi (daily-16 regressiyasi)."""
+    from evals.conv_runner import check_turn
+
+    ctx = _deep_ctx(
+        needs_confirm=True,
+        coverage={"retrieval_kind": "topic", "direction": "", "window_stats": False},
+        plan={"retrieval_kind": "topic", "needs_retrieval": True, "intent_follow_up": "none"},
+    )
+    checks = check_turn(
+        expect={"needs_confirm": True},
+        mode="exhaustive",
+        answer="",
+        ctx=ctx,
+        cost=0.0,
+        actions=[],
+        chat_hint=None,
+    )
+    names = {c.name for c in checks}
+    assert "non_empty" not in names
+    assert all(c.ok for c in checks), [c for c in checks if not c.ok]
+
+
+def test_check_turn_empty_answer_without_needs_confirm_still_fails() -> None:
+    """Oddiy turn'da bo'sh javob baribir `non_empty` bilan yiqiladi."""
+    from evals.conv_runner import check_turn
+
+    checks = check_turn(
+        expect={},
+        mode="deep",
+        answer="",
+        ctx=_deep_ctx(needs_confirm=False),
+        cost=0.01,
+        actions=[],
+        chat_hint=None,
+    )
+    by_name = {c.name: c for c in checks}
+    assert by_name["non_empty"].ok is False
+
+
 def test_check_turn_greeting_direct_intent() -> None:
     from evals.conv_runner import check_turn
 

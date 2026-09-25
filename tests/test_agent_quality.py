@@ -1120,6 +1120,20 @@ def test_agent_prompt_acknowledges_absurd_puns_and_still_offers_the_sensible_rea
     assert "call no tools until you have it" in low
 
 
+def test_agent_prompt_resolves_a_named_chat_from_the_index_not_server_search() -> None:
+    """`daily-45`: "Otabekka 'ertaga 10 da' deb yoz" chaqirdi `list_chats` +
+    `search_global` + `send_message` ($0.07) — runtime chat index allaqachon
+    chatni beradi, `search_global` esa xabar **matnini** qidiradi, kontaktni
+    emas. Prompt endi buni aniq taqiqlaydi.
+    """
+    from app.services.prompts import AGENT_SYSTEM_PROMPT
+
+    low = AGENT_SYSTEM_PROMPT.lower()
+    assert "resolve them from the runtime chat index" in low
+    assert "never `search_global` or `search_telegram`" in low
+    assert "message *content*" in low
+
+
 def _wire_chat(monkeypatch: pytest.MonkeyPatch, chat: Chat) -> None:
     async def fake_resolve(ctx: Any, args: Any) -> Chat:
         return chat

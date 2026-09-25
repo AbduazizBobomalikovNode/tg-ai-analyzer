@@ -1063,6 +1063,41 @@ def test_stats_stage_rail_and_synth_note() -> None:
     assert "ranked table" in STATS_SYNTH_NOTE
 
 
+def test_stats_and_window_synth_notes_require_the_first_sentence_to_name_the_period() -> None:
+    """`daily-04` jonli regressiya: "qaysi guruh eng ko'p shovqin qiladi" oynasiz
+    savolda javob eng faol chatni nomladi-yu, qaysi davr bo'yicha ekanini
+    aytmadi. Endi ikkala oyna yo'li prompti ham birinchi gapda `period:`
+    qatoridagi aniq oraliqni talab qiladi.
+    """
+    from app.services.prompts_deep import STATS_SYNTH_NOTE, WINDOW_SYNTH_NOTE
+
+    for note in (STATS_SYNTH_NOTE, WINDOW_SYNTH_NOTE):
+        assert '"period:' in note
+        assert "very FIRST sentence" in note
+        assert "butun davr" in note
+
+
+def test_render_window_stats_carries_the_period_line() -> None:
+    """Blokning o'zi ham `period:` qatorini olib yuradi — oyna savoldan
+    kelmagan bo'lsa ham (`spec=None` yoki `since=None`) "butun davr" aniq
+    yoziladi, model buni birinchi gapida takrorlashi kerak.
+    """
+    count = WS.WindowCount(total=10, chats=2, per_chat=[(1, 6), (2, 4)])
+    no_spec = WS.render_window_stats(count, titles={1: "A", 2: "B"}, taken=10)
+    assert "period: butun davr" in no_spec
+
+    spec = WS.WindowSpec(account_id=1, chats=None, since=None, until=NOW_25)
+    all_time = WS.render_window_stats(count, titles={1: "A", 2: "B"}, taken=10, spec=spec)
+    assert "period: butun davr" in all_time
+
+    bounded = WS.WindowSpec(account_id=1, chats=None, since=_local(2026, 9, 1), until=NOW_25)
+    stats = WS.WindowStats(direction="", per_chat=[WS.ChatStat(chat_id=1, n=6)])
+    dated = WS.render_window_stats(count, titles={1: "A"}, stats=stats, spec=bounded)
+    since_str = bounded.since.strftime("%Y-%m-%d") if bounded.since else "—"
+    until_str = bounded.until.strftime("%Y-%m-%d")
+    assert f"period: {since_str} → {until_str}" in dated
+
+
 def test_window_estimate_reports_weeks_days_and_chats_never_zero_weeks() -> None:
     """Jonli regressiya: "12 062 bo'lak · 0 hafta · 0 chat"."""
     spec = WS.WindowSpec(
