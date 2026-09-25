@@ -321,7 +321,13 @@ def apply_guards(
         steps = kept
     # G4. mavzusiz oyna (kod darvozasi) — `window`.
     elif plan.retrieval_kind == "window":
-        kept = [s for s in steps if s.skill in ("window", "stats", "compute", "chat_digest")]
+        # Kod "ro'yxat, sanoq emas" dedi ("bugun menga kimlar yozgan, nima
+        # maqsadda"): yolg'iz `stats` faqat raqam beradi, maqsadni emas —
+        # u `window` ga almashtiriladi. `compute` bilan kelgan `stats` esa
+        # arifmetika savoli ("o'rtacha kuniga") — o'sha qoladi.
+        arithmetic = any(s.skill == "compute" for s in steps)
+        allowed_here = ("window", "chat_digest", *(("stats", "compute") if arithmetic else ()))
+        kept = [s for s in steps if s.skill in allowed_here]
         if not any(s.skill in ("window", "chat_digest", "stats") for s in kept):
             kept.insert(0, Step("window", {}, "time window (window gate)", "guard"))
             notes.append("guard: window question → window")
@@ -1064,7 +1070,10 @@ async def _finish_confirm(
     usage = _usage(ctx.meter)
     usage.pop("cost_usd")
     return DS.DeepResult(
-        answer="",
+        # Faqat oqimsiz API uchun (UI baho kartasini `done` dan chizadi, `token`
+        # yuborilmaydi): javob bo'sh qolmasin — nima to'lanishi va nega
+        # tasdiq kerakligi. Suhbatga **yozilmaydi**.
+        answer=confirm_text(ctx.estimate_meta, ctx.locale),
         mode=ctx.mode,
         needs_confirm=True,
         estimate=ctx.estimate_meta,
@@ -1073,6 +1082,36 @@ async def _finish_confirm(
         conversation_id=ctx.conversation_id,
         latency_ms=int(ctx.elapsed() * 1000),
         **usage,
+    )
+
+
+_CONFIRM_TEXT = {
+    "uz": (
+        "Bu savol korpus skanini talab qiladi: ~{buckets} bo'lak, ~{msgs} xabar, taxminiy "
+        "narx ${cost} (qopqoq ${ceiling}). Skan hali boshlanmadi — davom etish uchun "
+        "tasdiqlang yoki savolni «Chuqur» rejimida bering."
+    ),
+    "ru": (
+        "Этот вопрос требует скана корпуса: ~{buckets} блоков, ~{msgs} сообщений, оценка "
+        "${cost} (потолок ${ceiling}). Скан ещё не запускался — подтвердите или задайте "
+        "вопрос в режиме «Глубокий»."
+    ),
+    "en": (
+        "This question needs a corpus scan: ~{buckets} buckets, ~{msgs} messages, estimated "
+        "${cost} (ceiling ${ceiling}). Nothing has been scanned yet — confirm to run it, "
+        "or ask in Deep mode."
+    ),
+}
+
+
+def confirm_text(estimate: dict[str, Any], locale: str) -> str:
+    """Tasdiq kutilayotgan yugurishning qisqa matni — raqamlar **bahodan** (kodda)."""
+    tpl = _CONFIRM_TEXT.get(locale, _CONFIRM_TEXT["uz"])
+    return tpl.format(
+        buckets=int(estimate.get("buckets") or 0),
+        msgs=int(estimate.get("est_messages") or 0),
+        cost=f"{float(estimate.get('est_total_usd') or estimate.get('est_cost_usd') or 0):.2f}",
+        ceiling=f"{float(estimate.get('ceiling_usd') or 0):.2f}",
     )
 
 

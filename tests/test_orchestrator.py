@@ -654,7 +654,9 @@ async def test_exhaustive_corpus_scan_asks_for_confirmation(
         confirm=False,
         events=events,
     )
-    assert result.needs_confirm and result.answer == ""
+    assert result.needs_confirm and "token" not in [e.kind for e in events]
+    # Oqimsiz API uchun bahoning qisqa matni (suhbatga yozilmaydi).
+    assert "~120 bo'lak" in result.answer and "$0.30" in result.answer
     # "butun telegram" — `DISCOVER_RE` ham: discover skandan **keyin** turadi,
     # skan tasdiq so'ragani uchun navbat unga yetmaydi.
     assert result.plan["steps"][0]["skill"] == "scan_corpus"
@@ -763,3 +765,36 @@ async def test_chat_service_passes_the_flag_and_the_pinned_chat(
         chat_ids=[4],
     )
     assert seen["orchestrate"] is False and seen["chat_ids"] == [4]
+
+
+def test_window_rollcall_gets_the_window_not_bare_counts() -> None:
+    """Kod "ro'yxat" dedi (window, sanoq emas): yolg'iz `stats` → `window`."""
+    plan = _dp(retrieval_kind="window", window_stats=False, window_from_question=True)
+    steps, notes = OR.apply_guards(
+        [OR.Step("stats")], plan=plan, mode="deep", question="bugun menga kimlar yozgan?"
+    )
+    assert [s.skill for s in steps] == ["window"] and notes
+    # Arifmetika savoli ("o'rtacha kuniga") — stats + compute qoladi.
+    steps, _ = OR.apply_guards(
+        [OR.Step("stats"), OR.Step("compute", {"expr": "total / days"})],
+        plan=plan,
+        mode="deep",
+        question="bu oyda o'rtacha kuniga nechta xabar yozganman",
+    )
+    assert [s.skill for s in steps] == ["stats", "compute"]
+
+
+async def test_stats_direction_is_the_code_decision_not_the_planner_arg(
+    monkeypatch: pytest.MonkeyPatch, wired: dict[str, Any]
+) -> None:
+    """Jonli eval (daily-03): planner "gaplashganman" ga `in` berdi — kod `both` deydi."""
+    seen = fake_window(monkeypatch, total=90, days_back=14)
+    llm = FakeLLM(
+        plan=_plan(
+            retrieval_kind="window",
+            steps=[{"skill": "stats", "args": {"direction": "in"}}],
+        ),
+        synth="90 ta xabar.",
+    )
+    await run("Oxirgi 2 haftada kim bilan eng ko'p gaplashganman?", llm, mode="deep")
+    assert seen and seen[0].direction == "both"

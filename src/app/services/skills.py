@@ -723,11 +723,14 @@ async def _stats(ctx: RunState, args: dict[str, Any]) -> SkillResult:
     from app.services import window_search as WS
 
     plan = replace(ctx.plan, retrieval_kind="window", window_stats=True)
-    direction = str(args.get("direction") or "")
-    if direction in DS.DIRECTIONS and direction:
-        plan.direction = direction
-    elif not plan.direction:
+    # Yo'nalish — **kod** qarori (`detect_direction`: "kim bilan gaplashdim" =
+    # `both`). Planner argumenti faqat kod hech narsa topmaganda ishlatiladi:
+    # jonli eval'da planner "gaplashganman" ga `in` berib reytingni buzgan.
+    if not plan.direction:
         plan.direction = DS.detect_direction(TW.fold(f"{ctx.raw_question}\n{ctx.question}"))
+    direction = str(args.get("direction") or "")
+    if not plan.direction and direction in DS.DIRECTIONS:
+        plan.direction = direction
     plan.inbox = plan.direction == "in"
     outcome = await WS.run_window(
         ctx.session_factory,
