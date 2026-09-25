@@ -414,13 +414,21 @@ class LLM:
         max_tokens: int | None = None,
         json_mode: bool = False,
         tier: str = TIER_STANDARD,
+        thinking: str | None = None,
     ) -> ChatResult:
         """`tier="flex"` — Gemini Flex (yarim narx, sekin); faqat fon ishlari
-        (`background_tier()`). Boshqa provider'da e'tiborsiz."""
+        (`background_tier()`). Boshqa provider'da e'tiborsiz.
+
+        `thinking` — **shu chaqiruv** uchun fikrlash darajasi
+        (`minimal|low|medium|high`), vazifa darajasi (`thinking_level(task)`)
+        ustidan. `None` — vazifa darajasi. `minimal` ni qo'llamaydigan
+        modelda adapter `low` ga tushiradi (`gemini.thinking_config`).
+        """
         import time
 
         from app.observability import record_llm
 
+        level = thinking_level(task) if thinking is None else thinking
         provider, model = resolve(task)
         t0 = time.perf_counter()
         try:
@@ -431,7 +439,7 @@ class LLM:
                 temperature=temperature,
                 max_tokens=max_tokens,
                 json_mode=json_mode,
-                thinking_level=thinking_level(task),
+                thinking_level=level,
                 service_tier=tier if tier == TIER_FLEX else None,
             )
         except LLMError:
@@ -466,7 +474,7 @@ class LLM:
             tokens_out=result.usage.tokens_out,
             tokens_thinking=result.usage.thinking_tokens,
             tokens_cached=result.usage.cached_tokens,
-            thinking_level=thinking_level(task),
+            thinking_level=level,
             tier=result.service_tier or "standard",
             tool_calls=len(result.tool_calls),
         )

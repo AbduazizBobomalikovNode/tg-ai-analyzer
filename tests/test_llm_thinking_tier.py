@@ -94,6 +94,23 @@ async def test_facade_passes_the_task_level_to_the_provider(
     assert [k["thinking_level"] for k in captured.kwargs] == ["minimal", "high"]
 
 
+async def test_per_call_thinking_overrides_the_task_level(
+    captured: _CapturingProvider,
+) -> None:
+    await R.LLM().chat(R.Task.SEARCH, [Msg.user("x")], thinking="minimal")
+    await R.LLM().chat(R.Task.SEARCH, [Msg.user("x")])  # override yo'q → vazifa darajasi
+    assert [k["thinking_level"] for k in captured.kwargs] == ["minimal", "low"]
+
+
+def test_per_call_minimal_on_a_model_without_minimal_becomes_low() -> None:
+    # `deep_search` dayjest sintezi `minimal` so'raydi; pro / 3.8-flash buni rad
+    # etadi — so'rov 400 bilan yiqilmasin, `low` ketsin.
+    cfg = thinking_config("gemini-3.1-pro-preview", budget=1024, level="minimal")
+    assert cfg is not None and cfg.thinking_level == types.ThinkingLevel.LOW
+    cfg = thinking_config("gemini-3.5-flash", budget=1024, level="minimal")
+    assert cfg is not None and cfg.thinking_level == types.ThinkingLevel.MINIMAL
+
+
 async def test_gemini_adapter_sends_the_level_in_the_request() -> None:
     from types import SimpleNamespace
 

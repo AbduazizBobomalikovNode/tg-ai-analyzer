@@ -161,6 +161,14 @@ class Settings(BaseSettings):
     gemini_thinking_level_search: Literal["", "minimal", "low", "medium", "high"] = "low"
     gemini_thinking_level_tools: Literal["", "minimal", "low", "medium", "high"] = "low"
     gemini_thinking_level_deep: Literal["", "minimal", "low", "medium", "high"] = "low"
+    # Deep sintezi **dayjest** shaklida (`synth_budget(...).kind == "digest"`:
+    # oyna / sanoq javobi) — chaqiruv bo'yicha fikrlash darajasi
+    # (`LLM().chat(..., thinking=...)`). Jonli: sanoq sintezi 2,617 fikrlash
+    # tokeni yedi (sintez narxining yarmi), holbuki javob — tayyor raqam va
+    # da'volarni so'zga aylantirish. "" = o'chiq (vazifa darajasi qoladi).
+    # `minimal` ni qo'llamaydigan model (3.7/3.8-flash, 3.1-pro) uchun adapter
+    # `low` ga tushiradi.
+    deep_digest_thinking: Literal["", "minimal", "low", "medium", "high"] = "minimal"
 
     # ─── DeepSeek (OpenAI-mos API) ───
     deepseek_api_key: str = ""

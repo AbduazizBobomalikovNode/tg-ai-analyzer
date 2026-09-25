@@ -84,6 +84,14 @@ qo'llamaydigan modellarga (3.7/3.8-flash, 3.1-pro, `*-latest` aliaslari) adapter
 (konfiguratsiya yuborilmaydi); 2.5 avlodda byudjet (token soni) ishlatiladi,
 daraja emas. Daraja almashtirish sifatni tebratadi — `make eval-run` ×3 bilan.
 
+**Chaqiruv bo'yicha override**: `LLM().chat(task, msgs, thinking="minimal")`
+vazifa darajasini shu bitta chaqiruv uchun almashtiradi (`None` — vazifa
+darajasi). Hozir yagona foydalanuvchi — deep sintezi **dayjest** shaklida
+(`synth_budget(...).kind == "digest"`: oyna/sanoq javobi, `deep_search.digest_thinking`):
+`DEEP_DIGEST_THINKING` (default `minimal`, `""` = o'chiq). Jonli o'lchovda
+sanoq sintezi 2,617 fikrlash tokeni yegan (sintez narxining yarmi). Pro yoki
+3.7/3.8-flash'da `minimal` baribir `low` bo'lib ketadi (400 o'rniga).
+
 ### Flex tier — fon ishlari
 
 `LLM().chat(..., tier="flex")` → Gemini `GenerateContentConfig.service_tier=FLEX`

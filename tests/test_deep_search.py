@@ -26,8 +26,10 @@ from typing import Any
 
 import pytest
 
+from app.config import Settings, get_settings
 from app.db.models import Chat, ChatType
 from app.llm.base import ChatResult, Usage
+from app.llm.router import Task
 from app.services import cluster as C
 from app.services import deep_search as DS
 from app.services import limits as LIM
@@ -3120,7 +3122,9 @@ class _BudgetLLM:
         self.calls: list[dict[str, Any]] = []
 
     async def chat(self, task: Any, messages: list[Any], **kw: Any) -> ChatResult:
-        self.calls.append({"messages": list(messages), "max_tokens": kw.get("max_tokens")})
+        self.calls.append(
+            {"messages": list(messages), "max_tokens": kw.get("max_tokens"), "kw": dict(kw)}
+        )
         return ChatResult(
             text="Qisqa dayjest #c1m101",
             tool_calls=[],
@@ -3167,6 +3171,53 @@ async def test_detail_budget_uses_the_hard_cap_and_continues_once() -> None:
         budget=budget,
     )
     assert [c["max_tokens"] for c in llm.calls] == [DS.SYNTH_MAX_TOKENS, DS.SYNTH_MAX_TOKENS]
+    # "batafsil" — `detail`, dayjest emas: fikrlash vazifa darajasida qoladi
+    assert all("thinking" not in c["kw"] for c in llm.calls)
+
+
+async def _synth_kw(question: str, *, window: bool, **extra: Any) -> dict[str, Any]:
+    llm = _BudgetLLM()
+    await DS.synthesize(
+        DS._Meter(llm),  # type: ignore[arg-type]
+        question,
+        DS.to_evidence([_hit(1)], []),
+        [],
+        locale="uz",
+        deep=True,
+        budget=DS.synth_budget(question, window=window),
+        **extra,
+    )
+    kw: dict[str, Any] = llm.calls[0]["kw"]
+    return kw
+
+
+@pytest.mark.asyncio
+async def test_digest_synthesis_asks_for_minimal_thinking() -> None:
+    kw = await _synth_kw("bu hafta nima muhokama qilindi?", window=True)
+    assert kw["thinking"] == "minimal"
+    kw = await _synth_kw("nechta xabar?", window=True, task=Task.SEARCH)
+    assert kw["thinking"] == "minimal", "sanoq (window_stats) ham dayjest"
+
+
+@pytest.mark.asyncio
+async def test_topic_synthesis_keeps_the_task_thinking_level() -> None:
+    kw = await _synth_kw("to'lov haqida nima deyishdi?", window=False)
+    assert "thinking" not in kw
+
+
+@pytest.mark.asyncio
+async def test_digest_thinking_kill_switch(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(get_settings(), "deep_digest_thinking", "")
+    kw = await _synth_kw("bu hafta nima muhokama qilindi?", window=True)
+    assert "thinking" not in kw
+    monkeypatch.setattr(get_settings(), "deep_digest_thinking", "low")
+    kw = await _synth_kw("bu hafta nima muhokama qilindi?", window=True)
+    assert kw["thinking"] == "low"
+
+
+def test_digest_thinking_defaults_to_minimal() -> None:
+    assert Settings().deep_digest_thinking == "minimal"  # type: ignore[call-arg]
+    assert DS.digest_thinking(None) is None
 
 
 @pytest.mark.asyncio

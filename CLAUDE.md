@@ -832,7 +832,9 @@ fayl tizimini LLM'ga ochish. `capabilities()` da TOOLS yo'q — rost.
   `minimal/low/low/low`, `router.thinking_level`): ROUTE flash-lite'ning o'z
   sukuti `minimal` — ilgari hammaga `low` berilib arzon vazifada fikrlash
   oshirilardi. `minimal` ni bilmaydigan model (3.7/3.8-flash, 3.1-pro) `low`
-  oladi. Deep sintez qattiq qopqog'i `SYNTH_MAX_TOKENS=8000`, lekin
+  oladi. Chaqiruv bo'yicha override `LLM().chat(..., thinking=...)` — faqat
+  dayjest sintezi (`synth_budget(...).kind == "digest"`) ishlatadi,
+  `DEEP_DIGEST_THINKING` (default `minimal`, `""` = o'chiq). Deep sintez qattiq qopqog'i `SYNTH_MAX_TOKENS=8000`, lekin
   `max_tokens` **niyat bo'yicha** (`deep_search.synth_budget`, kodda):
   oyna/dayjest/sanoq → 3000, mavzu → 6000, `explain`/`deeper`/"batafsil"
   (`_DETAIL_RE`, uz/ru/en) → 8000; user turn'ida `answer_length: ~N tokens`

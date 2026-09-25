@@ -952,7 +952,11 @@ class _Meter:
         temperature: float = 0.7,
         max_tokens: int | None = None,
         json_mode: bool = False,
+        thinking: str | None = None,
     ) -> ChatResult:
+        # `thinking` faqat berilganda uzatiladi — sukut yo'li (va `**kw` siz
+        # test fake'lari) o'zgarmasin.
+        extra: dict[str, Any] = {"thinking": thinking} if thinking is not None else {}
         res = await self.inner.chat(
             task,
             messages,
@@ -960,6 +964,7 @@ class _Meter:
             temperature=temperature,
             max_tokens=max_tokens,
             json_mode=json_mode,
+            **extra,
         )
         self._record(res)
         return res
@@ -2927,6 +2932,19 @@ def synth_budget(question: str, *, follow_up: str = "none", window: bool = False
     return SynthBudget(SYNTH_BUDGET_TOPIC, "topic", False)
 
 
+def digest_thinking(budget: SynthBudget | None) -> str | None:
+    """Dayjest sintezi uchun chaqiruv bo'yicha fikrlash darajasi (yoki `None`).
+
+    Faqat `budget.kind == "digest"` (oyna / sanoq javobi): javob tayyor
+    sanoq va da'volarni so'zga aylantiradi, chuqur mulohaza emas — jonli
+    o'lchovda fikrlash sintez narxining yarmini yegan edi. `topic`/`detail`
+    vazifa darajasida qoladi. `DEEP_DIGEST_THINKING=""` — o'chiq.
+    """
+    if budget is None or budget.kind != "digest":
+        return None
+    return get_settings().deep_digest_thinking or None
+
+
 async def synthesize(
     meter: _Meter,
     question: str,
@@ -2983,8 +3001,9 @@ async def synthesize(
     user_turn = f"{head}{envelope}\n\nQuestion: {U.neutralize(question)}\n{note}\n{fact}{tail}"
     task = task if task is not None else (Task.DEEP if deep else Task.SEARCH)
     messages = [Msg.system(DEEP_SYNTH_PROMPT), Msg.user(user_turn)]
+    thinking = digest_thinking(budget)
     try:
-        res = await meter.chat(task, messages, max_tokens=max_tokens)
+        res = await meter.chat(task, messages, max_tokens=max_tokens, thinking=thinking)
     except LLMError as exc:
         log.warning("deep.synth_failed", error=str(exc)[:200])
         raise DeepSearchError("llm", str(exc)[:200]) from exc
@@ -3001,6 +3020,7 @@ async def synthesize(
                 Msg.user(SYNTH_CONTINUE_NUDGE),
             ],
             max_tokens=max_tokens,
+            thinking=thinking,
         )
     except LLMError as exc:  # davomi kelmadi — kesilgan javob baribir javob
         log.warning("deep.synth_continue_failed", error=str(exc)[:200])
