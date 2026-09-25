@@ -203,13 +203,21 @@ tanlaydi, executor ularni tartibda yuritadi. `fast`/agent yo'li o'zgarmagan.
   e'lon qilingan. Yangi qidiruv mantiqini bu yerga yozmang — eski modulga
   yozing va o'rang. Yangi ko'nikma karantinda bo'lsa `QUARANTINED_SKILLS`
   testi ongli qaror talab qiladi.
-- **Planner** — bitta `Task.SEARCH` chaqiruvi (`ORCH_PLAN_PROMPT` =
+- **Planner** — bitta chaqiruv, `ORCHESTRATOR_PLAN_TASK` (`search` sukut |
+  `route`; `orchestrator.plan_task()`) (`ORCH_PLAN_PROMPT` =
   `DEEP_PLAN_PROMPT` + katalog), eski reja maydonlari `parse_plan` dan
   o'tadi (oyna, `retrieval_kind`, `force_all_chats`, `DISCOVER_RE`,
   follow-up — hammasi joyida). Qoidalar: arzon birinchi; `chat_digest`/
   `stats`/`compute` qidiruvdan oldin; lokal → server → skan; `scan_corpus`
   faqat ko'p chat x uzun davr + mavzu; `clarify` parametr yo'q bo'lsa;
   "bu chat" = tanlangan chat; ≤4 qadam; rejim qopqog'idan yuqori yo'q.
+- **Planner vazifasi A/B** (2026-09-25, `docs/cost-research.md`): `route`
+  (flash-lite) 17 deep turn'dan 15 tasida `search` bilan aynan bir xil
+  qadamlar, yaroqsiz JSON 0, planner narxi ≈ −68%. Lekin planner jami deep
+  narxining ≈19% i — tejash ≈13%, qoida esa ≥30% talab qiladi → sukut
+  **`search`**. Bitta yugurishdagi 1–3 senariy flip — tebranish (bir xil
+  konfiguratsiyada 16/18 va 17/18). Yaroqsiz JSON → `orch.plan_invalid`,
+  `planner_ok=False`; `orch.plan` log'ida `plan_task`.
 - **Qo'riqchilar** (`apply_guards`) planner ustida, faqat aniq holatlarda:
   direct/reuse, terminal yolg'iz, sanoq darvozasi → `stats`, mavzusiz oyna →
   `window`, **1–3 chatga `scan_corpus` yo'q**, `compute` oldidan raqam

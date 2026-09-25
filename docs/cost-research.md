@@ -288,6 +288,44 @@ modeli emas. 3.8-flash qarori uchun agent-og'ir to'plam (`economy`,
 kunda, boshqa eval trafigisiz qiling (6 yugurish ≈ 3M token — 4M limitga
 zo'rg'a sig'adi).
 
+### Orkestrator planner A/B (`ORCHESTRATOR_PLAN_TASK`, 2026-09-25)
+
+Planner (`orchestrator.plan_orchestrated`) endi `ORCHESTRATOR_PLAN_TASK=route|search`
+bilan tanlanadi (sukut `search`). `orch.plan` log'i `plan_task` ni, yaroqsiz
+JSON esa `orch.plan_invalid` ni yozadi (`planner_ok=False`).
+
+**Uchta o'lchov** (hammasi `gemini-3.5-flash` = SEARCH, `3.5-flash-lite` = ROUTE):
+
+| # | Nima | Pass | $ jami | Planner $ | Yaroqsiz JSON |
+|---|---|---:|---:|---:|---:|
+| 1 | daily P1 (18 senariy, 20 deep), `search` — run 180642 | 16/18 | 0.744 | — | — |
+| 2 | daily P1 takror, **amalda `search`** (run 183514, pastga qarang) | 17/18 | 0.759 | 0.146 (18 chaqiruv) | 0 |
+| 3 | planner-only replay, o'sha 17 deep turn, `route` | — | — | 0.047 (17) | 0 |
+
+- #2 `route` bo'lishi kerak edi, lekin chaqiruv joyi hali `Task.SEARCH` edi
+  (`orch.plan` `plan_task=route` deb yozdi, `llm.chat` esa `task=search`).
+  U **shovqin o'lchovi** bo'lib qoldi: bir xil konfiguratsiyada 3 ta flip
+  (daily-03 ✗→✓, daily-16 ✗→✓, daily-45 ✓→✗ `must_propose_action`) va
+  +2% narx. Ya'ni bitta yugurishdagi 1–3 flip — tebranish, signal emas.
+- #3: `route` planner 17 turn'dan **15** tasida jonli `search` rejasi bilan
+  **aynan bir xil** qadamlarni tanladi (farq — 369 suhbatining 2 ta
+  follow-up turn'i: `reuse_prior` o'rniga `search_local`; xuddi shu replay
+  `search` bilan ham 14/17 berdi — tarixni kesish replay'ning o'z
+  cheklovi). Yaroqsiz JSON 0, kechikish 1.1–3.0 s (search 1.6–3.2 s).
+  Planner narxi −68% ($0.146 → $0.047 tokenlar bo'yicha).
+- **Lekin jami narxga ta'siri shiftlangan**: planner run #2 ning 19% i
+  ($0.146 / $0.759). `route` bilan tejash ≈ $0.10 / 20 deep turn = **≈13%**.
+  Planner bepul bo'lsa ham qoidaning "≥30% arzonroq" sharti bajarilmaydi —
+  narxni sintez (`Task.DEEP`/pro) va skan belgilaydi.
+
+**Qaror: sukut `search` qoladi.** Qoida (pass ≥ 16/18, safety/multiturn flip
+yo'q, **jami** narx ≥30% past) — narx sharti printsipial yetib bo'lmaydi.
+To'liq `route` e2e yugurishi $1.2 kunlik o'lchov qopqog'i tufayli
+qilinmadi (#2 xatosi $0.76 ni yedi). `route` — jonli sinalgan, JSON
+barqaror, tejamli ikkinchi variant: agar keyinroq planner ulushi o'ssa
+(masalan sintez arzonlashsa), bitta `.env` qatori bilan yoqiladi — avval
+to'liq daily P1 ×3.
+
 ## Manbalar
 
 - Gemini API pricing — https://ai.google.dev/gemini-api/docs/pricing (yangilangan 2026-09-24): 3.8/3.7/3.6-flash $0.75/$3.75 (2026-12-31 gacha, keyin $1.50/$7.50), 3.5-flash $1.50/$9.00, 3.5-flash-lite $0.30/$2.50, 3.1-flash-lite $0.25/$1.50, 3.1-pro-preview $2/$12 (≤200k), cache $0.15 (3.5-flash), pro kesh saqlash $4.50/M/soat; "output price includes thinking tokens".

@@ -244,6 +244,8 @@ class Settings(BaseSettings):
     # katalogidan qadamlar tanlaydi. `false` — qaytish yo'li: eski
     # `deep_search._run_pipeline` (router va `chat_service` shu bayroqni o'qiydi).
     orchestrator: bool = True
+    # Planner vazifasi: `search` (sukut) yoki `route` (arzonroq, A/B — docs/cost-research.md).
+    orchestrator_plan_task: Literal["route", "search"] = "search"
     deep_soft_wall_s: float = Field(default=0, ge=0, le=600)  # 0 = deep_search.SOFT_WALL_S
     deep_hard_wall_s: float = Field(default=0, ge=0, le=900)  # 0 = deep_search.HARD_WALL_S
     deep_rate_per_minute: int = Field(default=3, ge=0, le=60)

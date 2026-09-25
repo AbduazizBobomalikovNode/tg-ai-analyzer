@@ -452,6 +452,11 @@ def parse_orch_plan(
     )
 
 
+def plan_task() -> Task:
+    """Planner vazifasi — `ORCHESTRATOR_PLAN_TASK` (`route|search`, sukut `search`)."""
+    return Task.ROUTE if get_settings().orchestrator_plan_task == "route" else Task.SEARCH
+
+
 async def plan_orchestrated(
     meter: DS._Meter,
     taint: DS._Taint,
@@ -465,7 +470,7 @@ async def plan_orchestrated(
     tz: str,
     now: datetime | None = None,
 ) -> OrchPlan:
-    """**Bitta** planner chaqiruvi (`Task.SEARCH`). Yiqilsa — kod sukuti bilan davom."""
+    """**Bitta** planner chaqiruvi (`plan_task()`). Yiqilsa — kod sukuti bilan davom."""
     taint.add_turns(history, question=question)
     when = now or datetime.now(UTC)
     sel_lines = selected_lines(selected)
@@ -484,14 +489,16 @@ async def plan_orchestrated(
     taint.assert_clean("plan", prompt)
     try:
         res = await meter.chat(
-            Task.SEARCH,
+            plan_task(),
             [Msg.system(ORCH_PLAN_PROMPT), Msg.user(prompt)],
             json_mode=True,
             max_tokens=ORCH_PLAN_MAX_TOKENS,
             thinking=ORCH_PLAN_THINKING,
         )
         raw = res.text
-        ok = True
+        ok = bool(DS._json_obj(raw))
+        if not ok:
+            log.warning("orch.plan_invalid", task=plan_task().value, chars=len(raw or ""))
     except LLMError as exc:
         log.warning("orch.plan_failed", error=str(exc)[:200])
         raw, ok = "{}", False
@@ -798,6 +805,7 @@ async def run_pipeline(
                 selected=selected,
                 notes=orch.notes[:6],
                 planner_ok=orch.planner_ok,
+                plan_task=plan_task().value,
             )
             done_keys: set[str] = set()
             for i, step in enumerate(steps):
