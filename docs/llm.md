@@ -61,6 +61,29 @@ user turn'ida.
 Xarajat bahosi — `llm/pricing.py` (ro'yxat narxi, taxmin). Har javobda
 `tokens_in/out`, `latency_ms`, `cost_usd`; dashboard model/strategiya kesimida.
 
+### Gemini fikrlash darajasi — vazifa bo'yicha
+
+Gemini 3.x'da fikrlash o'chmaydi, faqat darajasi bor (`thinking_level`), va
+fikrlash tokenlari **output narxida** to'lanadi (`usage_metadata.thoughts_token_count`,
+`conversation_messages.tokens_thinking`). Ilgari hamma vazifaga `low` berilardi —
+flash-lite'ning o'z sukuti esa `minimal`, ya'ni arzon ROUTE chaqiruvlarida
+(filtr, map, judge, digest) fikrlash **oshirilardi**. Endi har vazifa o'z
+darajasini oladi (`router.thinking_level` → `gemini.thinking_config`):
+
+| Env | Default | Kim ishlatadi |
+|---|---|---|
+| `GEMINI_THINKING_LEVEL_ROUTE` | `minimal` | filtr, map, judge, digest, kun/hafta tugunlari |
+| `GEMINI_THINKING_LEVEL_SEARCH` | `low` | reduce, window_stats, direct javob, chat |
+| `GEMINI_THINKING_LEVEL_TOOLS` | `low` | agent sikli |
+| `GEMINI_THINKING_LEVEL_DEEP` | `low` | deep sintez (pro) |
+
+Qiymatlar: `minimal|low|medium|high`, yoki bo'sh (`""`) — daraja umuman
+yuborilmaydi (model sukuti, masalan 3.1-pro'da `high`). `minimal` ni
+qo'llamaydigan modellarga (3.7/3.8-flash, 3.1-pro, `*-latest` aliaslari) adapter
+`low` yuboradi — 400 o'rniga. `GEMINI_THINKING_BUDGET=0` hammasini o'chiradi
+(konfiguratsiya yuborilmaydi); 2.5 avlodda byudjet (token soni) ishlatiladi,
+daraja emas. Daraja almashtirish sifatni tebratadi — `make eval-run` ×3 bilan.
+
 ## Model override va embedding modelini almashtirish (phase4/B)
 
 `LLM_TASK_*` provider bilan modelni birga beradi; `LLM_MODEL_*` esa **faqat

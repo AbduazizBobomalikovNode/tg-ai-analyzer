@@ -65,7 +65,13 @@ _LONG_CONTEXT_PREFIXES = ("gemini-2.5", "gemini-3", "gemini-1.5")
 #   * `include_thoughts=False` — fikr matni javobda qaytmasin (`_parse_chat`
 #     uni baribir tashlaydi, lekin uzatish ham keraksiz).
 # `GEMINI_THINKING_BUDGET=0` — konfiguratsiya umuman yuborilmaydi (SDK sukuti).
-_THINKING_LEVEL_PREFIXES = ("gemini-3",)
+# `*-latest` aliaslari hozir 3.x ga ko'rsatadi (pricing.py izohi) — ular ham daraja oladi.
+_THINKING_LEVEL_PREFIXES = (
+    "gemini-3",
+    "gemini-flash-latest",
+    "gemini-flash-lite-latest",
+    "gemini-pro-latest",
+)
 _THINKING_BUDGET_PREFIXES = ("gemini-2.5",)
 #: Shu chegaradan past byudjet `thinking_level="low"` ga tushadi (Gemini 3).
 THINKING_LEVEL_HIGH_FROM = 4_096
@@ -119,18 +125,46 @@ def _base_model(model: str) -> str:
     return model.split("/")[-1].strip().lower()
 
 
-def thinking_config(model: str, *, budget: int) -> types.ThinkingConfig | None:
+#: `thinking_level="minimal"` ni **qabul qilmaydigan** 3.x modellar
+#: (ai.google.dev/gemini-api/docs/thinking, 2026-09-25: 3.8/3.7-flash va
+#: 3.1-pro — `low|medium|high`). Ularga `minimal` so'ralsa `low` yuboriladi —
+#: aks holda 400 bilan yiqilardi (masalan `LLM_MODEL_ROUTE` pro'ga
+#: almashtirilsa). Aliaslar ham shu yerda (`*-latest` hozir 3.8-flash / 3.1-pro).
+_NO_MINIMAL_PREFIXES = (
+    "gemini-3.8",
+    "gemini-3.7",
+    "gemini-3.1-pro",
+    "gemini-pro-latest",
+    "gemini-flash-latest",
+)
+THINKING_LEVELS = ("minimal", "low", "medium", "high")
+
+
+def thinking_config(
+    model: str, *, budget: int, level: str | None = None
+) -> types.ThinkingConfig | None:
     """Model oilasiga mos fikrlash konfiguratsiyasi (yoki `None` — sukut).
 
     `budget <= 0` yoki fikrlashni sozlab bo'lmaydigan model → `None`.
-    Qaytgan obyekt hech qachon fikr matnini so'ramaydi (`include_thoughts`),
-    ya'ni chiqish byudjeti javobning o'ziga qoladi.
+    `gemini-3*` da `level` (vazifa bo'yicha, `router.thinking_level`) ustun:
+    `""` — daraja yuborilmaydi (model sukuti), `None` — eski yo'l (byudjetdan:
+    `>= THINKING_LEVEL_HIGH_FROM` → high, aks holda low). Qaytgan obyekt hech
+    qachon fikr matnini so'ramaydi (`include_thoughts`), ya'ni chiqish
+    byudjeti javobning o'ziga qoladi.
     """
     if budget <= 0:
         return None
     base = _base_model(model)
     if base.startswith(_THINKING_LEVEL_PREFIXES):
-        level = "high" if budget >= THINKING_LEVEL_HIGH_FROM else "low"
+        if level is None:
+            level = "high" if budget >= THINKING_LEVEL_HIGH_FROM else "low"
+        level = level.strip().lower()
+        if not level:
+            return None
+        if level not in THINKING_LEVELS:
+            raise LLMError("gemini", f"noma'lum thinking_level: {level!r}")
+        if level == "minimal" and base.startswith(_NO_MINIMAL_PREFIXES):
+            level = "low"
         return types.ThinkingConfig(thinking_level=cast(Any, level), include_thoughts=False)
     if base.startswith(_THINKING_BUDGET_PREFIXES):
         return types.ThinkingConfig(thinking_budget=budget, include_thoughts=False)
@@ -193,6 +227,7 @@ class GeminiProvider(BaseProvider):
         temperature: float = 0.7,
         max_tokens: int | None = None,
         json_mode: bool = False,
+        thinking_level: str | None = None,
     ) -> ChatResult:
         needed = [Capability.CHAT]
         if tools:
@@ -210,7 +245,9 @@ class GeminiProvider(BaseProvider):
             cfg_kwargs["max_output_tokens"] = max_tokens
         if json_mode:
             cfg_kwargs["response_mime_type"] = "application/json"
-        think = thinking_config(model, budget=int(get_settings().gemini_thinking_budget))
+        think = thinking_config(
+            model, budget=int(get_settings().gemini_thinking_budget), level=thinking_level
+        )
         if think is not None:
             cfg_kwargs["thinking_config"] = think
         if tools:

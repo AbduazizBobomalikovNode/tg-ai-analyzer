@@ -200,6 +200,7 @@ class ClaudeProvider(BaseProvider):
         temperature: float = 0.7,
         max_tokens: int | None = None,
         json_mode: bool = False,
+        thinking_level: str | None = None,
     ) -> ChatResult:
         needed = [Capability.CHAT]
         if tools:

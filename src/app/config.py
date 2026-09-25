@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 from enum import StrEnum
 from functools import lru_cache
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -145,6 +145,17 @@ class Settings(BaseSettings):
     # `gemini-3*` da bu "low"/"high" darajasiga aylanadi, `gemini-2.5*` da
     # token soni bo'lib ketadi. 0 = sozlamani umuman yubormaslik (SDK sukuti).
     gemini_thinking_budget: int = Field(default=1024, ge=0, le=32_768)
+    # `gemini-3*` uchun **vazifa bo'yicha** fikrlash darajasi
+    # (`GEMINI_THINKING_LEVEL_<TASK>`): "" = sozlamani yubormaslik (model
+    # sukuti). ROUTE (filtr, map, judge, digest) — `minimal`, flash-lite'ning
+    # o'z sukuti: ilgari hammaga `low` berilib, arzon vazifada fikrlash
+    # **oshirilardi** (docs/cost-research.md, B3-7). `minimal` ni
+    # qo'llamaydigan model (3.7/3.8-flash, 3.1-pro) uchun adapter `low` ga
+    # tushiradi. `GEMINI_THINKING_BUDGET=0` hammasini o'chiradi.
+    gemini_thinking_level_route: Literal["", "minimal", "low", "medium", "high"] = "minimal"
+    gemini_thinking_level_search: Literal["", "minimal", "low", "medium", "high"] = "low"
+    gemini_thinking_level_tools: Literal["", "minimal", "low", "medium", "high"] = "low"
+    gemini_thinking_level_deep: Literal["", "minimal", "low", "medium", "high"] = "low"
 
     # ─── DeepSeek (OpenAI-mos API) ───
     deepseek_api_key: str = ""

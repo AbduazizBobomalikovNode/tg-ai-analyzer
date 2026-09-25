@@ -375,6 +375,19 @@ def _resolve_default(task: Task) -> tuple[BaseProvider, str]:
     return fb, fb_model
 
 
+def thinking_level(task: Task) -> str | None:
+    """Vazifa → fikrlash darajasi (`GEMINI_THINKING_LEVEL_<TASK>`).
+
+    Faqat suhbat vazifalari (ROUTE/SEARCH/TOOLS/DEEP); qolganida `None`.
+    `""` — daraja yuborilmaydi (model sukuti). Provider'ga har doim
+    uzatiladi, lekin faqat Gemini 3 adapteri uni ishlatadi
+    (`gemini.thinking_config`); Claude/DeepSeek e'tiborsiz qoldiradi.
+    """
+    if task not in (Task.ROUTE, Task.SEARCH, Task.TOOLS, Task.DEEP):
+        return None
+    return str(getattr(get_settings(), f"gemini_thinking_level_{task.value}", "") or "")
+
+
 class LLM:
     """Ilova kodi shu fasad bilan ishlaydi — provider nomini bilishi shart emas."""
 
@@ -402,6 +415,7 @@ class LLM:
                 temperature=temperature,
                 max_tokens=max_tokens,
                 json_mode=json_mode,
+                thinking_level=thinking_level(task),
             )
         except LLMError:
             record_llm(
@@ -435,6 +449,7 @@ class LLM:
             tokens_out=result.usage.tokens_out,
             tokens_thinking=result.usage.thinking_tokens,
             tokens_cached=result.usage.cached_tokens,
+            thinking_level=thinking_level(task),
             tier=result.service_tier or "standard",
             tool_calls=len(result.tool_calls),
         )

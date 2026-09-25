@@ -175,6 +175,7 @@ class ClaudeCodeProvider(BaseProvider):
         temperature: float = 0.7,  # CLI'da boshqarilmaydi — e'tiborsiz
         max_tokens: int | None = None,  # CLI'da boshqarilmaydi — e'tiborsiz
         json_mode: bool = False,
+        thinking_level: str | None = None,
     ) -> ChatResult:
         needed = [Capability.CHAT]
         if tools:
