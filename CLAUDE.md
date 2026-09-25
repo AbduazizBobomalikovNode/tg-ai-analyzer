@@ -247,6 +247,26 @@ ularni tartibda yuritadi. Rejim — faqat **qopqoq**: `fast` ≤ `search_server`
   kengaytma yiqilsa ilova yiqilmaydi (log).
 - `ORCHESTRATOR=false` — eski bo'linish: `fast` → `run_agent`, deep →
   `_run_pipeline`.
+- **Suhbat holati** (`services/conv_state.py`, migratsiya 0024
+  `conversations.state jsonb`): `resolved_entities` (`{"Otabek": {chat_id,
+  title, kind}}` + `last_entity`), `selected_chats`, `last_window`,
+  `last_result` (`skill`, `evidence_refs` ≤60, raqamli `facts`),
+  `last_answer_kind`, `topic`, `language`. Har turn'dan keyin **kod** yozadi
+  (`update_after_turn` sof, `orchestrator._save_state`), model emas. Entity
+  — savoldagi nomga mos chat (`agent.chat_hints`, planner promptida
+  `<untrusted_data kind="chat_hints">`) yoki muvaffaqiyatli tool
+  chaqiruvidagi chat, **faqat** shu turn'da ishlatilgan bo'lsa. Planner
+  holatni `<untrusted_data kind="conversation_state">` JSON blokida ko'radi
+  (12-qoida); kod esa `parse_orch_plan` da **o'zi** qo'llaydi
+  (`apply_to_plan`): referent (`REFERENT_RE`: u/uni/o'sha/shu odam|guruh/он/
+  him/that chat) → `plan.chats=[last_entity]` (tanlangan UI chati ustun),
+  referent hal bo'lsa yolg'iz `clarify` tashlanadi; follow-up + savolda
+  yangi oyna yo'q → `last_window` meros; `correction`/`context_switch` → meros
+  yo'q va holat tozalanadi. `reuse_prior` avval `last_result.evidence_refs`
+  ni o'qiydi. **Taint**: holatga faqat id/sarlavha/raqam/user matni —
+  planner'ga qo'shishdan oldin `_Taint.assert_state` (qattiq), saqlashdan
+  oldin `state_leak` (saqlanmaydi + `orch.state_taint`). `GET
+  /api/conversations/{id}/state` — faqat o'qish, egasi (debug).
 
 - **Katalog** (`skills.SKILLS`): `answer_direct`, `clarify`, `reuse_prior`,
   `chat_digest`, `stats`, `compute`, `window`, `search_local`,

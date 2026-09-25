@@ -229,6 +229,26 @@ async def get_messages(
         }
 
 
+@router.get("/{conversation_id}/state")
+async def get_state(
+    conversation_id: int,
+    ident: Annotated[WebIdentity, Depends(require_identity)],
+) -> dict[str, Any]:
+    """Suhbatning ishchi holati (`services/conv_state.py`) — **faqat o'qish**, debug uchun.
+
+    Egalik `get_conversation` da (begona suhbat → 404). Holatda xabar matni
+    yo'q: id, sarlavha, raqam, foydalanuvchi matni.
+    """
+    from app.services import conv_state as CST
+
+    async with session_scope() as db:
+        try:
+            conv = await cs.get_conversation(db, ident.user_id, conversation_id)
+        except cs.ChatError as exc:
+            raise _chat_http(exc) from exc
+        return {"conversation_id": conv.id, "state": CST.from_json(conv.state).to_json()}
+
+
 @router.delete("/{conversation_id}", dependencies=[Depends(require_csrf)])
 async def delete_conversation(
     conversation_id: int, ident: Annotated[WebIdentity, Depends(require_identity)]

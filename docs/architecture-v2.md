@@ -536,6 +536,22 @@ konverti). `tool` hodisasi reykda bitta `tools` bosqichi.
 yadro ko'nikmalari himoyalangan, katalog planner promptiga import paytida
 kiradi.
 
+**Suhbat holati** (`conversations.state`, migratsiya 0024,
+`services/conv_state.py`). Turn'lar orasidagi ishchi xotira — **kod**
+yozadi (`update_after_turn`, sof), model emas:
+
+    turn N:  plan → steps → _persist → _save_state(update_after_turn)
+    turn N+1: load → render_block (planner'ga, konvertda) → parse_orch_plan
+              → apply_to_plan (referent → chat, follow-up → last_window)
+              → guard'lar → …
+
+Referent qoidasi planner'dan **oldin** emas, uning **ustidan**: planner
+"all" + `clarify` desa ham "u yana nima yozdi?" `plan.chats=[3893]` bo'ladi
+va `clarify` tashlanadi. Tanlangan UI chatlari holatdan ustun.
+`correction`/`context_switch` — meros yo'q, holat tozalanadi. Holatda faqat
+id/sarlavha/raqam/user matni: `_Taint.assert_state` (planner) va
+`state_leak` (saqlash) buni tekshiradi.
+
 ## 8. Telegram qamrovi
 
 `allowlist.READ` ga **11 ta** metod qo'shiladi (hech biri destruktiv emas,

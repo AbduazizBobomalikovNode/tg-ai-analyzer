@@ -48,6 +48,7 @@ from app.llm import LLMError, Msg, Task
 from app.logging import get_logger
 from app.observability import DEEP_CANDIDATES, DEEP_COST, DEEP_LATENCY, DEEP_ROUNDS, DEEP_RUNS
 from app.services import compute as CMP
+from app.services import conv_state as CS
 from app.services import deep_search as DS
 from app.services import limits as LIM
 from app.services import search as S
@@ -173,11 +174,15 @@ def build_orch_prompt(
     selected: list[str],
     mode: str,
     tz: str,
+    state_block: str = "",
+    hint_lines: list[str] | None = None,
 ) -> str:
     """Eski planner kirishi + tanlangan chatlar, vaqt oynasi fakti va rejim qopqog'i.
 
     Xabar **matni** yo'q. Tanlangan chat sarlavhalari ham begona ma'lumot —
-    ular alohida konvertda, `neutralize` dan o'tgan.
+    ular alohida konvertda, `neutralize` dan o'tgan. `state_block` — suhbat
+    holati (`conv_state.render_block`, id/sarlavha/raqam/user matni),
+    `hint_lines` — savoldagi nomga mos chatlar (`agent.chat_hints`, kodda).
     """
     base = DS.build_plan_prompt(question, chat_lines, now=now, history=history)
     parts = [base]
@@ -190,6 +195,15 @@ def build_orch_prompt(
         )
     else:
         parts.append("selected_chats: none")
+    if hint_lines:
+        body = "\n".join(U.neutralize(x) for x in hint_lines)
+        parts.append(
+            f'<untrusted_data kind="chat_hints" count="{len(hint_lines)}">\n{body}\n'
+            "</untrusted_data>\n"
+            "chat_hints: chats whose title matches a name in the question (matched by code)."
+        )
+    if state_block:
+        parts.append(state_block)
     parts.append(window_fact(question, tz=tz, now=now))
     allowed = ", ".join(SK.allowed_skills(mode))
     parts.append(f"mode_ceiling: {mode} — allowed skills: {allowed}")
@@ -412,8 +426,13 @@ def parse_orch_plan(
     mode: str,
     tz: str,
     now: datetime,
+    conv: CS.ConvState | None = None,
 ) -> OrchPlan:
     """Planner JSON → `OrchPlan`. Eski maydonlar `deep_search.parse_plan` dan o'tadi.
+
+    `conv` — suhbat holati: referent ("u", "o'sha guruh") oxirgi entity
+    chatiga, follow-up'da oxirgi oyna meros (`conv_state.apply_to_plan`) —
+    guard'lardan **oldin**, ular yangi chat/oyna bilan ishlasin.
 
     Shu tufayli barcha eski kod qarorlari (oyna savoldan, `retrieval_kind`
     darvozasi, `force_all_chats`, `DISCOVER_RE`, follow-up kengaytirish) o'z
@@ -447,10 +466,27 @@ def parse_orch_plan(
         target = "selected"
     elif sel_synced:
         target = "all"
+    applied = CS.Applied()
+    if conv is not None:
+        applied = CS.apply_to_plan(
+            plan, conv, question=question, selected=sel_synced, known_chats=known_chats
+        )
+        notes.extend(applied.notes)
+        if applied.chats:
+            target = list(applied.chats)
+        if applied.window:
+            # Oyna endi ma'lum — oyna/sanoq darvozasi shunga qarab qayta hal qiladi.
+            plan.retrieval_kind = DS.apply_retrieval_kind(
+                plan, plan.retrieval_kind, question=question
+            )
     steps, step_notes = parse_steps(
         data.get("steps"), mode=mode, known_chats=set(known_chats), question=question
     )
     notes.extend(step_notes)
+    if applied.chats and [s.skill for s in steps] == ["clarify"]:
+        # Holat "kim/qaysi chat" ni allaqachon biladi — so'rash shart emas.
+        steps = []
+        notes.append("state: referent resolved — clarify dropped")
     steps, guard_notes = apply_guards(
         steps, plan=plan, mode=mode, question=plan.standalone_question or question
     )
@@ -484,16 +520,34 @@ async def plan_orchestrated(
     mode: str,
     tz: str,
     now: datetime | None = None,
+    conv: CS.ConvState | None = None,
+    hint_lines: list[str] | None = None,
 ) -> OrchPlan:
-    """**Bitta** planner chaqiruvi (`plan_task()`). Yiqilsa — kod sukuti bilan davom."""
+    """**Bitta** planner chaqiruvi (`plan_task()`). Yiqilsa — kod sukuti bilan davom.
+
+    `conv` — suhbat holati: promptga ixcham blok bo'lib tushadi (oldin
+    `_Taint.assert_state` — xabar matni yo'qligi tekshiriladi) va
+    `parse_orch_plan` da referent/oyna merosi kodda qo'llanadi.
+    """
     taint.add_turns(history, question=question)
     when = now or datetime.now(UTC)
     sel_lines = selected_lines(selected)
     sel_ids = [c.id for c in selected]
+    state_block = CS.render_block(conv) if conv is not None else ""
+    if state_block:
+        taint.assert_state("plan", state_block)
 
     def prompt_for(turns: list[DS.Turn]) -> str:
         return build_orch_prompt(
-            question, chat_lines, now=when, history=turns, selected=sel_lines, mode=mode, tz=tz
+            question,
+            chat_lines,
+            now=when,
+            history=turns,
+            selected=sel_lines,
+            mode=mode,
+            tz=tz,
+            state_block=state_block,
+            hint_lines=hint_lines,
         )
 
     prompt = prompt_for(history)
@@ -526,6 +580,7 @@ async def plan_orchestrated(
         mode=mode,
         tz=tz,
         now=when,
+        conv=conv,
     )
     out.planner_ok = ok
     return out
@@ -762,6 +817,8 @@ async def run_pipeline(
     )
     if len(selected_rows) > len(selected):
         ctx.notes.append("selected: some context chats are not synced yet")
+    # Suhbat holati (migratsiya 0024) — referent/oyna merosi va keyingi turn uchun.
+    ctx.conv = await CS.load(session_factory, conversation_id)
 
     # ── (a) kod darvozasi: salom / meta — planner ham chaqirilmaydi ──────────
     gate = DS.direct_intent(question, history)
@@ -801,6 +858,8 @@ async def run_pipeline(
                 history=history,
                 mode=mode,
                 tz=rctx.tz,
+                conv=ctx.conv,
+                hint_lines=[hint_line(h) for h in ctx_hints(ctx)],
             )
             ctx.plan = orch.plan
             ctx.question = orch.plan.standalone_question or question
@@ -978,6 +1037,60 @@ async def _actions(ctx: SK.RunState) -> list[dict[str, Any]]:
         return []
 
 
+def ctx_hints(ctx: SK.RunState) -> list[Any]:
+    """Savoldagi nom → chat (`agent.chat_hints`, LLM'siz) — yugurishda bir marta."""
+    if ctx.hints is None:
+        from app.services import agent as AG
+
+        ctx.hints = AG.chat_hints(ctx.raw_question, list(ctx.chats_by_id.values()))
+    return ctx.hints
+
+
+def hint_line(h: Any) -> str:
+    """Planner uchun maslahat satri (sarlavha begona — konvert ichida chiqadi)."""
+    return f'"{h.title}" [id:{h.chat_id}] {h.kind} msgs={h.msgs} match={h.score:g}'
+
+
+async def _save_state(
+    ctx: SK.RunState,
+    orch: OrchPlan,
+    *,
+    evidence_refs: list[dict[str, int]] | None = None,
+    terminal: str = "",
+) -> None:
+    """Turn'dan keyingi suhbat holati — **kod** yozadi (`conv_state.update_after_turn`).
+
+    Saqlashdan oldin `_Taint.state_leak`: holatga xabar matni yoki oldingi
+    javob bo'lagi tushgan bo'lsa u saqlanmaydi (log) — keyingi planner
+    promptiga begona matn o'tmasin. Xato javobni buzmaydi.
+    """
+    if ctx.conv is None:
+        return
+    try:
+        new = CS.update_after_turn(
+            ctx.conv,
+            question=ctx.raw_question,
+            plan=ctx.plan,
+            steps=[s.skill for s in orch.steps],
+            facts=list(ctx.facts.values()),
+            evidence_refs=list(evidence_refs or []),
+            hints=ctx_hints(ctx),
+            chat_titles=ctx.chat_titles,
+            tool_calls=list((ctx.agent_meta or {}).get("tool_calls") or []),
+            selected=ctx.selected,
+            answer_kind=orch.expected_answer_kind,
+            terminal=terminal,
+        )
+        blob = json.dumps(new.to_json(), ensure_ascii=False, default=str)
+        if ctx.taint.state_leak(U.neutralize(blob)) or ctx.taint.state_leak(blob):
+            log.error("orch.state_taint", conversation_id=ctx.conversation_id)
+            return
+        ctx.conv = new
+        await CS.save(ctx.session_factory, ctx.conversation_id, new)
+    except Exception as exc:  # holat — yordamchi; javob allaqachon yozilgan
+        log.warning("orch.state_failed", error=f"{type(exc).__name__}: {str(exc)[:200]}")
+
+
 def _orch_meta(orch: OrchPlan, ctx: SK.RunState) -> dict[str, Any]:
     return {
         "steps": [s.to_dict() for s in orch.steps],
@@ -1051,6 +1164,7 @@ async def _finish_terminal(
         run_id=ctx.run_id,
     )
     state["persisted"] = True
+    await _save_state(ctx, orch, terminal=intent)
     state["status"] = "direct"
     DEEP_RUNS.labels("direct").inc()
     DEEP_LATENCY.observe(ctx.elapsed())
@@ -1176,6 +1290,7 @@ async def _finish_agent(
         run_id=ctx.run_id,
     )
     state["persisted"] = True
+    await _save_state(ctx, orch)
     state["status"] = "ok"
     DEEP_RUNS.labels("ok").inc()
     DEEP_LATENCY.observe(ctx.elapsed())
@@ -1480,6 +1595,7 @@ async def _finish_answer(
         run_id=ctx.run_id,
     )
     state["persisted"] = True
+    await _save_state(ctx, orch, evidence_refs=context_meta["evidence_refs"])
     DEEP_RUNS.labels(status).inc()
     DEEP_ROUNDS.observe(1)
     DEEP_CANDIDATES.observe(len(ctx.candidates))

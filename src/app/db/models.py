@@ -506,6 +506,12 @@ class Conversation(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=_now(), onupdate=_now()
     )
+    #: Suhbatning ishchi holati (migratsiya 0024, `services/conv_state.py`):
+    #: aniqlangan odam/chat, oxirgi oyna, oxirgi natija havolalari, til.
+    #: Har turn'dan keyin **kod** yozadi; faqat id/sarlavha/raqam/user matni.
+    state: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, default=dict, server_default=text("'{}'::jsonb"), nullable=False
+    )
 
     messages: Mapped[list[ConversationMessage]] = relationship(
         back_populates="conversation",

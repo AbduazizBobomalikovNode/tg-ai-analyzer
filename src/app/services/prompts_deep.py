@@ -746,6 +746,13 @@ post, saved messages, a calendar/date jump, one exact message by link or id. Pre
 macro-skills whenever they fit — an overview is `chat_digest`, a count is `stats`, a time \
 window is `window`, a subject is `search_local`. `agent_tools` is usually the only step; \
 args: {"focus": "<what to fetch, in the user's words>", "chat_id": <id when known>}.
+12. <conversation_state> is kept by code across turns (ids, titles, numbers, the user's \
+own words — never message text). "u", "uni", "o'sha odam", "shu guruh", "o'sha vaqt", \
+"он", "его", "him", "that chat" refer to resolved_entities[last_entity] and last_window \
+FIRST — target that chat id, never `clarify` who "u" is when the state names them. A \
+follow-up without a new period keeps last_window. `reuse_prior` re-reads \
+last_result.evidence_refs. A correction ("yo'q, men boshqasini…") or a new subject drops \
+the old entity/window. <chat_hints> are chats whose title matches a name in the question.
 
 ## Examples
 selected chat "Honadoshlar" / latest: "bu chatda nima bor edi!"

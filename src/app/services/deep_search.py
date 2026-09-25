@@ -906,6 +906,25 @@ class _Taint:
             if body in prompt:
                 raise DeepSearchError("taint", f"{stage}: untrusted message text in prompt")
 
+    def state_leak(self, text: str) -> bool:
+        """Suhbat holatida (`conv_state`) begona **xabar** yoki oldingi javob bo'lagi bormi.
+
+        Holat faqat id / sarlavha / raqam / foydalanuvchi matnidan iborat
+        bo'lishi shart — u keyingi turn'larda planner promptiga ochiq JSON
+        bo'lib tushadi. Foydalanuvchining o'z matni (savol) bu tekshiruvdan
+        oldin olib tashlanadi: u javobda takrorlangan bo'lishi mumkin.
+        """
+        body = text or ""
+        for user_text in self._user:
+            if user_text:
+                body = body.replace(user_text, " ")
+        return any(t in body for t in self._texts) or any(p in body for p in self._prior)
+
+    def assert_state(self, stage: str, text: str) -> None:
+        """`state_leak` — qattiq xato (`plan` promptiga holat bloki qo'shilishidan oldin)."""
+        if self.state_leak(text):
+            raise DeepSearchError("taint", f"{stage}: message text in conversation state")
+
     def prior_leak(self, prompt: str) -> bool:
         """Oldingi javob konvertdan chiqib ketganmi — **xato emas**, signal.
 

@@ -46,6 +46,7 @@ Xato formati: `{"detail": {"code": "<i18n kalit>", ...}}` — kalitlar
 | PATCH | `/api/conversations/{id}` | `{title}` (≤120, zararsizlantiriladi) → `{id, title, account_id}` |
 | GET | `/api/conversations/{id}/messages?limit=1..500&before=<msg id>` | `{conversation, items:[…, actions?], next_before}` — **eng yangisi oxirida**, `before` dan eski qatorlar |
 | DELETE | `/api/conversations/{id}` | |
+| GET | `/api/conversations/{id}/state` | **faqat o'qish**, egasi (debug) → `{conversation_id, state}` — suhbat ishchi holati, pastda |
 | POST | `/api/conversations/{id}/messages` | `{text, mode?: auto|agent|direct|deep, account_id?, deep?, context?: {account_id, peer_id, limit?, strategy?: auto|recent|search|window}}` → `{conversation_id, user_message_id, assistant_message_id, text, model, provider, tokens_in, tokens_out, latency_ms, cost_usd, context, actions[]}` |
 | POST | `/api/conversations/{id}/messages/stream` | o'sha tana → **SSE** (quyida) |
 | POST | `/api/conversations/{id}/messages/{mid}/regenerate` | `{context?, mode?, deep?, account_id?, stream?}` — oxirgi user turn'ini qayta yugurtiradi (eski javob o'chadi, matn saqlangan savoldan olinadi). Javob `/messages` bilan bir xil; `stream: true` → SSE. `409 chat.err.not_last` — bu oxirgi turn emas |
@@ -54,6 +55,32 @@ Xato formati: `{"detail": {"code": "<i18n kalit>", ...}}` — kalitlar
 `context` javobda: `strategy`, `source` (`db`/`live`/`tools`), `est_tokens`,
 `truncated`, `hits`, agent rejimida `tools`, `tool_calls`, `iterations`, `run_id`,
 `action_ids`.
+
+`mode: auto|agent` (UI "Tez") — `ORCHESTRATOR=true` (sukut) bo'lsa **orkestrator**
+orqali, rejim qopqog'i `fast`: `context.mode = "agent"` o'zgarmagan, qo'shimcha
+`scale_mode: "fast"`, `orchestrator` (`steps`, `used`, `notes`), `plan`, `coverage`,
+`facts`, `evidence_refs`; eski agent sikli ishlagan bo'lsa (`agent_tools`)
+`tools` / `tool_calls` / `stop_reason`. SSE shartnomasi o'sha (`status` / `token`
+/ `done`), ko'nikma qadami va agent tool'i — `status {stage: "tool", tool}` chipi.
+
+`state` (`GET …/state`, migratsiya 0024) — kod yozadi, model emas; xabar matni yo'q:
+
+```json
+{
+  "v": 1,
+  "resolved_entities": {"Otabek": {"chat_id": 3893, "title": "Otabek Karimov", "kind": "private"}},
+  "last_entity": "Otabek",
+  "selected_chats": [3893],
+  "last_window": {"since": "2026-09-24T19:00:00+00:00", "until": "2026-09-25T19:00:00+00:00",
+                  "kind": "yesterday", "tz": "Asia/Tashkent"},
+  "last_result": {"skill": "search_local", "steps": ["search_local"],
+                  "evidence_refs": [{"chat_id": 3893, "tg_msg_id": 101}], "facts": {"total": 12}},
+  "last_answer_kind": "text",
+  "topic": "Otabek kecha nima dedi?",
+  "language": "uz",
+  "turns": 1
+}
+```
 
 ### SSE: `POST /api/conversations/{id}/messages/stream`
 

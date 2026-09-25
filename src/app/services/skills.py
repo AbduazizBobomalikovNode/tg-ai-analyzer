@@ -146,6 +146,8 @@ class RunState:
     #: Suhbatning ishchi holati (`services/conv_state.py`) — faqat id, sarlavha,
     #: raqam va foydalanuvchi matni; xabar matni **yo'q**.
     conv: Any = None
+    #: Savoldagi nomga mos chatlar (`agent.chat_hints`, kodda) — bir marta hisoblanadi.
+    hints: list[Any] | None = None
 
     def elapsed(self) -> float:
         return self.now() - self.started
@@ -413,7 +415,10 @@ async def _clarify(ctx: RunState, args: dict[str, Any]) -> SkillResult:
 
 
 async def _reuse_prior(ctx: RunState, args: dict[str, Any]) -> SkillResult:
-    refs = DS.prior_refs(ctx.history)
+    # Suhbat holatining `last_result` havolalari birinchi (u agent/stats turn'ida
+    # ham to'ladi), bo'lmasa oxirgi assistant qatorining `evidence_refs` i.
+    state_refs = (ctx.conv.last_result or {}).get("evidence_refs") if ctx.conv else None
+    refs = list(state_refs or []) or DS.prior_refs(ctx.history)
     if not refs:
         return SkillResult(notes=["reuse_prior: no prior evidence"], summary={"hits": 0})
     async with ctx.session_factory() as session:
