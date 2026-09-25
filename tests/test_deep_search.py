@@ -39,6 +39,8 @@ from app.services.prompts_deep import (
     DEEP_PLAN_PROMPT,
     DEEP_REFLECT_PROMPT,
     DEEP_SYNTH_PROMPT,
+    SCALE_FILTER_PROMPT,
+    SCALE_MAP_PROMPT,
 )
 from app.services.prompts_retrieval import CLUSTER_LABEL_PROMPT, RERANK_PROMPT
 
@@ -2579,7 +2581,15 @@ def test_deep_prompts_describe_the_follow_up_contract() -> None:
     # `daily-20` — javob manzilni kim yuborganini aytmagan); imkoniyatlar
     # matni (`capabilities_text`) endi Brifing/Alertlar sahifalariga ham
     # yo'naltiradi.
-    assert DEEP_PROMPT_VERSION == "2026-09-25.2"
+    # 2026-09-25.3 — sintez/map/filtr prompt'lari ixcham dalil formatini
+    # tasvirlaydi (`### chat` → `#### kun` → `[#id] HH:MM kim: matn`, e7aacff).
+    assert DEEP_PROMPT_VERSION == "2026-09-25.3"
+    # Eski `[chat | date | sender]` qavsi hech bir prompt'da qolmasin.
+    for prompt in (DEEP_SYNTH_PROMPT, SCALE_MAP_PROMPT, SCALE_FILTER_PROMPT):
+        assert "| date |" not in prompt and "[chat title |" not in prompt
+    assert "#### YYYY-MM-DD" in DEEP_SYNTH_PROMPT and "HH:MM sender: text" in DEEP_SYNTH_PROMPT
+    assert "`[#c1023m42]`" in SCALE_MAP_PROMPT and "HH:MM sender: text" in SCALE_MAP_PROMPT
+    assert "### <chat title>" in SCALE_FILTER_PROMPT
     assert "retrieval_kind" in DEEP_PLAN_PROMPT
     for field_name in ("standalone_question", "intent_follow_up", "needs_retrieval"):
         assert field_name in DEEP_PLAN_PROMPT

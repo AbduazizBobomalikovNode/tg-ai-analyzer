@@ -1405,16 +1405,39 @@ def dedup_fast(hits: list[S.Hit]) -> list[S.Hit]:
 
 
 def filter_line(index: int, hit: S.Hit, *, max_chars: int = FILTER_LINE_CHARS) -> str:
-    """`#i [chat | sana | kim] qisqartirilgan matn` — konvert ichidagi bitta satr."""
+    """`#i YYYY-MM-DD kim: qisqartirilgan matn` — chat nomi satrda emas, sarlavhada.
+
+    Ilgari `#i [chat | sana | kim] matn` edi: sarlavha (o'rtacha ~35 belgi) har
+    satrda takrorlanardi. Chat endi partiya ichida `### <sarlavha>` bo'lib bir
+    marta yoziladi (`build_filter_envelope`) — sintez konverti bilan bir uslub.
+    """
     when = hit.date.strftime("%Y-%m-%d") if hit.date else "?"
-    head = f"{U.attr(hit.chat_title)} | {when} | {U.attr(hit.sender)}"
     body = U.neutralize(S.compact_text(hit.text or "", max_chars=max_chars))
-    return f"#{index} [{head}] {body}".strip()
+    return f"#{index} {when} {U.attr(hit.sender) or '?'}: {body}".strip()
+
+
+def _chat_title_line(hit: S.Hit, *, with_id: bool = False) -> str:
+    """`### <sarlavha>` (`with_id` — `(id N)` bilan). Sarlavha begona matn → `attr`."""
+    title = U.attr(hit.chat_title) or "(untitled chat)"
+    tail = f" (id {hit.chat_id})" if with_id and hit.chat_id else ""
+    return f"### {title}{tail}"
 
 
 def build_filter_envelope(question: str, batch: Sequence[tuple[int, S.Hit]]) -> str:
-    """Bitta konvert, nomzodlar faqat raqam bilan tanaladi (invariant 3)."""
-    lines = "\n".join(filter_line(i, h) for i, h in batch)
+    """Bitta konvert, nomzodlar faqat raqam bilan tanaladi (invariant 3).
+
+    Partiya ichida satrlar chat bo'yicha guruhlanadi (birinchi uchragan chat
+    birinchi, chat ichida asl tartib) — indeks o'zgarmaydi, ya'ni `parse_keep`
+    va hovuz o'rni aynan avvalgidek.
+    """
+    groups: dict[tuple[int, str], list[tuple[int, S.Hit]]] = {}
+    for i, h in batch:
+        groups.setdefault((h.chat_id, h.chat_title or ""), []).append((i, h))
+    out: list[str] = []
+    for rows in groups.values():
+        out.append(_chat_title_line(rows[0][1]))
+        out.extend(filter_line(i, h) for i, h in rows)
+    lines = "\n".join(out)
     return (
         f"<question>{U.neutralize(question)}</question>\n"
         f'<untrusted_data kind="candidates" count="{len(batch)}">\n'
@@ -1821,18 +1844,38 @@ def map_chunks(
 
 
 def build_map_envelope(question: str, chunk: Sequence[S.Hit]) -> tuple[str, set[str]]:
-    """Bitta konvert + o'sha bo'lakda **ruxsat etilgan** token'lar to'plami."""
+    """Bitta konvert + o'sha bo'lakda **ruxsat etilgan** token'lar to'plami.
+
+    Shakl — sintez konverti bilan bir (`deep_search.build_evidence_envelope`):
+
+        ### <chat sarlavhasi> (id 3819)
+        #### 2026-09-21
+        [#c3819m7775] 08:12 Ali: matn
+
+    Chat va kun satrda takrorlanmaydi. Bo'lak ichidagi tartib saqlanadi
+    (kaskadda bitta chat vaqt bo'yicha; oyna yo'lida chat → yuboruvchi →
+    vaqt), sarlavha faqat chat yoki kun almashganda yoziladi.
+    """
     lines: list[str] = []
     allowed: set[str] = set()
+    cur_chat: tuple[int, str] | None = None
+    cur_day: str | None = None
     for hit in chunk:
         token = hit_token(hit)
         if not token:
             continue
         allowed.add(token)
-        when = hit.date.strftime("%Y-%m-%d %H:%M") if hit.date else "?"
-        head = f"{U.attr(hit.chat_title)} | {when} | {U.attr(hit.sender)}"
+        key = (hit.chat_id, hit.chat_title or "")
+        if key != cur_chat:
+            cur_chat, cur_day = key, None
+            lines.append(_chat_title_line(hit, with_id=True))
+        day = hit.date.strftime("%Y-%m-%d") if hit.date else "?"
+        if day != cur_day:
+            cur_day = day
+            lines.append(f"#### {day}")
+        when = hit.date.strftime("%H:%M") if hit.date else "?"
         body = U.neutralize(S.compact_text(hit.text or "", max_chars=MAP_LINE_CHARS))
-        lines.append(f"#{token} [{head}] {body}")
+        lines.append(f"[#{token}] {when} {U.attr(hit.sender) or '?'}: {body}")
     body_all = "\n".join(lines) or "(no evidence)"
     envelope = (
         f"<question>{U.neutralize(question)}</question>\n"
