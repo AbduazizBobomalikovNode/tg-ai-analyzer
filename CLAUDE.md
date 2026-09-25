@@ -108,7 +108,13 @@ synth → qamrov. Web: `POST /api/conversations/{id}/messages` `mode="deep"`
   uni ham shu qo'riqchidan o'tkazing.
 - **Bitta konvert.** Dalillar faqat bitta `<untrusted_data kind="evidence">`
   ichida, har satr `untrusted.neutralize` dan o'tgan. Ikkinchi konvert
-  qo'shmang.
+  qo'shmang. Shakl ixcham (`build_evidence_envelope`): `## topic` →
+  `### <chat> (@username | id N)` → `#### YYYY-MM-DD` → satr
+  `[#c<chat>m<msg>] HH:MM kim: matn` — chat nomi va sana har satrda
+  takrorlanmaydi (Gemini'da raqam = token; 300 satrlik fixture'da −22%,
+  `tests/test_evidence_format.py`). Byudjet kesimi reyting tartibida, chat
+  ichidagi chiqish vaqt tartibida. Sitata tokeni o'zgarmagan — uni
+  qisqartirmang: `validate_citations` va havola shunga tayanadi.
 - **Vaqt oynasi savoldan — kodda** (`services/timewin.py`, uz/ru/en, akkaunt
   `tz` sida): bugun/kecha/shu hafta/oxirgi N daqiqa|soat|kun|hafta|oy|yil,
   "…dan beri", aniq sana va oraliq, "butun davr" (`since=None`).
@@ -122,7 +128,10 @@ synth → qamrov. Web: `POST /api/conversations/{id}/messages` `mode="deep"`
   faol edi" — bucket rejasi, tirsak va mavzu filtri **yo'q**, oynadagi
   xabarlar `count(*)` bilan sanaladi, ≤`SOFT_MAX_EVIDENCE` bo'lsa hammasi
   dalil, ko'pi `(chat, kun)` kvotasi bilan eng yangisidan olinadi va qamrov
-  "M dan N ko'rildi" deydi. `inbox` = `out=false` **va** (shaxsiy chat yoki
+  "M dan N ko'rildi" deydi. Filtr/map'dan oldin `dedup_window` (≥24 belgili
+  matnlar, `scale_search.dedup_fast`, O(n)) kross-post takrorlarni vakilga
+  yig'adi — `dropped_duplicates` qamrovda, takrorlar "ko'rildi" ga kiradi;
+  qisqa "rahmat"lar tegilmaydi. `inbox` = `out=false` **va** (shaxsiy chat yoki
   mening xabarimga javob) — `@eslatma` sxemada yo'q va buni qamrov aytadi.
   Darvoza kodda (`WINDOW_LIST_RE` + oyna, `TOPIC_MARK_RE` bo'lsa `topic`):
   "bugun IT ta'lim **haqida** nima deyishdi" — mavzu skani, oyna bir kun
@@ -412,6 +421,10 @@ yugurtiring, bitta yugurish hech narsani isbotlamaydi).
   moslik yoki Jaccard ≥0.9, kamida 3 token, "chuqurroq" so'ralmagan bo'lsa)
   server tool'larini **birinchi chaqiruvdanoq** to'sadi, bajariladigan
   chaqiruvlar qopqog'ini 2 taga tushiradi va `runtime_note`ga qator qo'shadi.
+  Raundda qo'riqchi chaqiruvni to'sib, **hech narsa bajarilmagan** bo'lsa
+  sikl darhol to'xtaydi (`stop_reason="repeat_guard"`, byudjet bilan bir xil
+  "javob ber" turn'i) — ilgari model to'silgan chaqiruvni qayta yozib
+  iteratsiya shiftigacha aylanardi.
 - **Suhbat keshi (`services/tool_cache.py`)** — `seen_calls` bitta yugurish
   ichida ishlaydi, bu esa **turn'lar orasida**: kalit `(conversation_id, tool,
   buklangan args)`, TTL 10 daqiqa, Redis (yo'q bo'lsa kesh ham yo'q). Faqat
@@ -422,7 +435,7 @@ yugurtiring, bitta yugurish hech narsani isbotlamaydi).
 - **`AGENT_MAX_EXECUTED_CALLS` (6) va `AGENT_MAX_COST_USD` ($0.15)** — yugurish
   bo'yicha qopqoqlar (`conv-20260917-144833`: turnda 6-11 bajarilgan chaqiruv,
   $0.11-$0.40). Yetilganda tool'lar o'chadi va "bor narsa bilan javob ber"
-  turn'i qo'shiladi; `stop_reason` (`answered|call_budget|cost_budget|iterations`)
+  turn'i qo'shiladi; `stop_reason` (`answered|call_budget|cost_budget|repeat_guard|iterations`)
   `context_used` ga yoziladi. Iteratsiya shifti yolg'iz o'zi yetmagan.
 - **Bir xil so'zlarni serverda takrorlash to'siladi**: lokal `search_messages`
   ≥1 topilma bergan so'rov `search_telegram`/`search_global` bilan qayta
@@ -653,7 +666,10 @@ serverga boradi, shift bir xil.
   kalit nomi bo'yicha (`token|secret|password|session|api_key|authorization|otp|code`,
   `_KEY_ALLOW` istisnolari bilan) va matn ichidagi sir shakllari bo'yicha
   (Telethon session string, `sk-`/`AIza`, bot tokeni). Sentry `before_send`
-  ham shu funksiyani chaqiradi — implementatsiya bitta.
+  ham shu funksiyani chaqiradi — implementatsiya bitta. Token **sonlari**
+  (`tokens_in|tokens_out|tokens_thinking|tokens_cached` — faqat shu aniq
+  nomlar) `_KEY_ALLOW` da: aks holda `token` bo'lagi ularni yashirib, xarajatni
+  log'dan tiklab bo'lmasdi.
 - Konteyner `app` (UID 1000) bo'lib yuguradi, `.dockerignore` `.env*`, `data/`,
   `tests/`, `.git` ni kontekstdan chiqaradi, `HEALTHCHECK` → `GET /healthz`
   (auth yo'q, `{"ok": true}`). Bot/worker/migrate'da healthcheck compose'da
@@ -773,7 +789,12 @@ fayl tizimini LLM'ga ochish. `capabilities()` da TOOLS yo'q — rost.
   Adapter endi byudjetni aniq beradi (`gemini.thinking_config`,
   `GEMINI_THINKING_BUDGET`, default 1024): `gemini-3*` → `thinking_level`,
   `gemini-2.5*` → `thinking_budget`, ikkalasida `include_thoughts=False`.
-  0 = sozlamani yubormaslik. Deep sintez byudjeti `SYNTH_MAX_TOKENS=8000`
+  0 = sozlamani yubormaslik. Daraja **vazifa bo'yicha**
+  (`GEMINI_THINKING_LEVEL_ROUTE|SEARCH|TOOLS|DEEP`, default
+  `minimal/low/low/low`, `router.thinking_level`): ROUTE flash-lite'ning o'z
+  sukuti `minimal` — ilgari hammaga `low` berilib arzon vazifada fikrlash
+  oshirilardi. `minimal` ni bilmaydigan model (3.7/3.8-flash, 3.1-pro) `low`
+  oladi. Deep sintez byudjeti `SYNTH_MAX_TOKENS=8000`
   va `finish_reason` length bo'lsa **bitta** davom ettirish chaqirig'i
   qilinadi; keyin ham kesilgan bo'lsa `context.truncated_answer=True`.
   `finish_reason` ikkala yo'lda ham (`agent` va `deep`) kontekstga yoziladi.
@@ -796,6 +817,22 @@ fayl tizimini LLM'ga ochish. `capabilities()` da TOOLS yo'q — rost.
 - Javobdagi `model` maydoni so'ralganidan farq qilishi mumkin (alias) —
   `pricing.py` ga **qaytgan** nomni qo'shing, aks holda `estimate_cost`
   `None` qaytaradi va kunlik xarajat limiti jimgina ishlamay qoladi.
+- **Thinking va kesh tokenlari hisobda.** Gemini `candidates_token_count`
+  fikrlashni o'z ichiga olmaydi, Google esa uni output narxida oladi —
+  `ChatResult.tokens_thinking` / `tokens_cached` (`usage.thinking_tokens` /
+  `cached_tokens`) → `conversation_messages.tokens_thinking/tokens_cached`
+  (migratsiya 0022, nullable), `context_used`, `agent.done`, `llm.chat`.
+  Narx: `pricing.result_cost(res)` / `estimate_cost(..., tokens_thinking=,
+  tokens_cached=, tier=)` — thinking output narxida, cached `CACHED_PRICES`
+  da (yo'q bo'lsa to'liq narx). `limits.daily_usage` thinking'ni ham sanaydi.
+  Yangi yig'uvchi yozsangiz `estimate_cost(in, out)` ni to'g'ridan-to'g'ri
+  chaqirmang — thinking yo'qoladi va xarajat pastki chegara bo'lib qoladi.
+- **Flex tier faqat fon ishlarida** (`LLM().chat(..., tier=background_tier())`,
+  `LLM_FLEX_BACKGROUND`, default true): worker digest'lari, hafta tugunlari,
+  briefing, judge. Yarim narx, 1-15 daq kechikish; 429/503 dan keyin adapter
+  bir marta standart tier'da uradi (`llm.flex_fallback`),
+  `ChatResult.service_tier` rostini aytadi. Interaktiv yo'lga (agent, deep,
+  chat) Flex **qo'ymang** — `test_llm_thinking_tier.py` grep bilan qo'riqlaydi.
 
 **Model override (`LLM_MODEL_*`).** `LLM_TASK_*` provider bilan modelni birga
 beradi, `LLM_MODEL_ROUTE|SEARCH|TOOLS|DEEP|EMBED|IMAGE` esa **faqat model
