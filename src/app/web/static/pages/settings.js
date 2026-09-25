@@ -540,7 +540,7 @@ ready(() => {
   $("#bud-form")?.addEventListener("submit", saveBudget);
   $("#bud-reset")?.addEventListener("click", resetBudget);
   $("#bud-boost-form")?.addEventListener("submit", submitBoost);
-  for (const chip of $("#bud-chips [data-tokens], #bud-chips [data-usd]")) {
+  for (const chip of $$("#bud-chips [data-tokens], #bud-chips [data-usd]")) {
     chip.addEventListener("click", () => addBoost(Number(chip.dataset.tokens || 0), Number(chip.dataset.usd || 0)));
   }
   $("#unlink-yes")?.addEventListener("click", doUnlink);

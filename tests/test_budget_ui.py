@@ -65,3 +65,12 @@ def test_ask_budget_banner_links_to_settings() -> None:
     settings_js = (ROOT / "src/app/web/static/pages/settings.js").read_text(encoding="utf-8")
     for route in ("/api/settings/budget", "/api/settings/budget/boost"):
         assert route in settings_js
+
+
+def test_boost_chips_are_wired_with_query_all() -> None:
+    """Chip'lar `$$` (querySelectorAll) bilan ulanadi: `$` bitta element
+    qaytaradi va `for…of` da `TypeError` bilan butun sahifa moduli yiqilardi
+    (jonli QA'da tutilgan — karta skeleton'da qotib qolgan edi)."""
+    js = (ROOT / "src/app/web/static/pages/settings.js").read_text(encoding="utf-8")
+    assert 'for (const chip of $$("#bud-chips' in js
+    assert 'for (const chip of $("' not in js
