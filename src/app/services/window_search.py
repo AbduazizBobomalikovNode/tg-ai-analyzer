@@ -139,12 +139,24 @@ def _conds(spec: WindowSpec) -> list[Any]:
         # "Kim bilan gaplashdim" — men **shu oynada** kamida bitta xabar
         # yozgan chatlardagi hamma xabar. Aks holda men hech yozmagan katta
         # kanal/guruh "suhbatdosh" bo'lib reytingni egallardi.
+        # `IN (SELECT DISTINCT chat_id …)`, korrelyatsiyali `EXISTS` emas:
+        # jonli korpusda EXISTS har qator uchun nested-loop semi-join bo'lib
+        # 31 s oldi, bu esa bitta hash semi-join (≈0.1 s).
         mine = aliased(Message)
-        window = [mine.chat_id == Message.chat_id, mine.out.is_(True)]
+        mine_chat = aliased(Chat)
+        window = [mine.out.is_(True), mine_chat.account_id == spec.account_id]
+        if spec.chats:
+            window.append(mine.chat_id.in_(list(spec.chats)))
         if spec.since is not None:
             window.append(mine.published_at >= spec.since)
         window.append(mine.published_at < spec.until)
-        conds.append(exists().where(and_(*window)))
+        talked = (
+            select(mine.chat_id)
+            .join(mine_chat, mine_chat.id == mine.chat_id)
+            .where(*window)
+            .distinct()
+        )
+        conds.append(Message.chat_id.in_(talked))
     elif spec.inbox:
         # "Menga yozgan" = meniki emas **va** (shaxsiy chat **yoki** mening
         # xabarimga javob). Eslatmalar (`@username`) sxemada saqlanmaydi —

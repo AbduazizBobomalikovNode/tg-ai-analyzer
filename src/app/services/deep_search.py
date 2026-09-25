@@ -1377,7 +1377,11 @@ def apply_retrieval_kind(plan: DeepPlan, value: Any, *, question: str) -> str:
     open_stats = (
         listing and aggregate and not topical and bool(direction or _COUNT_LIST_RE.search(joined))
     )
-    if listing and not topical and kind != "person" and (has_window or open_stats):
+    # Sanoq savoli (yo'nalish yoki "nechta xabar" + reyting) `person` ni ham
+    # bosadi: jonli yugurishda planner "kimga eng ko'p yuborganman" ga `person`
+    # berdi va savol 400 bucket'lik mavzu skaniga ketdi. Reytingda nomlangan
+    # odam yo'q — javob `count(*)` dan.
+    if listing and not topical and (kind != "person" or open_stats) and (has_window or open_stats):
         # Sanoq savoli oynasiz ham `window` bo'ladi ("butun davr"): u xabar
         # o'qimaydi, faqat `count(*)` — chegarasiz oyna bu yerda arzon.
         kind = "window"

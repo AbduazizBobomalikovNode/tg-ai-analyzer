@@ -841,8 +841,10 @@ async def test_direction_filters_are_expressed_in_sql() -> None:
         both, WS.WindowSpec(account_id=1, chats=None, since=since, until=NOW, direction="both")
     )
     sql = both.seen[0].lower()
-    # "men shu oynada yozgan chatlar" — EXISTS ichida mening xabarim
-    assert "exists" in sql and "out is true" in sql
+    # "men shu oynada yozgan chatlar" — bitta `IN (SELECT DISTINCT chat_id)`
+    # semi-join (korrelyatsiyali EXISTS jonli korpusda 31 s edi)
+    assert "messages.chat_id in (select distinct" in sql and "out is true" in sql
+    assert "exists" not in sql
     assert "messages.out is false" not in sql
 
 
@@ -998,3 +1000,25 @@ def test_window_estimate_reports_weeks_days_and_chats_never_zero_weeks() -> None
         ),
     )
     assert short.days == 3 and short.grain == "day"
+
+
+def test_stats_question_overrides_a_person_kind_from_the_planner() -> None:
+    """Jonli regressiya: planner `person` berdi va savol mavzu skaniga ketdi."""
+    plan = DS.parse_plan(
+        '{"intent":"person","retrieval_kind":"person","window":null}',
+        question="men bu yilda kimga eng ko'p xabar yuborganman!",
+        known_chats=[1, 2],
+        tz=TZ,
+        now=NOW_25,
+    )
+    assert plan.retrieval_kind == "window"
+    assert plan.direction == "out" and plan.window_stats is True
+    # Nomlangan odam haqidagi oddiy savol esa `person` bo'lib qoladi.
+    named = DS.parse_plan(
+        '{"intent":"person","retrieval_kind":"person","window":null}',
+        question="Nurbek bu hafta nima dedi?",
+        known_chats=[1, 2],
+        tz=TZ,
+        now=NOW_25,
+    )
+    assert named.retrieval_kind == "person"
