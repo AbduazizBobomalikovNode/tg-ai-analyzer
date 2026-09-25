@@ -208,6 +208,9 @@ async function runDeep(question, shell, opts) {
 
   await stream("/api/deep/stream", {
     conversation_id: S.convId, question, deep: true, mode, confirm,
+    // "Kontekst chatlari" — orkestrator ularni savol doirasi qiladi
+    // ("bu chatda nima bor edi" = shu chat), "barcha chatlar" deyilmasa.
+    chat_ids: S.contextChats.map(Number),
   }, (ev) => {
     const d = ev.data || {};
     if (ev.kind === "token") {

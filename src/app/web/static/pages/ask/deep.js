@@ -237,9 +237,20 @@ function citeChip(part, index, seq) {
  * yuborishi mumkin (rejadan keyin klaster ham keladi).
  */
 export const STAGE_ORDER = [
-  "plan", "estimate", "stats", "buckets", "pull", "filter", "select",
-  "search", "map", "reduce", "cluster", "rerank", "write",
+  "plan", "digest", "estimate", "stats", "compute", "buckets", "pull", "filter", "select",
+  "search", "server", "map", "reduce", "cluster", "rerank", "write",
 ];
+
+/**
+ * Orkestrator ko'nikmasi → reyk bosqichi (`services/skills.py::Skill.rail`
+ * ning birinchi kaliti). `step` hodisasi kelsa shu bosqich yonadi/tugaydi —
+ * `digest`, `compute`, `server` uchun bu yagona signal.
+ */
+const SKILL_STAGE = {
+  chat_digest: "digest", stats: "stats", compute: "compute", window: "estimate",
+  search_local: "search", reuse_prior: "search", search_server: "server",
+  discover: "server", scan_corpus: "estimate",
+};
 
 /**
  * Rejim bo'yicha **zaxira** ro'yxat: server `stages` hodisasini yubormasa
@@ -266,13 +277,16 @@ function nextStage(model, key) {
 }
 
 const STAGE_ICON = {
-  plan: "brain", estimate: "activity", stats: "bar-chart-3", buckets: "layers", pull: "database",
+  plan: "brain", digest: "list", compute: "hash", server: "send",
+  estimate: "activity", stats: "bar-chart-3", buckets: "layers", pull: "database",
   filter: "filter", select: "check-check", search: "search", map: "bolt",
   reduce: "layers", cluster: "layers", rerank: "filter", write: "edit-3",
 };
 
 const STAGE_LABEL = {
-  plan: "web.deep.step_plan", estimate: "web.ask.stage_estimate", stats: "web.ask.stage_stats",
+  plan: "web.deep.step_plan", digest: "web.ask.stage_digest", compute: "web.ask.stage_compute",
+  server: "web.ask.stage_server",
+  estimate: "web.ask.stage_estimate", stats: "web.ask.stage_stats",
   buckets: "web.ask.stage_buckets", pull: "web.ask.stage_pull",
   filter: "web.ask.stage_filter", select: "web.ask.stage_select",
   search: "web.ask.stage_search", map: "web.ask.stage_map",
@@ -359,6 +373,21 @@ export function reduceEvent(model, kind, d = {}, at = 0) {
       if (!model.active && model.stages.plan && model.stages.plan.state === "done") {
         const next = plannedStages(model).find((k) => !model.stages[k]);
         if (next) touch(next, "active");
+      }
+      break;
+    }
+
+    // Orkestrator qadami: `start` → bosqich yonadi, `done` → tugaydi. Qidiruv
+    // va skan bosqichlarining ichki hodisalari (search/pull/filter…) o'z
+    // yo'lida ishlayveradi — bu faqat ko'nikma chegarasini belgilaydi.
+    case "step": {
+      const key = SKILL_STAGE[d.skill] || d.stage;
+      if (!key || !STAGE_ORDER.includes(key)) break;
+      if (d.state === "start") {
+        closeBefore(key);
+        touch(key, "active");
+      } else if (d.state === "done" && key !== "estimate") {
+        touch(key, "done");
       }
       break;
     }

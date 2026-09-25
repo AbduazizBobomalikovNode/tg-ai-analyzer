@@ -25,6 +25,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from app.config import get_settings
 from app.db.base import session_scope
 from app.db.models import Account
 from app.logging import get_logger
@@ -54,6 +55,9 @@ class DeepIn(BaseModel):
     deep: bool = True
     mode: str = ""
     confirm: bool = False
+    #: UI'dagi "Kontekst chatlari" (`chats.id`). Egalik orkestratorda
+    #: tekshiriladi: akkauntga tegishli bo'lmagan id jimgina tashlanadi.
+    chat_ids: list[int] = Field(default_factory=list, max_length=20)
 
 
 def _http(code: str, detail: str = "") -> HTTPException:
@@ -145,6 +149,8 @@ async def deep_stream(
                 deep=body.deep,
                 mode=DS.normalize_mode(body.mode, deep=body.deep),
                 confirm=_confirm(body),
+                orchestrate=get_settings().orchestrator,
+                chat_ids=body.chat_ids,
             ):
                 if event.kind == "done" and (
                     event.data.get("needs_confirm") or event.data.get("direct")
@@ -182,6 +188,8 @@ async def deep_once(
             deep=body.deep,
             mode=DS.normalize_mode(body.mode, deep=body.deep),
             confirm=_confirm(body),
+            orchestrate=get_settings().orchestrator,
+            chat_ids=body.chat_ids,
         )
     except DS.DeepSearchError as exc:
         raise _http(exc.code, exc.detail) from exc

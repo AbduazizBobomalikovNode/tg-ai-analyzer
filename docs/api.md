@@ -77,9 +77,42 @@ shartnoma oqim qo'shilganda ham o'zgarmaydi. Saqlash oqimsiz yo'l bilan
 
 ### SSE: `POST /api/deep/stream`
 
-Tana: `{conversation_id, question, mode?: fast|deep|exhaustive, deep?, confirm?}`.
+Tana: `{conversation_id, question, mode?: fast|deep|exhaustive, deep?, confirm?,
+chat_ids?: [int]}`. `chat_ids` — UI'dagi "Kontekst chatlari" (`chats.id`,
+≤20); akkauntga tegishli bo'lmagan id jimgina tashlanadi. Savol "hamma/barcha
+chatlar" demasa, orkestrator qidiruv doirasini shu chatlar bilan cheklaydi.
 Rejim — **qopqoq**, buyruq emas: u qidiruv qanchalik chuqur bora olishini
 aytadi, qidirish kerakligini emas.
+
+**Orkestrator** (`ORCHESTRATOR=true`, sukut) — planner ko'nikmalar
+katalogidan qadamlar tanlaydi (`services/orchestrator.py`). Hodisalarga
+qo'shimchalar:
+
+| Hodisa | `data` |
+|---|---|
+| `plan` | eski maydonlar + `{orchestrator: true, steps: [{skill, args, why, origin: plan|guard|replan|fallback|gate}], target_chats: "all"|"selected"|[id], expected_answer_kind: digest|list|number|table|text, output_budget: short|normal|detailed, plan_notes: [...]}` |
+| `stages` | `{stages, steps, mode, direct?}` — reja (va har replan/server qo'riqchisi) dan keyin **qayta** keladi; reyk kalitlariga `digest`, `compute`, `server` qo'shildi |
+| `step` | `{index, skill, state: "start"|"done", stage, why?, summary?, facts?}` — har ko'nikma chegarasi; `summary` faqat sanoq (`{hits, chats, total, days, …}`), `facts` — `[{name, value, label, unit, expr, source}]` (kodda hisoblangan raqamlar) |
+| `digest` | `{chats, day_digests, week_digests, computed_days, messages}` — `chat_digest` |
+| `compute` | `{facts: [...]}` — `compute` natijasi |
+| `done` | eski maydonlar + `{steps: [skill…], facts?: [...], actions?: [...]}`; `clarify`/`write_propose` ham `direct: true` bilan (`intent: "clarify"|"write"`) |
+
+Misollar (`plan.steps`):
+
+```json
+// tanlangan chat + "bu chatda nima bor edi!" (exhaustive) — baho yo'q
+[{"skill": "chat_digest", "args": {}, "why": "overview of the selected chat", "origin": "plan"}]
+// "bu oyda o'rtacha kuniga nechta xabar yozganman?"
+[{"skill": "stats", "args": {}, "origin": "plan"},
+ {"skill": "compute", "args": {"expr": "total / days", "label": "avg_per_day"}, "origin": "plan"}]
+// "oxirgi 3 oyda ijara narxi …" — ingichka natija → replan
+[{"skill": "search_local", "origin": "plan"}, {"skill": "search_server", "args": {"scope": "global"}, "origin": "replan"}]
+```
+
+Assistant qatorining `context` ida: `orchestrator {steps, used, target_chats,
+expected_answer_kind, output_budget, notes, planner_ok}`, `facts`,
+`unbacked_numbers` (javobdagi, faktlarda yo'q raqamlar — javob qayta
+yozilmaydi), `selected_chats`.
 
 | Hodisa | `data` |
 |---|---|

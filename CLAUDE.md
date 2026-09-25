@@ -189,6 +189,46 @@ synth → qamrov. Web: `POST /api/conversations/{id}/messages` `mode="deep"`
   `AsyncSession` parallelga xavfsiz emas). Reja oynasi (`since`/`until`)
   `hybrid_search_multi` ga ham, `node_search` ga ham uzatiladi.
 
+### Orkestrator (`services/orchestrator.py`, `services/skills.py`)
+
+Deep/exhaustive kirishi (`/api/deep*`, `chat_service` deep yo'li) endi
+**orkestrator**: planner katalogdan "eng arzon yetarli yo'l" qadamlarini
+tanlaydi, executor ularni tartibda yuritadi. `fast`/agent yo'li o'zgarmagan.
+
+- **Katalog** (`skills.SKILLS`): `answer_direct`, `clarify`, `reuse_prior`,
+  `chat_digest`, `stats`, `compute`, `window`, `search_local`,
+  `search_server`, `discover`, `scan_corpus`, `write_propose`. Har biri —
+  mavjud funksiya ustidagi **yupqa o'ram** (fan_out/run_window/run_scale/
+  escalate/digests); narx, vaqt, `min_mode`, `needs_confirm`, `quarantined`
+  e'lon qilingan. Yangi qidiruv mantiqini bu yerga yozmang — eski modulga
+  yozing va o'rang. Yangi ko'nikma karantinda bo'lsa `QUARANTINED_SKILLS`
+  testi ongli qaror talab qiladi.
+- **Planner** — bitta `Task.SEARCH` chaqiruvi (`ORCH_PLAN_PROMPT` =
+  `DEEP_PLAN_PROMPT` + katalog), eski reja maydonlari `parse_plan` dan
+  o'tadi (oyna, `retrieval_kind`, `force_all_chats`, `DISCOVER_RE`,
+  follow-up — hammasi joyida). Qoidalar: arzon birinchi; `chat_digest`/
+  `stats`/`compute` qidiruvdan oldin; lokal → server → skan; `scan_corpus`
+  faqat ko'p chat x uzun davr + mavzu; `clarify` parametr yo'q bo'lsa;
+  "bu chat" = tanlangan chat; ≤4 qadam; rejim qopqog'idan yuqori yo'q.
+- **Qo'riqchilar** (`apply_guards`) planner ustida, faqat aniq holatlarda:
+  direct/reuse, terminal yolg'iz, sanoq darvozasi → `stats`, mavzusiz oyna →
+  `window`, **1–3 chatga `scan_corpus` yo'q**, `compute` oldidan raqam
+  manbasi, discover, bo'sh reja → `default_steps`. Qopqoqdan yuqori
+  ko'nikma pastga tushiriladi. Server qo'riqchisi (`needs_server`) qidiruvdan
+  keyin; replan ≤1 (dalil < 3, ≤2 qadam, `Task.ROUTE`, faqat sanoq).
+- **Tanlangan chatlar** — `DeepIn.chat_ids` (UI "Kontekst chatlari",
+  `answer.js`), chat API'da `context.peer_id` → pinned chat. "hamma/barcha
+  chatlar" bo'lmasa `plan.chats` = tanlangan.
+- **Raqamlar kodda**: `stats`/`chat_digest` faktlari `count(*)` dan,
+  `compute` — `ast` oq ro'yxatli evaluator (`eval` **yo'q**). Faktlar evidence
+  konvertiga, `unbacked_numbers` javobdagi faktsiz raqamni log/kontekstga
+  yozadi (javob qayta yozilmaydi).
+- **Taint**: karantin ko'nikma chiqishi plan/replan'ga faqat sanoq bo'lib
+  o'tadi; dayjest matni `_Taint.add_texts` bilan qo'riqchida;
+  `assert_clean("replan")`.
+- **Qaytish**: `ORCHESTRATOR=false` → eski `_run_pipeline`
+  (`run_deep_search(orchestrate=...)`, kutubxona sukuti `False`).
+
 ### Suhbatga bog'liqlik (follow-up)
 
 Planner endi oxirgi `DEEP_HISTORY_TURNS` (6) turn'ni ham ko'radi

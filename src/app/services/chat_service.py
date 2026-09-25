@@ -402,6 +402,7 @@ async def send_message(
         # yaratmaymiz (ikki yozuvchi bo'lmasin).
         if acc_id is None:
             raise ChatError("context", "no_account")
+        pinned_chat = await _pinned_chat(session, context)
         return await _send_via_deep(
             user_id=user_id,
             conversation=conversation,
@@ -413,6 +414,7 @@ async def send_message(
             started=started,
             llm=llm,
             events=events,
+            chat_ids=[pinned_chat.id] if pinned_chat is not None else None,
         )
 
     # User turn'i **bir marta** yoziladi: agent yo'li uzilsa ham (LLMError →
@@ -604,6 +606,7 @@ async def _send_via_deep(
     scale_mode: str = "deep",
     llm: LLM | None = None,
     events: EventSink | None = None,
+    chat_ids: list[int] | None = None,
 ) -> Reply:
     """`mode="deep"` → `services/deep_search.run_deep_search` (oqimsiz variant).
 
@@ -628,6 +631,8 @@ async def _send_via_deep(
             # aniq tanlab yuborgan. Tasdiq talab qiladigan yo'l SSE routerda
             # (`/api/deep/stream`), u yerda baho avval ko'rsatiladi.
             confirm=True,
+            orchestrate=get_settings().orchestrator,
+            chat_ids=list(chat_ids or []),
         )
     except DeepSearchError as exc:
         raise ChatError(exc.code, exc.detail) from exc

@@ -440,6 +440,78 @@ naqshi); sintezator ko'radi, lekin unda **tool yo'q** — u faqat matn qaytara
 oladi. `taint` bayrog'i bosqich chegaralarida tekshiriladi: untrusted deb
 belgilangan qiymat planner promptiga o'tolmaydi (test bilan qo'riqlanadi).
 
+### 7.1 Orkestrator v1 (2026-09-25)
+
+**Muammo.** Deep quvuri bitta shakl tanlardi: rejim `exhaustive` bo'lsa
+tanlangan chat bilan "bu chatda nima bor edi!" ham 54 chat x 521 hafta korpus
+skaniga (va tasdiq kartasiga) aylanardi — javob esa bitta chatning dayjest
+keshida turardi. Agent "qachon qidirish, qachon sanash, qachon hisoblash"
+ketma-ketligini bilmasdi.
+
+**Yechim** — ko'nikmalar katalogi + planner + executor. Eski quvur
+funksiyalari **qayta yozilmagan**, ularning ustida yupqa o'ramlar:
+
+| Ko'nikma | O'rami | Narx | Rejim | Karantin |
+|---|---|---|---|---|
+| `answer_direct` | `deep_search.answer_direct` | ~$0.002 | fast | yo'q |
+| `clarify` | kod (planner matni, LLM'siz) | 0 | fast | yo'q |
+| `reuse_prior` | `_refs_to_hits` | 0 | fast | ha |
+| `chat_digest` | `chat_digests` + hafta tugunlari (kesh) + `count(*)` + eng yangi xabarlar; kesh bo'sh bo'lsa ≤5 kun `digest_for_day` | ~$0.003 | fast | ha |
+| `stats` | `window_search.run_window` (`window_stats`) | 0 | fast | yo'q |
+| `compute` | `services/compute.py` (xavfsiz evaluator) | 0 | fast | yo'q |
+| `window` | `window_search.run_window` | ~$0.02 | fast | ha |
+| `search_local` | `fan_out` → `dedup_and_cluster` → `rank` | ~$0.02 | fast | ha |
+| `search_server` | `escalate` (gaps/global) | 0 LLM | fast | ha |
+| `discover` | `escalate` (`discover`) | 0 LLM | deep | ha |
+| `scan_corpus` | `scale_search.run_scale` (baho + tasdiq o'sha) | $0.10 / $0.50 | deep | ha |
+| `write_propose` | `write_tools.propose_or_execute` | 0 | fast | yo'q |
+
+```
+kod darvozasi (direct_intent) ── salom/meta → answer_direct (planner yo'q)
+      ↓
+PLAN  Task.SEARCH, 1 chaqiruv: eski reja maydonlari + steps[≤4] + target_chats
+      + expected_answer_kind + output_budget. Kirish: savol, 6 turn tarix
+      (prior_answer konvertda), selected_chats konverti, chat indeksi,
+      timewin fakti, mode_ceiling (ruxsat etilgan ko'nikmalar). Matn YO'Q.
+      ↓ parse_plan (eski kod qarorlari: oyna, retrieval_kind, force_all_chats,
+      ↓ DISCOVER_RE, follow-up) → parse_steps → apply_guards
+EXECUTOR  qadamlar tartibda; faktlar (raqam) + dalil + da'vo bloklari
+      umumiy RunState'ga; `step` hodisalari
+      ↓ server qo'riqchisi (needs_server, kodda) — qidiruvdan keyin
+      ↓ ≤1 REPLAN (Task.ROUTE, faqat sanoqlar) — dalil < 3 bo'lsa, ≤2 qadam
+SINTEZ  deep_search.synthesize — facts + claims bitta evidence konvertida;
+      stats/compute/chat_digest → Task.SEARCH, mavzu dalili → eski qoida
+      ↓ validate_citations, external_claim_note, unbacked_numbers (log)
+QAMROV + `_persist` (yagona yozuvchi, run_id bilan) + "Qadamlar: …" satri
+```
+
+**Qo'riqchilar** (asosiy mantiq emas — to'siq): G1 planner intenti
+`meta|chitchat` → `answer_direct`; G2 `needs_retrieval=false` →
+`reuse_prior`; terminal ko'nikma yolg'iz; G3 kod sanoq darvozasi
+(`window_stats`) → `stats` birinchi; G4 mavzusiz oyna → `window`; oynasiz
+`window` → `chat_digest`/`search_local`; G5 1–3 chatga `scan_corpus` yo'q
+(mavzu bo'lsa `search_local`, bo'lmasa `chat_digest`); G6 `compute` dan
+oldin raqam manbasi (`stats`); G7 `DISCOVER_RE` → `discover`; bo'sh reja →
+`default_steps`; ≤4 qadam. Qopqoqdan yuqori ko'nikma o'chirilmaydi, pastga
+tushiriladi (`scan_corpus`→`search_local`, `discover`→`search_server`).
+Tanlangan chatlar — "hamma/barcha chatlar" (`force_all_chats`) bo'lmasa
+`plan.chats` = tanlangan.
+
+**Taint.** Karantin ko'nikmalar (matn ko'radiganlar) chiqishi planner/replan
+promptiga faqat **sanoq** bo'lib o'tadi (`summary`); fakt belgilari
+(chat sarlavhasi bo'lishi mumkin) replan'ga tushmaydi — faqat `nom=qiymat`.
+`_Taint.add_texts` dayjest matnini ham qo'riqchi ro'yxatiga qo'shadi;
+`assert_clean("replan", …)` har replan'dan oldin.
+
+**Compute.** `ast` oq ro'yxati: son, fakt nomi, `+ - * / // % **(≤6)`,
+`pct/avg/round/min/max/abs/sum`. `eval` yo'q. Planner ifoda bermasa savol
+so'zlaridan (kuniga/haftasiga/oyiga/foiz/necha kunda bir) bitta formula;
+mos kelmasa hech narsa. `days` = oynadagi kalendar kunlari (bugun ham).
+
+**Qaytish.** `ORCHESTRATOR=false` → router va `chat_service` eski
+`_run_pipeline` ni chaqiradi (`run_deep_search(orchestrate=False)`, kutubxona
+sukuti ham shu).
+
 ## 8. Telegram qamrovi
 
 `allowlist.READ` ga **11 ta** metod qo'shiladi (hech biri destruktiv emas,
