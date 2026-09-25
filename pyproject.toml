@@ -94,6 +94,15 @@ ignore = ["S101"]  # assert allowed in tests
 "src/app/services/compute.py" = ["RUF001", "RUF002", "RUF003"]
 "tests/test_orchestrator.py" = ["RUF001", "RUF002", "RUF003"]
 "tests/test_compute.py" = ["RUF001", "RUF002", "RUF003"]
+# skills_ext: format/alert/briefing/eslatma darvozalari va vaqt iboralari uchta tilda.
+"src/app/services/skills_ext.py" = ["RUF001", "RUF002", "RUF003"]
+"src/app/services/output_formats.py" = ["RUF001", "RUF002", "RUF003"]
+"src/app/services/automation.py" = ["RUF001", "RUF002", "RUF003"]
+"src/app/services/scheduled.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_skills_ext.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_output_formats.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_automation.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_scheduled.py" = ["RUF001", "RUF002", "RUF003"]
 "tests/test_window_search.py" = ["RUF001", "RUF002", "RUF003"]
 "tests/test_entities.py" = ["RUF001", "RUF002", "RUF003"]
 # perf o'lchovi: korpus **sintetik** — `random` shu yerda kriptografiya emas,
