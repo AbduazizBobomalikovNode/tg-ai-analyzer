@@ -1141,3 +1141,107 @@ def test_stats_question_overrides_a_person_kind_from_the_planner() -> None:
         now=NOW_25,
     )
     assert named.retrieval_kind == "person"
+
+
+# ─── dedup: kross-post / takror (docs/cost-research.md, B3-4) ────────────────
+
+
+_ROLES = [
+    "Python dasturchi",
+    "buxgalter",
+    "haydovchi",
+    "sotuv menejeri",
+    "dizayner",
+    "ingliz tili o'qituvchisi",
+    "oshpaz",
+    "qurilish ustasi",
+    "marketolog",
+    "operator",
+    "hamshira",
+    "elektrik",
+    "kassir",
+    "tarjimon",
+    "fotograf",
+    "farrosh",
+    "qo'riqchi",
+]
+_PLACES = ["Chilonzor", "Yunusobod", "Samarqand", "Namangan"]
+
+
+def _unique_text(i: int) -> str:
+    role = _ROLES[i % len(_ROLES)]
+    place = _PLACES[i // len(_ROLES)]
+    extras = " ".join(_ROLES[(i * k + 3) % len(_ROLES)] for k in (2, 5))
+    return f"{role} kerak, {place} filialiga; bilishi shart: {extras}; aloqa {i}"
+
+
+def _dup_corpus() -> list[Any]:
+    """100 xabar: 68 noyob uzun matn + 32 takror (24 aynan, 8 deyarli aynan)
+    — 09-20…09-25 oynasidagi 32% o'lchov nisbati. Qisqa "rahmat" lar ham bor:
+    ular takror **emas** ("kimlar yozgan")."""
+    msgs: list[Any] = []
+    for i in range(68):
+        msgs.append(
+            _msg(
+                i + 1,
+                chat_id=1 + i % 4,
+                hour=i % 24,
+                text=_unique_text(i),
+            )
+        )
+    for j in range(24):  # aynan takror — boshqa chatlarga kross-post
+        src = msgs[j]
+        msgs.append(_msg(200 + j, chat_id=5 + j % 3, hour=j % 24, text=src.text))
+    for j in range(8):  # deyarli aynan — registr va bo'shliq farqi (qayta yozilgan post)
+        src = msgs[30 + j]
+        variant = "  " + src.text.upper().replace(" ", "   ") + " \t"
+        msgs.append(_msg(300 + j, chat_id=6, hour=j, text=variant))
+    return msgs
+
+
+def test_dedup_window_drops_exact_and_near_duplicates_only() -> None:
+    msgs = _dup_corpus()
+    hits = [WS._hit(m, "C") for m in msgs]
+    shorts = [WS._hit(_msg(900 + k, chat_id=1 + k, text="rahmat"), "C") for k in range(5)]
+    kept, dropped = WS.dedup_window(hits + shorts)
+    assert dropped == 32
+    assert len(kept) == 68 + 5  # qisqa "rahmat" lar hammasi qoldi
+    # Vakil takror manbasini yo'qotmaydi
+    first = next(h for h in kept if h.message_id == 1)
+    assert any(mark[0] == 5 for mark in first.also_seen_in)
+
+
+@pytest.mark.asyncio
+async def test_window_run_dedups_before_map_and_reports_it_in_coverage() -> None:
+    msgs = _dup_corpus()
+    session = FakeSession(messages=msgs, chats=7)
+    llm = FakeLLM()
+    plan = _window_plan("bugun nima muhokama qilindi?")
+    outcome = await WS.run_window(
+        session_factory_of(session),
+        account_id=1,
+        plan=plan,
+        question="bugun nima muhokama qilindi?",
+        mode="deep",
+        meter=DS._Meter(llm),
+        taint=DS._Taint(),
+        chat_titles={k: f"Chat {k}" for k in range(1, 8)},
+    )
+    assert outcome.stats.dropped_duplicates == 32
+    assert len(outcome.evidence) == 68
+    assert outcome.stats.to_dict()["dropped_duplicates"] == 32
+    cov = _coverage(
+        {
+            "retrieval_kind": "window",
+            "since": _local(2026, 9, 24),
+            "until": NOW,
+            "tz": "Asia/Tashkent",
+            "total": 100,
+            "taken": len(outcome.evidence) + outcome.stats.dropped_duplicates,
+            "dropped_duplicates": outcome.stats.dropped_duplicates,
+            "chats": 7,
+        }
+    )
+    assert cov.dropped_duplicates == 32
+    assert cov.to_dict()["window"]["dropped_duplicates"] == 32
+    assert cov.window_taken == cov.window_total  # takrorlar ham "ko'rildi"

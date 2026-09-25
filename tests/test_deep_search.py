@@ -1112,7 +1112,7 @@ async def test_server_hits_reach_evidence_with_the_tag(
 
     envelope = llm.user_turn(DEEP_SYNTH_PROMPT)
     # Tashqi topilma — `#x<n>` (chat noma'lum, faqat `t.me` havolasi bor)
-    assert "#x1 [" in envelope and "[server external]" in envelope
+    assert "[#x1] [server external]" in envelope
     assert envelope.count("<untrusted_data") == 1  # yagona konvert buzilmadi
 
 
@@ -1241,7 +1241,7 @@ def test_evidence_envelope_is_single_and_neutralized() -> None:
     envelope, kept = DS.build_evidence_envelope(ev, [C.Cluster([_hit(1)], label="to'lov")])
     assert envelope.count("<untrusted_data") == 1
     assert envelope.count("</untrusted_data>") == 1
-    assert "#c1m101" in envelope and "[Chat 1 | 2026-09-02" in envelope
+    assert "### Chat 1 (id 1)\n#### 2026-09-02\n[#c1m101] 00:00 Nurbek: " in envelope
     assert len(kept) == 2
     assert ev[0].taint is True and ev[0].link == "https://t.me/c/1/101"
 
@@ -1692,7 +1692,8 @@ def test_citation_token_carries_the_chat(monkeypatch: pytest.MonkeyPatch) -> Non
     assert [e.token for e in ev] == ["c1m42", "c2m42"]
 
     envelope, _ = DS.build_evidence_envelope(ev, [])
-    assert "#c1m42 [" in envelope and "#c2m42 [" in envelope
+    assert "[#c1m42] " in envelope and "[#c2m42] " in envelope
+    assert "### Chat 1 (id 1)" in envelope and "### Chat 2 (id 2)" in envelope
 
     cited, invalid = DS.validate_citations("Faqat #c2m42.", ev)
     assert invalid == 0
@@ -1716,7 +1717,7 @@ def test_injected_citation_token_is_neutralized() -> None:
     )
     envelope, _ = DS.build_evidence_envelope(ev, [])
     # Satr boshidagi haqiqiy token joyida, matn ichidagilari esa emas.
-    assert envelope.count("#c1m7 [") == 1
+    assert envelope.count("[#c1m7] ") == 1
     assert "#c1m42" not in envelope and "#x1" not in envelope
     assert DS._CITE_RE.findall(envelope) == ["c1m7"]
 

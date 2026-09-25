@@ -557,6 +557,9 @@ class ScanStats:
     contradictions: int = 0
     chunks: int = 0
     quota_trimmed: int = 0
+    #: Oyna yo'lida (`window_search.dedup_window`) bitta vakilga yig'ilgan
+    #: aynan/deyarli bir xil xabarlar — ko'rilgan, lekin dalilga alohida kirmagan.
+    dropped_duplicates: int = 0
     #: Bosqich sabablari alohida saqlanadi — keyingi bosqich oldingisini
     #: `complete` bilan **bekor qila olmasin** (`combine_stops`).
     pull_stopped_by: str = ""
@@ -613,6 +616,7 @@ class ScanStats:
             "contradictions": self.contradictions,
             "chunks": self.chunks,
             "quota_trimmed": self.quota_trimmed,
+            "dropped_duplicates": self.dropped_duplicates,
             "pull_stopped_by": self.pull_stopped_by,
             "filter_stopped_by": self.filter_stopped_by,
             "stopped_by": self.stopped_by,

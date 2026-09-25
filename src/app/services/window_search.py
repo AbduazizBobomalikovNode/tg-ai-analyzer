@@ -49,6 +49,7 @@ from sqlalchemy.orm import aliased
 
 from app.db.models import Chat, Message, Sender
 from app.llm import Task
+from app.services import cluster as C
 from app.services import deep_search as DS
 from app.services import scale_search as SC
 from app.services import search as S
@@ -694,6 +695,34 @@ def _render_stats(
     return "\n".join(lines)
 
 
+#: Oyna yo'lida dedup faqat shundan uzun (normallashtirilgan) matnga
+#: qo'llanadi — `cluster.dedup_simhash` ning qisqa-matn chegarasi bilan bir.
+#: Nega: "rahmat" / "ok" ni o'nta odam yozgan bo'lsa, ular takror emas —
+#: "kimlar yozgan" savolining aynan o'zi. Kross-post (vakansiya kanallari,
+#: 09-20…09-25 oynada 32% aynan takror) esa har doim uzun.
+WINDOW_DEDUP_MIN_CHARS = 24
+
+
+def dedup_window(pool: list[S.Hit]) -> tuple[list[S.Hit], int]:
+    """Aynan va deyarli bir xil **uzun** matnlarni bitta vakilga yig'adi — O(n).
+
+    `scale_search.dedup_fast` (sha1 + banded simhash) — kaskad bilan bitta
+    implementatsiya, kosinus yo'q. Vakil — tartibda birinchisi (pool vaqt
+    bo'yicha kamayib keladi, ya'ni eng yangisi); qolganlari `also_seen_in`
+    ga tushadi, manba yo'qolmaydi. Qisqa matnlar tegilmaydi. Sanoqlar
+    (`count(*)`) bundan mustaqil — bu faqat dalil/map kirishini tejaydi.
+    Qaytadi: `(qolganlari, tashlangan soni)`.
+    """
+    long_ = [h for h in pool if len(C.normalize(h.text or "")) >= WINDOW_DEDUP_MIN_CHARS]
+    if len(long_) < 2:
+        return pool, 0
+    keep = {id(h) for h in SC.dedup_fast(long_)}
+    out = [
+        h for h in pool if id(h) in keep or len(C.normalize(h.text or "")) < WINDOW_DEDUP_MIN_CHARS
+    ]
+    return out, len(pool) - len(out)
+
+
 def window_chunks(
     evidence: list[S.Hit],
     *,
@@ -852,6 +881,13 @@ async def run_window(
     async with session_factory() as session:
         pool = await DS._hydrate(session, pool, account_id=account_id)
     taint.add_hits(pool)
+    # Kross-post / takror: bir xil uzun matn bir necha chatda (vakansiya
+    # kanallari) — filtr, map va sintez uni har safar qayta o'qirdi.
+    pool, dup_dropped = dedup_window(pool)
+    stats.dropped_duplicates = dup_dropped
+    stats.candidates = len(pool)
+    if dup_dropped:
+        log.info("window.dedup", dropped=dup_dropped, kept=len(pool))
     outcome.pool = pool
 
     # ── (c) tanlov ──────────────────────────────────────────────────────────
