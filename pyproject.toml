@@ -89,6 +89,11 @@ ignore = ["S101"]  # assert allowed in tests
 "tests/test_timewin.py" = ["RUF001", "RUF002", "RUF003"]
 # `deep_search` / `window_search` darvoza naqshlari ham uchta tilda.
 "src/app/services/deep_search.py" = ["RUF001", "RUF002", "RUF003"]
+"src/app/services/skills.py" = ["RUF001", "RUF002", "RUF003"]
+"src/app/services/orchestrator.py" = ["RUF001", "RUF002", "RUF003"]
+"src/app/services/compute.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_orchestrator.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_compute.py" = ["RUF001", "RUF002", "RUF003"]
 "tests/test_window_search.py" = ["RUF001", "RUF002", "RUF003"]
 "tests/test_entities.py" = ["RUF001", "RUF002", "RUF003"]
 # perf o'lchovi: korpus **sintetik** — `random` shu yerda kriptografiya emas,
