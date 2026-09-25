@@ -329,7 +329,7 @@ class _FakeSession:
         # `set_config`. U navbatdan hech narsa yemaydi va hisobga olinmaydi,
         # aks holda har bir vektor kanalli test bitta bo'sh natija qo'shishga
         # majbur bo'lardi (test niyati — kanallar soni, sozlama emas).
-        if "set_config('hnsw" in sql:
+        if "set_config('hnsw" in sql or "set_config('work_mem" in sql:
             return _FakeResult([])
         self.sql.append(sql)
         return _FakeResult(self.queue.pop(0) if self.queue else [])
@@ -407,6 +407,98 @@ async def test_trigram_falls_back_to_word_similarity() -> None:
     hits = await S.trigram_search(session, 1, ["tolov"])  # type: ignore[arg-type]
     assert len(session.sql) == 2 and "word_similarity" in session.sql[1]
     assert len(hits) == 1
+
+
+class _TuneSession(_FakeSession):
+    """`_FakeSession` + `set_config` statementlarini **tartib bilan** yozadi."""
+
+    def __init__(self, *results: list[Any]) -> None:
+        super().__init__(*results)
+        self.order: list[str] = []
+
+    async def execute(self, stmt: Any) -> _FakeResult:
+        sql = str(stmt)
+        self.order.append("work_mem" if "set_config('work_mem" in sql else sql[:40])
+        return await super().execute(stmt)
+
+
+async def test_trigram_channels_raise_work_mem_before_the_trigram_sql() -> None:
+    """Sukut 4MB da oynali bitmap lossy bo'lib, recheck 101 s ga cho'zilgan (0925)."""
+    assert S.TRGM_WORK_MEM == "32MB"
+    for run, row in (
+        (lambda s: S.trigram_search(s, 1, ["tolov"]), (1, 101, 0.8)),
+        (lambda s: S._trigram_multi(s, ["tolov"], conds=[], limit=10), (1, 101, 5, 0.8)),
+    ):
+        session = _TuneSession([row])
+        await run(session)
+        i = session.order.index("work_mem")
+        assert "strict_word_similarity" in session.sql[0]
+        assert i < len(session.order) - 1  # tune — trigram so'rovidan **oldin**
+
+
+async def test_trigram_multi_runs_under_a_savepoint_timeout_and_degrades_to_empty() -> None:
+    """Planner `BitmapAnd` qilmasa trigram 179 s gacha cho'zilgan (0925) — shift bor.
+
+    Shift SAVEPOINT ichida: bekor qilingan so'rov tashqi tranzaksiyani
+    buzmaydi, kanal esa bo'sh ro'yxat qaytaradi (butun subquery yiqilmaydi).
+    """
+    from contextlib import asynccontextmanager
+
+    class _Nested(_FakeSession):
+        def __init__(self, fail: bool) -> None:
+            super().__init__([(1, 101, 5, 0.9)])
+            self.fail = fail
+            self.savepoints = 0
+            self.settings: list[str] = []
+
+        @asynccontextmanager
+        async def begin_nested(self) -> Any:
+            self.savepoints += 1
+            yield self
+
+        async def execute(self, stmt: Any) -> _FakeResult:
+            sql = str(stmt)
+            if "set_config('statement_timeout'" in sql or "set_config('work_mem" in sql:
+                self.settings.append(sql)
+                return _FakeResult([])
+            if self.fail and "trgm_cand" in sql:
+                raise RuntimeError("canceling statement due to statement timeout")
+            return await super().execute(stmt)
+
+    ok = _Nested(fail=False)
+    hits = await S._trigram_multi(ok, ["tolov"], conds=[], limit=10)  # type: ignore[arg-type]
+    assert [h.message_id for h in hits] == [1] and ok.savepoints == 1
+    assert any(str(S.TRGM_MULTI_TIMEOUT_MS) in x for x in ok.settings)
+    bad = _Nested(fail=True)
+    assert await S._trigram_multi(bad, ["tolov"], conds=[], limit=10) == []  # type: ignore[arg-type]
+
+
+async def test_hybrid_multi_embeds_the_query_concurrently_with_lexical_channels(
+    monkeypatch,
+) -> None:
+    """So'rov vektori leksik kanallar **bilan bir vaqtda** olinadi.
+
+    Leksik kanal embedding boshlanishini kutadi: ketma-ket kod bo'lsa (vektor
+    leksikadan keyin) bu kutish hech qachon tugamaydi va test timeout bilan
+    yiqiladi.
+    """
+    import asyncio
+
+    started = asyncio.Event()
+
+    async def slow_vector(question: str, llm: Any) -> list[float]:
+        started.set()
+        return [0.1] * 4
+
+    async def fake_multi(session: Any, col: Any, **kw: Any) -> list[S.Hit]:
+        await asyncio.wait_for(started.wait(), timeout=2)
+        return []
+
+    monkeypatch.setattr(S, "_query_vector", slow_vector)
+    monkeypatch.setattr(S, "_tsv_multi", fake_multi)
+    session = _FakeSession([], [(7, 107, 1, 0.1)])
+    hits = await S.hybrid_search_multi(session, 1, "tolov muddati", levels=())  # type: ignore[arg-type]
+    assert [h.message_id for h in hits] == [7]
 
 
 async def test_hybrid_search_runs_four_channels_without_expansion() -> None:

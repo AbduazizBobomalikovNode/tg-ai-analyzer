@@ -188,6 +188,28 @@ synth → qamrov. Web: `POST /api/conversations/{id}/messages` `mode="deep"`
 - Fan-out'da har subquery **o'z sessiyasi** bilan ishlaydi (bitta
   `AsyncSession` parallelga xavfsiz emas). Reja oynasi (`since`/`until`)
   `hybrid_search_multi` ga ham, `node_search` ga ham uzatiladi.
+- **Fan-out kechikishi — trigram kanali** (2026-09-25, 2.7M xabar, "oxirgi
+  3 oyda ijara narxi qanday o'zgargan?", 6 subquery, butun akkaunt, 116
+  kunlik oyna). Oldin: `fan_out` 108/109/112 s (jonli: 60 s soft-wall bilan
+  kesilgan `search_local` 80–87 s), shundan `_trigram_multi` bitta so'rovda
+  27–104 s; qolgan kanallar ≤2.7 s (tsv_uz), vektor ≤0.6 s, tugun ≤1.7 s.
+  `EXPLAIN (ANALYZE, BUFFERS)` ikki sababni ko'rsatdi va ikkalasi kodda:
+  (1) `work_mem` 4MB da trigram∩sana bitmap'i **lossy** (36k sahifa,
+  306k qator recheck, 101 s) → `search.TRGM_WORK_MEM="32MB"` (`SET LOCAL`,
+  `tune_trgm`) → lossy 0, 33k recheck, izolyatsiyada 9.5–13 s;
+  (2) planner `<<%` selektivligini ba'zi termlarda ~200 qator deb baholab
+  sana indeksi bilan `BitmapAnd` qilmaydi → butun tarix recheck, 179 s →
+  `TRGM_MULTI_TIMEOUT_MS=25_000` SAVEPOINT ichida (`search.trigram_timeout`,
+  kanal bo'sh, tranzaksiya sog'). So'rov embedding'i leksik kanallar bilan
+  parallel (`hybrid_search_multi` → `_hybrid_multi_channels`).
+  Keyin: `fan_out` 23.6/22.5/24.3 s, `fan_out`+dedup+rerank 27.5/26.3/28.0 s
+  (oldin 112/113/116 s), nomzodlar 156 → 156, dalil 40 → 40 (bir xil).
+  `bench.py --sections fanout --account 2 --keep-stats`: trigram 4MB p50
+  75.5 s → 32MB 9.5 s. Oyna filtri har kanal SQL'ida allaqachon bor edi;
+  `PER_SUBQUERY_LIMIT`/`MAX_CANDIDATES`/`TRGM_CANDIDATE_CAP` o'zgarmagan.
+  Trigram hali ham eng sekin kanal (6 parallel ostida ~18–20 s) — keyingi
+  qadam `(published_at, text_fold)` GIN yoki planner'ga ishonmaydigan
+  so'rov shakli, **avval o'lchov**.
 
 ### Orkestrator (`services/orchestrator.py`, `services/skills.py`)
 

@@ -19,6 +19,7 @@ Hech narsa promptga to'g'ridan-to'g'ri qo'shilmaydi — chat_service konvertlayd
 
 from __future__ import annotations
 
+import asyncio
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -92,6 +93,30 @@ TRGM_OP = "<%"
 #: o'sadi. Nomzodlarning **hammasi** allaqachon 0.5 ostonadan yuqori, shuning
 #: uchun kesilgan dum — "eng yomon" emas, "yana bir xil darajadagi" qatorlar.
 TRGM_CANDIDATE_CAP = 2_000
+
+#: Trigram kanali uchun `work_mem` (faqat shu tranzaksiyada, `SET LOCAL`).
+#: `text_fold <<% t` GIN'dan bitmap beradi; sukut 4MB da oynali akkaunt
+#: so'rovining bitmap'i (≈500k TID) **lossy** bo'lib qoladi va har lossy
+#: sahifaning **hamma** qatori `strict_word_similarity` bilan qayta
+#: tekshiriladi. O'lchov (2.7M xabar, 4 oylik oyna, 4 term, 2026-09-25):
+#: 4MB — lossy=36k sahifa, recheck 306k qator, **101 s**; 32MB — lossy=0,
+#: recheck 33k qator, ≈11-13 s. 32MB → bitmap aniq qoladi.
+TRGM_WORK_MEM = "32MB"
+_TRGM_TUNE_SQL = sa_text(f"SELECT set_config('work_mem', '{TRGM_WORK_MEM}', true)")
+#: Akkaunt bo'ylab trigram so'rovining qattiq shifti (SAVEPOINT ichida
+#: `statement_timeout`). Sabab — planner xatosi: `<<%` selektivligini
+#: ba'zi termlarda ~200 qator deb baholaydi (haqiqatda 80k-250k) va sana
+#: indeksi bilan `BitmapAnd` qilmaydi; oyna filtri recheck'dan **keyin**
+#: qo'llanadi va butun tarix (356k qator) qayta tekshiriladi — o'lchovda
+#: 179 s (`ijara,narxlari,ozgarishi,tolov`, 116 kunlik oyna). `BitmapAnd`
+#: tanlangan holatda esa 6 parallel subquery ostida 18-20 s. Shift oshsa
+#: kanal shu subquery uchun bo'sh qaytadi (`search.trigram_timeout`),
+#: qolgan kanallar (tsv, vektor, tugun) o'z natijasini beradi.
+TRGM_MULTI_TIMEOUT_MS = 25_000
+
+_TRGM_TIMEOUT_SQL = sa_text(
+    f"SELECT set_config('statement_timeout', '{TRGM_MULTI_TIMEOUT_MS}', true)"
+)
 
 #: HNSW indeksi `chat_id` filtri haqida hech narsa bilmaydi: sukut bo'yicha u
 #: `ef_search` tagacha nomzod qaytaradi va ular **keyin** filtrlanadi. O'lchovda
@@ -442,6 +467,7 @@ async def _run_trgm(
     limit: int,
 ) -> list[Hit]:
     stmt = _trgm_stmt(col, fn=fn, op=op, threshold=threshold, terms=terms, conds=conds, limit=limit)
+    await tune_trgm(session)
     try:
         rows = (await session.execute(stmt)).all()
     except Exception as exc:  # funksiya/operator yo'q bo'lsa \u2014 kanal jimgina bo'sh
@@ -741,10 +767,28 @@ async def _trigram_multi(
         with_chat=True,
         join=(Chat, Chat.id == Message.chat_id),
     )
+    nested = getattr(session, "begin_nested", None)
     try:
-        rows = (await session.execute(stmt)).all()
-    except Exception as exc:  # funksiya yo'q bo'lsa — kanal jimgina bo'sh
-        log.warning("search.trigram_multi_failed", error=str(exc)[:200])
+        if nested is None:  # test fake'lari — SAVEPOINT yo'q
+            await tune_trgm(session)
+            rows = (await session.execute(stmt)).all()
+        else:
+            # SAVEPOINT: shift yoki xato tashqi tranzaksiyani buzmaydi (keyingi
+            # vektor/tugun kanallari shu sessiyada davom etadi), rollback esa
+            # `work_mem`/`statement_timeout` ni ham qaytaradi. Muvaffaqiyatda
+            # ikkalasi tranzaksiya oxirigacha qoladi (`SET LOCAL`) — keyingi
+            # kanallar bu shiftdan ancha tez.
+            async with nested():
+                await tune_trgm(session)
+                await session.execute(_TRGM_TIMEOUT_SQL)
+                rows = (await session.execute(stmt)).all()
+    except Exception as exc:  # shift / funksiya yo'q — kanal bo'sh, lekin log bilan
+        timeout = "statement timeout" in str(exc) or "QueryCanceled" in type(exc).__name__
+        log.warning(
+            "search.trigram_timeout" if timeout else "search.trigram_multi_failed",
+            error=str(exc)[:200],
+            timeout_ms=TRGM_MULTI_TIMEOUT_MS,
+        )
         return []
     return [Hit(int(r[0]), int(r[1]), float(r[3] or 0), "trigram", chat_id=int(r[2])) for r in rows]
 
@@ -780,6 +824,18 @@ async def tune_hnsw(session: AsyncSession) -> None:
         await session.execute(_HNSW_TUNE_SQL)
     except Exception as exc:
         log.debug("search.hnsw_tune_failed", error=str(exc)[:200])
+
+
+async def tune_trgm(session: AsyncSession) -> None:
+    """Trigram so'rovidan **oldin** `work_mem` ni oshiradi (`TRGM_WORK_MEM`).
+
+    `SET LOCAL` — tranzaksiya oxirida qaytadi. Xato bo'lsa kanal baribir
+    ishlaydi (faqat sekinroq, lossy bitmap bilan).
+    """
+    try:
+        await session.execute(_TRGM_TUNE_SQL)
+    except Exception as exc:
+        log.debug("search.trgm_tune_failed", error=str(exc)[:200])
 
 
 async def _query_vector(question: str, llm: LLM | None) -> list[float] | None:
@@ -1109,6 +1165,52 @@ async def hybrid_search_multi(
         RRF bo'yicha tartiblangan `Hit` ro'yxati (`chat_id` to'ldirilgan).
     """
     base = keywords(question)
+    # So'rov vektori — tarmoq chaqiruvi, sessiyaga tegmaydi: leksik kanallar
+    # bilan **parallel** olinadi (ilgari ular tugagach ketma-ket kutilardi).
+    qvec_task = asyncio.ensure_future(_query_vector(question, llm))
+    try:
+        return await _hybrid_multi_channels(
+            session,
+            account_id,
+            question,
+            base=base,
+            qvec_task=qvec_task,
+            chat_ids=chat_ids,
+            since=since,
+            until=until,
+            limit=limit,
+            expansion=expansion,
+            expand=expand,
+            llm=llm,
+            weights=weights,
+            levels=levels,
+            entities=entities,
+        )
+    finally:
+        if not qvec_task.done():
+            qvec_task.cancel()
+            await asyncio.gather(qvec_task, return_exceptions=True)
+
+
+async def _hybrid_multi_channels(
+    session: AsyncSession,
+    account_id: int,
+    question: str,
+    *,
+    base: list[str],
+    qvec_task: asyncio.Future[list[float] | None],
+    chat_ids: Sequence[int] | None,
+    since: datetime | None,
+    until: datetime | None,
+    limit: int,
+    expansion: Expansion | None,
+    expand: bool,
+    llm: LLM | None,
+    weights: Sequence[float] | None,
+    levels: Sequence[int],
+    entities: Sequence[str] | None,
+) -> list[Hit]:
+    """`hybrid_search_multi` tanasi — kanallar shu sessiyada ketma-ket."""
     if expansion is None and expand and get_settings().search_expand_enabled:
         from app.services.query_expand import expand as expand_query
 
@@ -1166,7 +1268,7 @@ async def hybrid_search_multi(
 
     tri = await _trigram_multi(session, uz_terms or ru_terms, conds=conds, limit=wide)
 
-    qvec = await _query_vector(question, llm)
+    qvec = await qvec_task
     vec = await _vector_multi(session, qvec, conds=conds, limit=wide) if qvec else []
 
     node_hits: list[NodeHit] = []

@@ -486,7 +486,7 @@ class _SqlSession:
 
     async def execute(self, stmt: Any) -> Any:
         sql = str(stmt)
-        if "set_config('hnsw" in sql:
+        if "set_config('hnsw" in sql or "set_config('work_mem" in sql:
             return SimpleNamespace(all=lambda: [], first=lambda: None)
         self.sql.append(sql)
         rows = self.queue.pop(0) if self.queue else []

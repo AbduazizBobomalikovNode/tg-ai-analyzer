@@ -100,7 +100,7 @@ class FakeLLM:
             vectors=vectors,
             model=_model_name(),
             provider="fake",
-            usage=SimpleNamespace(tokens_in=0, tokens_out=0),
+            usage=SimpleNamespace(tokens_in=0, tokens_out=0, thinking_tokens=0, cached_tokens=0),
         )
 
     async def chat(self, *_a: Any, **_k: Any) -> Any:  # pragma: no cover — chaqirilmasin
@@ -623,6 +623,107 @@ async def bench_scale(
         )
 
 
+#: `fanout` bo'limining savollari — jonli sekin misol ("oxirgi 3 oyda ijara
+#: narxi qanday o'zgargan?") rejasining shakli: 6 ta subquery, aralash til.
+FANOUT_SUBQUERIES = [
+    "ijara narxi",
+    "квартира арендаси",
+    "ijara narxlari o'zgarishi",
+    "rent price",
+    "аренда квартир цены",
+    "ijara haq",
+]
+FANOUT_WINDOW_DAYS = 116
+
+
+async def bench_fanout(
+    sm: async_sessionmaker[AsyncSession],
+    timings: list[Timing],
+    info: dict[str, Any],
+    *,
+    runs: int,
+) -> None:
+    """Deep `fan_out` (6 subquery, parallel sessiyalar, oynali) + trigram kanali.
+
+    Trigram kanali ikki marta o'lchanadi: sukut `work_mem` (4MB, lossy
+    bitmap) va `search.TRGM_WORK_MEM` bilan — 2026-09-25 dagi 80 s ning
+    sababi aynan shu farq edi (CLAUDE.md, "Deep search").
+    """
+    import app.services.query_expand as QE
+    from app.services import deep_search as DS
+    from app.services import search as S
+
+    llm: Any = FakeLLM()
+    acc = info["account_id"]
+    until = datetime.now(UTC)
+    since = until - timedelta(days=FANOUT_WINDOW_DAYS)
+    print(f"\n── deep fan_out ({len(FANOUT_SUBQUERIES)} subquery, oyna {FANOUT_WINDOW_DAYS} kun)")
+
+    async def fake_expand(*_a: Any, **_k: Any) -> Any:
+        return _expansion()
+
+    orig_expand = QE.expand
+    QE.expand = fake_expand  # type: ignore[assignment]
+    try:
+        plan = DS.DeepPlan(
+            since=since, until=until, subqueries=list(FANOUT_SUBQUERIES), levels=[0, 1, 2]
+        )
+
+        def factory() -> Any:
+            return sm()
+
+        async def fan(plan: Any = plan) -> Any:
+            return await DS.fan_out(
+                factory,
+                account_id=acc,
+                plan=plan,
+                subqueries=list(FANOUT_SUBQUERIES),
+                meter=DS._Meter(llm),
+                events=None,
+                budget_s=180.0,
+            )
+
+        await measure(
+            timings,
+            "fan_out (6 subquery, oynali, parallel)",
+            fan,
+            runs=max(3, runs // 2),
+            note_from=lambda r: f"candidates={len(r)}",
+        )
+
+        terms = ["rent", "price", "ijara", "narxi"]
+        conds = S._scope(acc, None, since, until)
+        orig_sql = S._TRGM_TUNE_SQL
+        orig_cap = S._TRGM_TIMEOUT_SQL
+        no_cap = text("SELECT set_config('statement_timeout', '0', true)")
+        for label, sql in (
+            ("4MB (sukut)", text("SELECT set_config('work_mem', '4MB', true)")),
+            (S.TRGM_WORK_MEM, orig_sql),
+        ):
+
+            async def tri(sql: Any = sql) -> Any:
+                # Kanal shifti (`TRGM_MULTI_TIMEOUT_MS`) shu o'lchovda
+                # o'chiriladi — aks holda 4MB qatori shiftni o'lchardi.
+                S._TRGM_TUNE_SQL = sql
+                S._TRGM_TIMEOUT_SQL = no_cap
+                try:
+                    async with sm() as s:
+                        return await S._trigram_multi(s, terms, conds=conds, limit=80)
+                finally:
+                    S._TRGM_TUNE_SQL = orig_sql
+                    S._TRGM_TIMEOUT_SQL = orig_cap
+
+            await measure(
+                timings,
+                f"_trigram_multi (4 term, oynali, work_mem {label})",
+                tri,
+                runs=max(3, runs // 2),
+                note_from=lambda r: f"hits={len(r)}",
+            )
+    finally:
+        QE.expand = orig_expand  # type: ignore[assignment]
+
+
 async def _scale_pool(sm: async_sessionmaker[AsyncSession], account_id: int) -> list[Any]:
     """Dedup o'lchovi uchun xom xabarlar (`Hit` shaklida) — LLM'siz."""
     from app.db.models import Chat, Message
@@ -862,14 +963,27 @@ async def index_stats(sm: async_sessionmaker[AsyncSession]) -> list[dict[str, An
 # ─── kirish nuqtasi ──────────────────────────────────────────────────────────
 
 
-async def run(dsn: str, *, runs: int, json_path: str, sections: set[str]) -> None:
+async def run(
+    dsn: str,
+    *,
+    runs: int,
+    json_path: str,
+    sections: set[str],
+    account: int = 0,
+    keep_stats: bool = False,
+) -> None:
     engine = create_async_engine(dsn, poolclass=NullPool)
     sm = async_sessionmaker(engine, expire_on_commit=False)
     timings: list[Timing] = []
     try:
         async with sm() as s:
-            await s.execute(text("SELECT pg_stat_reset()"))
+            # Jonli bazada (`--keep-stats`) statistikani nolga tushirmaymiz:
+            # autovacuum `n_dead_tup`/`n_mod_since_analyze` ga tayanadi.
+            if not keep_stats:
+                await s.execute(text("SELECT pg_stat_reset()"))
             info = await corpus_info(s)
+        if account:
+            info["account_id"] = account
         print(
             f"korpus: {info['messages']} xabar, {info['embeddings']} embedding, "
             f"{info['entities']} entity, {len(info['chats'])} chat"
@@ -889,6 +1003,8 @@ async def run(dsn: str, *, runs: int, json_path: str, sections: set[str]) -> Non
             await bench_misc(sm, timings, info, big_ids, runs=runs)
         if "scale" in sections:
             await bench_scale(sm, timings, info, runs=runs)
+        if "fanout" in sections:
+            await bench_fanout(sm, timings, info, runs=runs)
 
         plans = await explain_channels(sm, info) if "explain" in sections else {}
         stats = await index_stats(sm)
@@ -930,7 +1046,11 @@ def main() -> None:
     ap.add_argument(
         "--sections",
         default="hybrid,multi,episodes,nodes,alerts,misc,scale,explain",
-        help="vergul bilan: hybrid,multi,episodes,nodes,alerts,misc,scale,explain",
+        help="vergul bilan: hybrid,multi,episodes,nodes,alerts,misc,scale,fanout,explain",
+    )
+    ap.add_argument("--account", type=int, default=0, help="0 = min(accounts.id)")
+    ap.add_argument(
+        "--keep-stats", action="store_true", help="pg_stat_reset() qilmaslik (jonli baza)"
     )
     args = ap.parse_args()
     dsn = args.dsn or os.environ.get("DATABASE_URL", "")
@@ -942,6 +1062,8 @@ def main() -> None:
             runs=max(5, args.runs),
             json_path=args.json,
             sections={x.strip() for x in args.sections.split(",") if x.strip()},
+            account=args.account,
+            keep_stats=args.keep_stats,
         )
     )
 
