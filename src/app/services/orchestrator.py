@@ -51,6 +51,7 @@ from app.services import compute as CMP
 from app.services import conv_state as CS
 from app.services import deep_search as DS
 from app.services import limits as LIM
+from app.services import output_formats as OF
 from app.services import search as S
 from app.services import skills as SK
 from app.services import timewin as TW
@@ -80,7 +81,7 @@ MAX_SELECTED = 20
 ANSWER_KINDS = ("digest", "list", "number", "table", "text")
 OUTPUT_BUDGETS = ("short", "normal", "detailed")
 #: Sintez `Task.SEARCH` da yetarli bo'lgan ko'nikmalar (raqam/dayjestni so'zga aylantirish).
-CHEAP_SYNTH_SKILLS = frozenset({"stats", "compute", "chat_digest"})
+CHEAP_SYNTH_SKILLS = frozenset({"stats", "compute", "chat_digest", "format_output"})
 #: Faqat qidiruvdan keyin ma'noli bo'lgan server qo'riqchisi shu ko'nikmalardan keyin.
 SEARCH_SKILLS = frozenset({"search_local", "scan_corpus"})
 REPLAN_SKILLS = frozenset(
@@ -90,6 +91,15 @@ REPLAN_SKILLS = frozenset(
 #: System prompt — eski reja prompti + katalog (registrdan, kodda). Bayt
 #: darajasida barqaror: registr o'zgarmaguncha matn o'zgarmaydi.
 ORCH_PLAN_PROMPT = DEEP_PLAN_PROMPT + ORCH_PLAN_ADDENDUM.replace("{catalog}", SK.catalog_text())
+
+#: `skills_ext` avtomatlashtirish ko'nikmalari — G1/G2 (qidiruvsiz / qayta
+#: ishlatish turn'i) ularni tashlamaydi (`apply_guards`).
+AUTOMATION_SKILLS = frozenset(
+    {"create_alert", "set_briefing", "remind", "cancel_reminder", "send_result"}
+)
+#: Oyna/sanoq darvozalari (G2b/G3/G4) tashlamaydigan qadamlar — ular qidiruv
+#: emas, natijani ko'rsatish yoki yuborish.
+PASSTHROUGH_SKILLS = frozenset({"format_output", "send_result"})
 
 #: Planner yiqilganda (yoki qadam bermaganda) — makro-ko'nikma qoplamaydigan
 #: tool ishi: profil, a'zolar, reaksiyalar, izohlar, saqlangan xabarlar,
@@ -378,16 +388,29 @@ def apply_guards(
     qopqog'i) yoki jonli xatoni (bitta chatga korpus skani) to'sadi.
     """
     notes: list[str] = []
+    # Avtomatlashtirish qadamlari (`skills_ext`: eslatma, alert, briefing,
+    # natijani yuborish) G1/G2 dan **ozod**: "shu xulosani guruhga tashla"
+    # planner uchun `reformat`/`explain` bo'lishi mumkin — qadam yo'qolmasin.
+    # Niyat darvozasi ko'nikmaning o'zida (foydalanuvchi matni bo'yicha).
+    auto = [s for s in steps if s.skill in AUTOMATION_SKILLS and s.skill in SK.SKILLS]
+    auto_terminal = next((s for s in auto if SK.SKILLS[s.skill].terminal), None)
     # G1. qidiruvsiz turn (planner intenti): faqat `answer_direct`.
     if plan.intent_follow_up in DS.DIRECT_FOLLOW_UPS:
+        if auto:
+            notes.append("guard: direct intent — automation step kept")
+            return ([auto_terminal] if auto_terminal else auto), notes
         if [s.skill for s in steps] != ["answer_direct"]:
             notes.append("guard: direct intent → answer_direct")
         return [Step("answer_direct", {"intent": plan.intent_follow_up}, "direct", "guard")], notes
     # G2. oldingi dalilni qayta ishlatish — faqat havola bor bo'lsa (`parse_plan`).
     if not plan.needs_retrieval:
+        reuse = Step("reuse_prior", {}, "reuse previous evidence", "guard")
+        if auto:
+            notes.append("guard: reuse turn — automation step kept")
+            return ([auto_terminal] if auto_terminal else [reuse, *auto]), notes
         if [s.skill for s in steps] != ["reuse_prior"]:
             notes.append("guard: reuse turn → reuse_prior")
-        return [Step("reuse_prior", {}, "reuse previous evidence", "guard")], notes
+        return [reuse], notes
     steps = [
         Step("search_local", {}, s.why, "guard") if s.skill == "reuse_prior" else s for s in steps
     ]
@@ -398,20 +421,25 @@ def apply_guards(
             notes.append(f"guard: {terminal[0].skill} is a single step")
         return [terminal[0]], notes
     # G2b. tipli sanoq: ikki davr taqqoslash / hafta kuni-soat taqsimoti (kodda).
+    # Ko'rinish/avtomatlashtirish qadamlari (jadval, yuborish) — oyna/sanoq
+    # darvozalari ularni "qidiruv emas" deb tashlamaydi, oxirida qoladi.
+    passthrough = [s for s in steps if s.skill in PASSTHROUGH_SKILLS and s.skill in SK.SKILLS]
     typed = typed_stats_steps(plan, question, raw_question=raw_question)
     if typed is not None:
         if [(s.skill, s.args) for s in steps] != [(s.skill, s.args) for s in typed]:
             notes.append("guard: " + " → ".join(f"{s.skill}{s.args or ''}" for s in typed))
         plan.retrieval_kind = "window"
         plan.window_stats = True
-        return typed, notes
+        return (typed + passthrough)[:MAX_STEPS], notes
     # G3. sanoq savoli (kod darvozasi `window_stats`) — `stats` birinchi.
     if plan.retrieval_kind == "window" and plan.window_stats:
-        kept = [s for s in steps if s.skill in ("stats", "compute")]
+        kept = [s for s in steps if s.skill in ("stats", "compute", *PASSTHROUGH_SKILLS)]
         if not any(s.skill == "stats" for s in kept):
             kept.insert(0, Step("stats", {}, "exact counts (window stats gate)", "guard"))
             notes.append("guard: window stats → stats")
-        dropped = [s.skill for s in steps if s.skill not in ("stats", "compute")]
+        dropped = [
+            s.skill for s in steps if s.skill not in ("stats", "compute", *PASSTHROUGH_SKILLS)
+        ]
         if dropped:
             notes.append(f"guard: counts need no {', '.join(sorted(set(dropped)))}")
         steps = kept
@@ -422,7 +450,12 @@ def apply_guards(
         # u `window` ga almashtiriladi. `compute` bilan kelgan `stats` esa
         # arifmetika savoli ("o'rtacha kuniga") — o'sha qoladi.
         arithmetic = any(s.skill == "compute" for s in steps)
-        allowed_here = ("window", "chat_digest", *(("stats", "compute") if arithmetic else ()))
+        allowed_here = (
+            "window",
+            "chat_digest",
+            *(("stats", "compute") if arithmetic else ()),
+            *PASSTHROUGH_SKILLS,
+        )
         kept = [s for s in steps if s.skill in allowed_here]
         if not any(s.skill in ("window", "chat_digest", "stats") for s in kept):
             kept.insert(0, Step("window", {}, "time window (window gate)", "guard"))
@@ -1457,6 +1490,27 @@ def confirm_text(estimate: dict[str, Any], locale: str) -> str:
     )
 
 
+#: Sintezga uzatiladigan qadam izohlari qopqog'i (`step_notes`).
+MAX_STEP_NOTES = 8
+STEP_NOTE_CHARS = 300
+
+
+def step_notes(ctx: SK.RunState) -> list[str]:
+    """Ko'nikmalar `SkillResult.notes` i (masalan `output_formats.FORMAT_NOTE`) — sintezga.
+
+    Izohlar **kodda** yasalgan (ko'nikma nomi, sanoq, qoida matni); baribir
+    `neutralize` + qisqartirishdan o'tadi va takrorlar bir marta.
+    """
+    out: list[str] = []
+    for note in dict.fromkeys(ctx.notes):
+        text = U.neutralize(str(note or "")).strip()[:STEP_NOTE_CHARS]
+        if text:
+            out.append(text)
+        if len(out) >= MAX_STEP_NOTES:
+            break
+    return out
+
+
 def facts_block(facts: list[CMP.Fact]) -> str:
     if not facts:
         return ""
@@ -1519,6 +1573,7 @@ async def _finish_answer(
         notes.append(DIGEST_SYNTH_NOTE)
     if facts:
         notes.append(FACTS_SYNTH_NOTE)
+    notes.extend(step_notes(ctx))
     notes.append(
         f"expected_answer_kind: {orch.expected_answer_kind} (steps: "
         f"{' → '.join(s.skill for s in orch.steps)})"
@@ -1552,6 +1607,12 @@ async def _finish_answer(
     if ext_note:
         log.warning("deep.external_claim_unbacked", external_hits=ctx.server_out.external)
         answer = f"{answer}\n\n{ext_note}"
+        state["answer"] = answer
+    # `format_output` bloki (jadval/grafik) — model ko'chirmasa ham kod qo'shadi.
+    with_blocks = OF.ensure_blocks(answer, ctx.claims)
+    if with_blocks != answer:
+        log.info("orch.format_block_appended", conversation_id=ctx.conversation_id)
+        answer = with_blocks
         state["answer"] = answer
     unbacked: list[float] = []
     if facts:

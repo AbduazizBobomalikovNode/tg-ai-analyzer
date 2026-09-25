@@ -247,6 +247,14 @@ ularni tartibda yuritadi. Rejim — faqat **qopqoq**: `fast` ≤ `search_server`
   kengaytma yiqilsa ilova yiqilmaydi (log).
 - `ORCHESTRATOR=false` — eski bo'linish: `fast` → `run_agent`, deep →
   `_run_pipeline`.
+- **`skills_ext` ulagichlari** (`docs/skills.md`): `AUTOMATION_SKILLS`
+  (`create_alert`/`set_briefing`/`remind`/`cancel_reminder`/`send_result`)
+  G1/G2 dan ozod (reuse turn'ida `send_result` oldidan `reuse_prior`);
+  `PASSTHROUGH_SKILLS` (`format_output`, `send_result`) oyna/sanoq
+  darvozalarida (G2b/G3/G4) tashlanmaydi; `_finish_answer` sintezdan keyin
+  `output_formats.ensure_blocks` (jadval/grafik bloki kodda qo'shiladi);
+  ko'nikma izohlari (`SkillResult.notes`, masalan `FORMAT_NOTE`)
+  `step_notes` orqali sintezga (`neutralize`, ≤8).
 - **Suhbat holati** (`services/conv_state.py`, migratsiya 0024
   `conversations.state jsonb`): `resolved_entities` (`{"Otabek": {chat_id,
   title, kind}}` + `last_entity`), `selected_chats`, `last_window`,
