@@ -1251,6 +1251,7 @@ async def _run_stats(
             )
             taint.add_hits(samples)
     samples.sort(key=lambda h: h.date or datetime.min.replace(tzinfo=UTC))
+    outcome.window_agg = agg
     outcome.pool = list(samples)
     outcome.evidence = list(samples)
     stats.pulled = count.total

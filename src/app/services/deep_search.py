@@ -848,6 +848,19 @@ class _Taint:
             if len(body) >= _TAINT_MIN_CHARS:
                 self._texts.add(body[:_TAINT_MIN_CHARS])
 
+    def add_texts(self, texts: Sequence[str]) -> None:
+        """Xom matn bo'laklari — orkestratorning **karantin** ko'nikmalari chiqishi.
+
+        `chat_digest` kun/hafta dayjestlarini, `scan_corpus` da'volarini
+        beradi: ular begona xabarlardan yasalgan, ya'ni `plan`/`replan`
+        prompt'iga tushsa xabar matni tushgani bilan bir xil. Qo'riqchi ularni
+        ham xuddi dalil satrlari kabi ushlaydi (`assert_clean`).
+        """
+        for text in texts:
+            body = (text or "").strip()
+            if len(body) >= _TAINT_MIN_CHARS:
+                self._texts.add(body[:_TAINT_MIN_CHARS])
+
     def add_turns(self, turns: Sequence[Turn], *, question: str = "") -> None:
         """Oldingi javob bo'laklari — "konvert ichida bo'lsa mayli" ro'yxati.
 
@@ -3451,28 +3464,36 @@ async def _persist(
     result: DeepResult,
     context_meta: dict[str, Any],
     scan: dict[str, Any] | None = None,
+    run_id: int | None = None,
 ) -> None:
     """Yagona yozuvchi: user turn + assistant turn + `agent_runs` (mode="deep").
 
     `agent_runs` da alohida `mode` ustuni yo'q (migratsiya qo'shmadik) —
     rejim `conversation_messages.context.mode = "deep"` da, mavjud agent
     yo'li bilan bir xil naqsh.
+
+    `run_id` — orkestratorning `write_propose` ko'nikmasi `agent_actions`
+    qatorini bog'lash uchun `agent_runs` qatorini **oldinroq** yaratgan
+    bo'lsa: ikkinchi qator ochilmaydi, o'sha qator to'ldiriladi (UI amal
+    kartalarini `context.run_id` orqali topadi).
     """
     async with session_factory() as session:
         conv = await session.get(Conversation, conversation_id)
         if conv is None:
             raise DeepSearchError("not_found")
-        run = AgentRun(
-            user_id=user_id,
-            account_id=account_id,
-            chat_id=None,
-            prompt=question[:4000],
-            model=result.model,
-            tokens_in=result.tokens_in,
-            tokens_out=result.tokens_out,
-            finished_at=datetime.now(UTC),
-        )
-        session.add(run)
+        run = await session.get(AgentRun, run_id) if run_id else None
+        if run is None:
+            run = AgentRun(
+                user_id=user_id,
+                account_id=account_id,
+                chat_id=None,
+                prompt=question[:4000],
+            )
+            session.add(run)
+        run.model = result.model
+        run.tokens_in = result.tokens_in
+        run.tokens_out = result.tokens_out
+        run.finished_at = datetime.now(UTC)
         await session.flush()
         context_meta["run_id"] = run.id
         # Token hisobi kontekstda ham (agent yo'li bilan bir xil to'rt maydon):
@@ -3718,8 +3739,16 @@ async def run_deep_search(
     events: EventSink | None = None,
     mode: str = "",
     confirm: bool = True,
+    orchestrate: bool = False,
+    chat_ids: Sequence[int] = (),
 ) -> DeepResult:
     """Deep search quvuri + **hisob kafolati** (H2).
+
+    `orchestrate=True` — quvur o'rniga **orkestrator** (`services/orchestrator.py`:
+    ko'nikmalar katalogi, planner, executor) yuguradi; hisob kafolati o'sha.
+    Kutubxona sukuti `False` (eski quvur) — kirish nuqtalari (router,
+    `chat_service`) uni `settings.orchestrator` dan beradi. `chat_ids` —
+    UI'dagi "Kontekst chatlari" (faqat orkestrator yo'lida ishlatiladi).
 
     Quvurning o'zi `_run_pipeline` da. Bu o'ramchining yagona vazifasi: quvur
     qanday tugashidan qat'i nazar (bekor qilindi, `LLMError`, kutilmagan
@@ -3731,6 +3760,24 @@ async def run_deep_search(
     meter = _Meter(llm or LLM())
     state: dict[str, Any] = {"persisted": False, "user_id": None, "answer": "", "status": "failed"}
     try:
+        if orchestrate:
+            from app.services import orchestrator as OR
+
+            return await OR.run_pipeline(
+                session_factory,
+                account_id,
+                conversation_id,
+                question,
+                locale=locale,
+                deep=deep,
+                events=events,
+                meter=meter,
+                started=started,
+                state=state,
+                mode=normalize_mode(mode, deep=False),
+                confirm=confirm,
+                chat_ids=list(chat_ids),
+            )
         return await _run_pipeline(
             session_factory,
             account_id,
@@ -4598,6 +4645,8 @@ async def stream_deep_search(
     llm: LLM | None = None,
     mode: str = "",
     confirm: bool = True,
+    orchestrate: bool = False,
+    chat_ids: Sequence[int] = (),
 ) -> AsyncIterator[DeepEvent]:
     """`run_deep_search` ni hodisa oqimiga aylantiradi (SSE router uchun)."""
     queue: asyncio.Queue[DeepEvent | None] = asyncio.Queue()
@@ -4618,6 +4667,8 @@ async def stream_deep_search(
                 events=sink,
                 mode=mode,
                 confirm=confirm,
+                orchestrate=orchestrate,
+                chat_ids=chat_ids,
             )
         except DeepSearchError as exc:
             if exc.code != "budget":  # budget hodisasi allaqachon yuborilgan

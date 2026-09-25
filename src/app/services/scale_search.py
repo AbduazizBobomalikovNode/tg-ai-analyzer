@@ -649,6 +649,9 @@ class ScaleOutcome:
     window_stats: str = ""
     #: Mavzusiz dayjest: dalil chat bo'yicha namuna (`window_search.pull_window_sample`).
     window_sampled: bool = False
+    #: Sanoq yo'li agregatlari (`window_search.WindowStats`) — orkestratorning
+    #: `stats` ko'nikmasi shulardan fakt yasaydi (`mine`, top chatlar).
+    window_agg: Any = None
 
 
 class _Budget:
