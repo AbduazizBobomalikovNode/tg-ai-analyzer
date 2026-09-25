@@ -244,6 +244,105 @@ def heuristic_items(question: str, facts: Mapping[str, Fact]) -> list[dict[str, 
     return out[:MAX_ITEMS]
 
 
+# ─── tipli sub-op'lar: davrlarni taqqoslash ──────────────────────────────────
+
+#: `compute(op=…)` — ifodasiz, kodda tayyor hisoblar. Planner katalogida shu nomlar.
+OPS = ("compare_periods", "pct_change")
+
+
+def _round2(value: float) -> float | int:
+    r = round(value, 2)
+    return int(r) if r == int(r) else r
+
+
+def compare_periods(facts: Mapping[str, Fact], *, a: str = "a", b: str = "b") -> list[Fact]:
+    """Ikki davr sanog'i (`a_n`, `b_n` — `stats(slot=…)`) → farq, foiz o'zgarish, hukm.
+
+    `a` — joriy davr, `b` — solishtiriladigan (odatda oldingi) davr. Kun
+    soni (`a_days`/`b_days`) bo'lsa kuniga o'rtacha va uning o'zgarishi ham
+    hisoblanadi — "bu oy" tugallanmagan bo'lsa xom son adolatsiz, kuniga
+    o'rtacha esa taqqoslanadi. `b_n == 0` bo'lsa foiz **yo'q** (nolga
+    bo'lish uydirmasi o'rniga izoh). Hammasi kodda, model raqam yozmaydi.
+    """
+    fa, fb = facts.get(f"{a}_n"), facts.get(f"{b}_n")
+    if fa is None or fb is None or not fa.numeric or not fb.numeric:
+        return []
+    an, bn = float(fa.value), float(fb.value)
+    pa = facts.get(f"{a}_period")
+    pb = facts.get(f"{b}_period")
+    la = str(pa.value) if pa is not None else a
+    lb = str(pb.value) if pb is not None else b
+    out = [
+        Fact(
+            "diff",
+            _round2(an - bn),
+            label=f"{la} minus {lb} (messages)",
+            expr=f"{a}_n - {b}_n ({fmt_number(fa.value)} - {fmt_number(fb.value)})",
+            source="compute",
+        )
+    ]
+    if bn > 0:
+        out.append(
+            Fact(
+                "pct_change",
+                _round2((an - bn) / bn * 100.0),
+                unit="%",
+                label=f"change of {la} relative to {lb}",
+                expr=f"({a}_n - {b}_n) / {b}_n * 100",
+                source="compute",
+            )
+        )
+    verdict = "more" if an > bn else ("less" if an < bn else "same")
+    out.append(
+        Fact("verdict", verdict, label=f"{la} compared to {lb} (raw counts)", source="compute")
+    )
+    da, db = facts.get(f"{a}_days"), facts.get(f"{b}_days")
+    if da is not None and db is not None and da.numeric and db.numeric:
+        dav, dbv = float(da.value), float(db.value)
+        if dav > 0 and dbv > 0:
+            apd, bpd = an / dav, bn / dbv
+            out.append(
+                Fact(
+                    f"{a}_per_day",
+                    _round2(apd),
+                    label=f"messages per day in {la} ({fmt_number(da.value)} days)",
+                    expr=f"{a}_n / {a}_days",
+                    source="compute",
+                )
+            )
+            out.append(
+                Fact(
+                    f"{b}_per_day",
+                    _round2(bpd),
+                    label=f"messages per day in {lb} ({fmt_number(db.value)} days)",
+                    expr=f"{b}_n / {b}_days",
+                    source="compute",
+                )
+            )
+            if bpd > 0:
+                out.append(
+                    Fact(
+                        "pct_change_per_day",
+                        _round2((apd - bpd) / bpd * 100.0),
+                        unit="%",
+                        label="change of the daily average (fair when a period is not over yet)",
+                        expr=f"({a}_per_day - {b}_per_day) / {b}_per_day * 100",
+                        source="compute",
+                    )
+                )
+    return out
+
+
+def run_op(op: str, facts: Mapping[str, Fact]) -> tuple[list[Fact], list[str]]:
+    """`compute(op=…)` — tipli sub-op. Noma'lum op yoki fakt yetishmasa — izoh, uydirma yo'q."""
+    if op in ("compare_periods", "pct_change"):
+        made = compare_periods(facts)
+        if not made:
+            return [], [f"{op}: needs a_n and b_n (two stats steps with slot a / b)"]
+        return made, []
+    return [], [f"unknown op {op[:40]!r}"]
+
+
 def parse_items(args: Mapping[str, Any]) -> list[dict[str, str]]:
     """Planner argumentlari → `[{label, expr}]` (≤`MAX_ITEMS`), buzuqlari tashlanadi."""
     raw: list[Any] = []
@@ -357,7 +456,9 @@ def unbacked_numbers(
             continue
         if 1900 <= v <= 2100 and v == int(v):
             continue
-        if any(abs(v - k) <= max(NUMBER_TOLERANCE * abs(k), 0.051) for k in known):
+        # Ishora so'z bilan aytiladi ("33% kam") — `pct_change = -33.33` bilan
+        # solishtirishda modul olinadi.
+        if any(abs(abs(v) - abs(k)) <= max(NUMBER_TOLERANCE * abs(k), 0.051) for k in known):
             continue
         bad.append(v)
     return bad
@@ -365,13 +466,16 @@ def unbacked_numbers(
 
 __all__ = [
     "MAX_ITEMS",
+    "OPS",
     "ComputeError",
     "Fact",
+    "compare_periods",
     "fmt_number",
     "heuristic_items",
     "numbers_in",
     "parse_items",
     "run_items",
+    "run_op",
     "safe_eval",
     "unbacked_numbers",
 ]

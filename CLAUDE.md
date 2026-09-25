@@ -267,6 +267,22 @@ ularni tartibda yuritadi. Rejim — faqat **qopqoq**: `fast` ≤ `search_server`
   planner'ga qo'shishdan oldin `_Taint.assert_state` (qattiq), saqlashdan
   oldin `state_leak` (saqlanmaydi + `orch.state_taint`). `GET
   /api/conversations/{id}/state` — faqat o'qish, egasi (debug).
+- **Sana/davr arifmetikasi** — raqamlar kodda, planner faqat tanlaydi:
+  `stats(period=this_month|last_month|…, slot=a|b)` → `a_n`/`a_days`/
+  `a_period` (prefikssiz `total` yozilmaydi — ikkinchi davr birinchisini
+  bosmasin), `compute(op="compare_periods")` → `diff`, `pct_change`
+  (`b_n=0` da **yo'q**), `verdict`, `a_per_day`/`b_per_day`,
+  `pct_change_per_day` (tugallanmagan "bu oy" uchun halol taqqoslash).
+  `stats(by=weekday|hour|both)` → `window_search.distribution` (SQL
+  `extract(isodow|hour from timezone(tz, published_at))`, akkaunt
+  mintaqasida) → `top_weekday`, `wd_<kun>_n`, `top_hour`; nisbiy sanalar
+  (`first_at`/`last_at`, `days_since_*`, mahalliy kalendar kuni) har
+  `stats`/`chat_digest` da. Kod qo'riqchisi `typed_stats_steps` (G2b):
+  `timewin.comparison_kinds` ("bu oy o'tgan oyga nisbatan") →
+  `[stats(a), stats(b), compute]`; "haftaning qaysi kuni / soat nechada" +
+  odat so'zi → `[stats(by)]`. Mavzuli savol ("… **haqida**") bu yerga
+  tushmaydi. `unbacked_numbers` ishorani modul bilan solishtiradi ("33% kam"
+  = `-33.33`). `OUTBOUND_RE` endi "yozdimmi"/"yozaman" ni ham taniydi.
 
 - **Katalog** (`skills.SKILLS`): `answer_direct`, `clarify`, `reuse_prior`,
   `chat_digest`, `stats`, `compute`, `window`, `search_local`,

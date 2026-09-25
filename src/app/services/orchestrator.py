@@ -309,8 +309,67 @@ _PROBE_FACTS = {
 }
 
 
+#: "Haftaning qaysi kuni / soat nechada" — taqsimot savoli (uz / ru / en).
+DIST_WEEKDAY_RE = re.compile(
+    r"haftaning\s+qaysi\s+kun\w*|qaysi\s+kun(?:lari|i|da|lar)\b|hafta\s+kunlari\w*"
+    r"|день\s+недели|по\s+каким\s+дням|в\s+какие\s+дни|в\s+какой\s+день"
+    r"|day\s+of\s+(?:the\s+)?week|which\s+days?\b|what\s+days?\b|weekday"
+)
+DIST_HOUR_RE = re.compile(
+    r"soat\s+nechada|qaysi\s+soat\w*|soat\s+nechalarda|kunning\s+qaysi\s+(?:vaqt|payt|soat)\w*"
+    r"|qaysi\s+vaqt(?:lar)?(?:da|i)\b"
+    r"|в\s+какое\s+время|во\s+сколько|в\s+котор\w+\s+час\w*|в\s+какие\s+часы"
+    r"|what\s+time\s+of\s+(?:the\s+)?day|at\s+what\s+time|which\s+hours?|what\s+hours?"
+    r"|time\s+of\s+day"
+)
+#: Taqsimot **odat** savoli bo'lsin ("ko'p", "odatda", "most"), bitta voqea emas
+#: ("Otabek to'lovni qaysi kuni yozdi" — bu qidiruv).
+DIST_HABIT_RE = re.compile(
+    r"\bko'p\w*|\beng\b|\bodatda\b|\bfaol\w*|\bko'proq\b|\bko'pincha\b"
+    r"|\bчаще\w*|\bбольше\b|\bобычно\b|\bактивн\w*"
+    r"|\bmost\b|\busually\b|\boften\b|\bmore\b|\bactive\b|\bbusiest\b"
+)
+
+
+def typed_stats_steps(
+    plan: DS.DeepPlan, question: str, *, raw_question: str = ""
+) -> list[Step] | None:
+    """Tipli sanoq savollari — qadamlar **kodda** (planner nima desa ham).
+
+    * ikki davr taqqoslash (`timewin.comparison_kinds`): "bu oy o'tgan oyga
+      nisbatan ko'proq yozdimmi?" → `[stats(period=this_month, slot=a),
+      stats(period=last_month, slot=b), compute(op=compare_periods)]`;
+    * taqsimot: "haftaning qaysi kuni ko'p yozaman" → `[stats(by=weekday)]`,
+      "soat nechada" → `by=hour`.
+
+    Mavzuli savol ("ijara **haqida** bu oy ko'proq gapirildimi") bu yerga
+    tushmaydi — u sanoq emas, qidiruv. Raqamlarning hammasi `count(*)` va
+    `compute` dan (`unbacked_numbers` tekshiradi).
+    """
+    texts = [t for t in dict.fromkeys((raw_question, question)) if t]
+    if not texts or any(_topical(t) for t in texts):
+        return None
+    for text in texts:
+        pair = TW.comparison_kinds(text)
+        if pair is not None:
+            a, b = pair
+            return [
+                Step("stats", {"period": a, "slot": "a"}, f"count {a}", "guard"),
+                Step("stats", {"period": b, "slot": "b"}, f"count {b}", "guard"),
+                Step("compute", {"op": "compare_periods"}, "compare the two periods", "guard"),
+            ]
+    for text in texts:
+        folded = TW.fold(text)
+        weekday = bool(DIST_WEEKDAY_RE.search(folded))
+        hour = bool(DIST_HOUR_RE.search(folded))
+        if (weekday or hour) and DIST_HABIT_RE.search(folded):
+            by = "both" if weekday and hour else ("weekday" if weekday else "hour")
+            return [Step("stats", {"by": by}, f"{by} distribution", "guard")]
+    return None
+
+
 def apply_guards(
-    steps: list[Step], *, plan: DS.DeepPlan, mode: str, question: str
+    steps: list[Step], *, plan: DS.DeepPlan, mode: str, question: str, raw_question: str = ""
 ) -> tuple[list[Step], list[str]]:
     """Kod qo'riqchilari — planner **ustidan**, lekin faqat aniq holatlarda.
 
@@ -338,6 +397,14 @@ def apply_guards(
         if len(steps) > 1:
             notes.append(f"guard: {terminal[0].skill} is a single step")
         return [terminal[0]], notes
+    # G2b. tipli sanoq: ikki davr taqqoslash / hafta kuni-soat taqsimoti (kodda).
+    typed = typed_stats_steps(plan, question, raw_question=raw_question)
+    if typed is not None:
+        if [(s.skill, s.args) for s in steps] != [(s.skill, s.args) for s in typed]:
+            notes.append("guard: " + " → ".join(f"{s.skill}{s.args or ''}" for s in typed))
+        plan.retrieval_kind = "window"
+        plan.window_stats = True
+        return typed, notes
     # G3. sanoq savoli (kod darvozasi `window_stats`) — `stats` birinchi.
     if plan.retrieval_kind == "window" and plan.window_stats:
         kept = [s for s in steps if s.skill in ("stats", "compute")]
@@ -488,7 +555,11 @@ def parse_orch_plan(
         steps = []
         notes.append("state: referent resolved — clarify dropped")
     steps, guard_notes = apply_guards(
-        steps, plan=plan, mode=mode, question=plan.standalone_question or question
+        steps,
+        plan=plan,
+        mode=mode,
+        question=plan.standalone_question or question,
+        raw_question=question,
     )
     notes.extend(guard_notes)
     kind = data.get("expected_answer_kind")

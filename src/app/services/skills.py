@@ -650,6 +650,7 @@ async def _chat_digest(ctx: RunState, args: dict[str, Any]) -> SkillResult:
             source="chat_digest",
         )
     )
+    facts.extend(relative_date_facts(first_all, last_all, tz=ctx.tz, source="chat_digest"))
     if covered_from is not None and covered_to is not None:
         facts.append(
             Fact(
@@ -737,11 +738,38 @@ async def _stats(ctx: RunState, args: dict[str, Any]) -> SkillResult:
     """Sanoq: `window_search.run_window` ning `window_stats` yo'li — skan tokeni 0.
 
     Faktlar: `total` (oyna + yo'nalishdagi hamma xabar), `mine`/`theirs`,
-    `chats`, `days`/`weeks`/`months`, `top1_n…top5_n`. Hammasi `count(*)`.
+    `chats`, `days`/`weeks`/`months`, `top1_n…top5_n`, nisbiy sanalar
+    (`first_at`/`last_at`, `days_since_first`/`days_since_last`). Hammasi
+    `count(*)` / `min`/`max`.
+
+    Argumentlar (planner yoki kod qo'riqchisi beradi):
+
+    * `period` — `timewin.PERIOD_KINDS` (`this_month`, `last_month`, …):
+      oyna savoldan emas, shu nomdan (`timewin.period_window`);
+    * `slot` — `a` / `b`: faktlar `a_n`, `a_mine`, `a_days`, `a_period` …
+      nomi bilan (ikki davr taqqoslash — `compute(op="compare_periods")`);
+    * `by` — `hour` / `weekday` / `both`: taqsimot (`window_search.distribution`,
+      SQL), faktlar `top_weekday`, `top_weekday_n`, `wd_<kun>_n`,
+      `top_hour`, `top_hour_n`.
     """
     from app.services import window_search as WS
 
     plan = replace(ctx.plan, retrieval_kind="window", window_stats=True)
+    period = str(args.get("period") or "")
+    slot = str(args.get("slot") or "")
+    slot = slot if slot in STATS_SLOTS else ""
+    notes: list[str] = []
+    if period:
+        win = TW.period_window(period, tz=plan.window_tz or ctx.tz)
+        if win is None:
+            notes.append(f"stats: unknown period {period[:24]!r} — the question window is used")
+        else:
+            plan.since, plan.until = win.since, win.until
+            plan.window_from_question = True
+            plan.window_kind = win.kind
+            plan.window_tz = win.tz
+    by = str(args.get("by") or "")
+    dists = [d for d in WS.DISTRIBUTIONS if by in (d, "both")]
     # Yo'nalish — **kod** qarori (`detect_direction`: "kim bilan gaplashdim" =
     # `both`). Planner argumenti faqat kod hech narsa topmaganda ishlatiladi:
     # jonli eval'da planner "gaplashganman" ga `in` berib reytingni buzgan.
@@ -765,9 +793,15 @@ async def _stats(ctx: RunState, args: dict[str, Any]) -> SkillResult:
         deadline=ctx.deadline(),
         confirm=True,  # sanoq yo'lida skan tokeni yo'q — tasdiq ma'nosiz
         locale=ctx.locale,
+        distributions=dists,
     )
     ctx.plan.direction = plan.direction
     ctx.plan.inbox = plan.inbox
+    if period and not slot:
+        # Yolg'iz davr — asosiy oyna shu (qamrov, suhbat holatining `last_window`).
+        ctx.plan.since, ctx.plan.until = plan.since, plan.until
+        ctx.plan.window_from_question = plan.window_from_question
+        ctx.plan.window_kind, ctx.plan.window_tz = plan.window_kind, plan.window_tz
     ctx.window_meta = _window_meta(plan, outcome, stats=True)
     ctx.scan_meta = ctx.scan_meta or _scan_meta(ctx, outcome)
     ctx.estimate_meta = ctx.estimate_meta or (
@@ -802,7 +836,13 @@ async def _stats(ctx: RunState, args: dict[str, Any]) -> SkillResult:
     if since is None and wcount is not None:
         since = wcount.first_at
     until = spec.until if spec is not None else (plan.until or datetime.now(UTC))
-    facts.extend(period_facts(since, until, source="stats", tz=plan.window_tz or ctx.tz))
+    tz = plan.window_tz or ctx.tz
+    facts.extend(period_facts(since, until, source="stats", tz=tz))
+    days_fact = facts[4].value
+    if slot:
+        return _slot_result(
+            ctx, outcome, facts, slot=slot, since=since, until=until, tz=tz, notes=notes
+        )
     per_chat = list(getattr(agg, "per_chat", []) or [])
     titles = ctx.chat_titles
     for i, row in enumerate(per_chat[:5], 1):
@@ -814,12 +854,144 @@ async def _stats(ctx: RunState, args: dict[str, Any]) -> SkillResult:
                 source="stats",
             )
         )
+    if wcount is not None:
+        facts.extend(relative_date_facts(wcount.first_at, wcount.last_at, tz=tz, source="stats"))
+    facts.extend(distribution_facts(agg))
     return SkillResult(
         evidence=list(outcome.evidence),
         facts=facts,
+        notes=notes,
         coverage_delta={"window": dict(ctx.window_meta)},
-        summary={"total": total, "chats": facts[3].value, "days": facts[4].value},
+        summary={"total": total, "chats": facts[3].value, "days": days_fact},
     )
+
+
+#: `stats(slot=…)` — ikki davr taqqoslashda faktlar prefiksi.
+STATS_SLOTS = ("a", "b")
+_SLOT_RENAME = {"total": "n", "mine": "mine", "theirs": "theirs", "chats": "chats", "days": "days"}
+WEEKDAY_KEYS = ("", "mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+
+def _slot_result(
+    ctx: RunState,
+    outcome: Any,
+    facts: list[Fact],
+    *,
+    slot: str,
+    since: datetime | None,
+    until: datetime,
+    tz: str,
+    notes: list[str],
+) -> SkillResult:
+    """`stats(slot=a|b)` — faktlar `a_n`, `a_mine`, `a_days`, `a_period` nomi bilan.
+
+    Prefikssiz `total`/`days` yozilmaydi: ikkinchi davr birinchisini jimgina
+    bosib ketmasin, `compute(op="compare_periods")` esa aynan shu juftni oladi.
+    """
+    renamed: list[Fact] = []
+    for f in facts:
+        suffix = _SLOT_RENAME.get(f.name)
+        if suffix is None:
+            continue
+        renamed.append(replace(f, name=f"{slot}_{suffix}"))
+    period = TW.format_window(
+        TW.TimeWindow(since=since, until=until, kind="", tz=tz or TW.DEFAULT_TZ)
+    )
+    renamed.append(Fact(f"{slot}_period", period, label=f"period {slot}", source="stats"))
+    total = next((f.value for f in renamed if f.name == f"{slot}_n"), 0)
+    return SkillResult(
+        evidence=list(outcome.evidence),
+        facts=renamed,
+        notes=notes,
+        coverage_delta={"window": dict(ctx.window_meta)},
+        summary={"slot": slot, "total": total},
+    )
+
+
+def relative_date_facts(
+    first_at: datetime | None,
+    last_at: datetime | None,
+    *,
+    tz: str,
+    source: str,
+    now: datetime | None = None,
+) -> list[Fact]:
+    """ "Necha kun oldin / necha kundan beri" — xabar sanalaridan, kodda.
+
+    Kun farqi **mahalliy kalendar** bo'yicha (`tz`): kecha kechqurun yozilgan
+    xabar bugun ertalab "1 kun oldin" bo'ladi, "0" emas.
+    """
+    zi = TW.zone(tz)
+    today = (now or datetime.now(UTC)).astimezone(zi).date()
+    out: list[Fact] = []
+    for name, when in (("first", first_at), ("last", last_at)):
+        if when is None:
+            continue
+        local = when.astimezone(zi)
+        out.append(
+            Fact(
+                f"{name}_at",
+                local.strftime("%Y-%m-%d %H:%M"),
+                label=f"{name} message in the window ({zi})",
+                source=source,
+            )
+        )
+        out.append(
+            Fact(
+                f"days_since_{name}",
+                max(0, (today - local.date()).days),
+                label=f"calendar days from the {name} message to today",
+                source=source,
+            )
+        )
+    return out
+
+
+def distribution_facts(agg: Any) -> list[Fact]:
+    """Soat / hafta kuni taqsimotidan faktlar — eng faol kun/soat va har kun soni."""
+    out: list[Fact] = []
+    by_weekday = list(getattr(agg, "by_weekday", []) or [])
+    if by_weekday:
+        from app.services.window_search import WEEKDAY_NAMES
+
+        for day, n in by_weekday:
+            if 1 <= day <= 7:
+                out.append(
+                    Fact(
+                        f"wd_{WEEKDAY_KEYS[day]}_n",
+                        int(n),
+                        label=f"messages on {WEEKDAY_NAMES[day]}s",
+                        source="stats",
+                    )
+                )
+        top_day, top_n = max(by_weekday, key=lambda p: (p[1], -p[0]))
+        if 1 <= top_day <= 7:
+            out.append(
+                Fact("top_weekday", WEEKDAY_NAMES[top_day], label="busiest weekday", source="stats")
+            )
+            out.append(
+                Fact(
+                    "top_weekday_n",
+                    int(top_n),
+                    label="messages on the busiest weekday",
+                    source="stats",
+                )
+            )
+    by_hour = list(getattr(agg, "by_hour", []) or [])
+    if by_hour:
+        top_hour, top_n = max(by_hour, key=lambda p: (p[1], -p[0]))
+        out.append(
+            Fact(
+                "top_hour",
+                int(top_hour),
+                label="busiest hour of day (local, HH:00)",
+                source="stats",
+            )
+        )
+        out.append(
+            Fact("top_hour_n", int(top_n), label="messages in the busiest hour", source="stats")
+        )
+    return out
 
 
 async def _window(ctx: RunState, args: dict[str, Any]) -> SkillResult:
@@ -1014,8 +1186,16 @@ async def _compute(ctx: RunState, args: dict[str, Any]) -> SkillResult:
     items = CMP.parse_items(args)
     notes: list[str] = []
     made: list[Fact] = []
+    op = str(args.get("op") or "")
+    if not op and not items and {"a_n", "b_n"} <= set(ctx.facts):
+        op = "compare_periods"  # ikki davr sanog'i bor — taqqoslash o'zi so'ralgan
+    if op:
+        made, errors = CMP.run_op(op, ctx.facts)
+        notes.extend(f"compute: {e}" for e in errors)
     if items:
-        made, errors = CMP.run_items(items, ctx.facts)
+        pool = {**ctx.facts, **{f.name: f for f in made}}
+        extra, errors = CMP.run_items(items, pool)
+        made.extend(extra)
         notes.extend(f"compute: {e}" for e in errors)
     if not made:
         fallback = CMP.heuristic_items(ctx.raw_question, ctx.facts)
@@ -1270,9 +1450,15 @@ SKILLS: dict[str, Skill] = {
         ),
         Skill(
             "stats",
-            "count(*) sanoqlari: nechta xabar, kim/qaysi chat eng ko'p, yo'nalish (men/menga)",
-            "exact count(*) numbers: how many messages, top chats/senders, direction (in/out)",
-            {"direction": "str"},
+            "count(*) sanoqlari: nechta xabar, kim/qaysi chat eng ko'p, yo'nalish (men/menga); "
+            "period=this_month|last_month|… nomlangan davr, slot=a|b taqqoslash uchun, "
+            "by=weekday|hour|both — haftaning kuni / soat taqsimoti",
+            "exact count(*) numbers: how many messages, top chats/senders, direction (in/out), "
+            "first/last message date and days since; period=<today|yesterday|this_week|"
+            "last_week|this_month|last_month|this_year|last_year> counts that named period, "
+            "slot=a|b stores the facts as a_n/a_days/a_period (for comparing two periods), "
+            "by=weekday|hour|both adds the day-of-week / hour-of-day distribution",
+            {"direction": "str", "period": "str", "slot": "str", "by": "str"},
             0.0,
             2.0,
             "fast",
@@ -1282,9 +1468,12 @@ SKILLS: dict[str, Skill] = {
         ),
         Skill(
             "compute",
-            "olingan raqamlar ustida hisob: o'rtacha kuniga/haftasiga, foiz, farq, nisbat",
-            "arithmetic over numbers already obtained: per day/week, percent, difference, ratio",
-            {"expr": "str", "label": "str", "items": "list[dict]"},
+            "olingan raqamlar ustida hisob: o'rtacha kuniga/haftasiga, foiz, farq, nisbat; "
+            "op=compare_periods — ikki davr (a_n, b_n): farq, foiz o'zgarish, kuniga o'rtacha",
+            "arithmetic over numbers already obtained: per day/week, percent, difference, "
+            "ratio; op=compare_periods turns a_n/b_n (two stats slots) into diff, pct_change, "
+            "verdict and per-day averages",
+            {"expr": "str", "label": "str", "items": "list[dict]", "op": "str"},
             0.0,
             0.0,
             "fast",

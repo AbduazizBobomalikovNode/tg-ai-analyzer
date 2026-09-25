@@ -488,6 +488,97 @@ def parse_window(
     return None
 
 
+# ─── nomlangan davrlar va taqqoslash (`compute.compare_periods` uchun) ───────
+
+#: `period_window` biladigan nomlar — `stats(period=…)` argumenti shular.
+PERIOD_KINDS = (
+    "today",
+    "yesterday",
+    "this_week",
+    "last_week",
+    "this_month",
+    "last_month",
+    "this_year",
+    "last_year",
+)
+#: "Joriy" → "oldingi" jufti (taqqoslash savolida ikkinchisi aytilmasa ham).
+PREVIOUS_OF = {
+    "today": "yesterday",
+    "this_week": "last_week",
+    "this_month": "last_month",
+    "this_year": "last_year",
+}
+#: Taqqoslash belgisi — "nisbatan", "solishtir", "ko'proq", "vs", "по сравнению", "чем".
+COMPARE_RE = re.compile(
+    r"\bnisbatan\b|\bsolishtir\w*|\btaqqosla\w*|\bko'proq\w*|\bkamroq\w*|\bortiq\w*"
+    r"|\bfarq\w*|\bo'zgar\w*|\boshgan\w*|\bkamaygan\w*"
+    r"|\bvs\.?\b|\bversus\b|\bcompared?\b|\bcomparison\b|\bthan\b|\bmore\b|\bless\b|\bfewer\b"
+    r"|по\s+сравнению|\bсравн\w*|\bчем\b|\bбольше\b|\bменьше\b"
+)
+#: "o'tgan/oldingi" birliksiz ("this month vs last") — joriy davrning oldingisi.
+_PREVIOUS_WORD_RE = re.compile(
+    r"\b(?:o't(?:gan|kan)|utgan|oldingi|avvalgi|previous|prior|last|прошл\w*|предыдущ\w*)\b"
+)
+_PAIRS = (
+    ("this_week", _THIS_WEEK_RE, "last_week", _LAST_WEEK_RE),
+    ("this_month", _THIS_MONTH_RE, "last_month", _LAST_MONTH_RE),
+    ("this_year", _THIS_YEAR_RE, "last_year", _LAST_YEAR_RE),
+    ("today", _TODAY_RE, "yesterday", _YESTERDAY_RE),
+)
+
+
+def comparison_kinds(question: str) -> tuple[str, str] | None:
+    """Ikki davr taqqoslanadimi — `(joriy, oldingi)` davr nomlari yoki `None`.
+
+    Deterministik va tor: bir birlikdagi "bu X" + "o'tgan X" (ikkalasi
+    savolda, yoki "bu X" + taqqoslash so'zi + "o'tgan/oldingi"), va
+    taqqoslash belgisi (`COMPARE_RE`) bor. "bu oy o'tgan oyga nisbatan
+    ko'proq yozdimmi?" → `("this_month", "last_month")`.
+    """
+    q = fold(question)
+    if not q or not COMPARE_RE.search(q):
+        return None
+    for this_kind, this_re, last_kind, last_re in _PAIRS:
+        has_this = bool(this_re.search(q))
+        has_last = bool(last_re.search(q))
+        if has_this and has_last:
+            return this_kind, last_kind
+        if has_this and _PREVIOUS_WORD_RE.search(q):
+            return this_kind, PREVIOUS_OF[this_kind]
+    return None
+
+
+def period_window(
+    kind: str, *, tz: str | None = DEFAULT_TZ, now: datetime | None = None
+) -> TimeWindow | None:
+    """Nomlangan davr → oyna (akkaunt mintaqasida, UTC'da) — `parse_window` bilan bir hisob.
+
+    "bu oy" — oy boshidan **hozirgacha** (tugallanmagan), "o'tgan oy" —
+    to'liq oy. Taqqoslashda shu farq `compare_periods` faktlarida kun soni
+    bilan ko'rsatiladi (kuniga o'rtacha ham hisoblanadi).
+    """
+    if kind not in PERIOD_KINDS:
+        return None
+    zi = zone(tz)
+    local_now = (now or datetime.now(UTC)).astimezone(zi)
+    day = _day_start(local_now)
+    week = day - timedelta(days=local_now.weekday())
+    month = _month_start(local_now)
+    year = day.replace(month=1, day=1)
+    spans: dict[str, tuple[datetime, datetime]] = {
+        "today": (day, local_now),
+        "yesterday": (day - timedelta(days=1), day),
+        "this_week": (week, local_now),
+        "last_week": (week - timedelta(days=7), week),
+        "this_month": (month, local_now),
+        "last_month": (_shift_months(month, -1), month),
+        "this_year": (year, local_now),
+        "last_year": (year.replace(year=year.year - 1), year),
+    }
+    since, until = spans[kind]
+    return TimeWindow(since=_utc(since), until=_utc(until), kind=kind, phrase=kind, tz=str(zi))
+
+
 def format_window(win: TimeWindow, *, tz: str | None = None) -> str:
     """Qamrov qatoridagi ko'rinish: `2026-09-24 00:00 → 14:05 (Asia/Tashkent)`."""
     zi = zone(tz or win.tz)
@@ -501,11 +592,16 @@ def format_window(win: TimeWindow, *, tz: str | None = None) -> str:
 
 
 __all__ = [
+    "COMPARE_RE",
     "DEFAULT_TZ",
     "KINDS",
+    "PERIOD_KINDS",
+    "PREVIOUS_OF",
     "TimeWindow",
+    "comparison_kinds",
     "fold",
     "format_window",
     "parse_window",
+    "period_window",
     "zone",
 ]

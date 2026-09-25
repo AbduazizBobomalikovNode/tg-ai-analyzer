@@ -587,6 +587,37 @@ class WindowStats:
     #: `(ko'rinadigan nom, son)` — faqat boshqalar yozgani (`out = false`).
     per_sender: list[tuple[str, int]] = field(default_factory=list)
     mine_total: int = 0
+    #: `(soat 0..23, son)` — akkaunt mintaqasida (`spec.tz`), faqat so'ralganda.
+    by_hour: list[tuple[int, int]] = field(default_factory=list)
+    #: `(ISO hafta kuni 1=Du … 7=Ya, son)` — akkaunt mintaqasida, faqat so'ralganda.
+    by_weekday: list[tuple[int, int]] = field(default_factory=list)
+
+
+#: `stats(by=…)` — soat / hafta kuni taqsimoti (SQL `extract`, LLM yo'q).
+DISTRIBUTIONS = ("hour", "weekday")
+WEEKDAY_NAMES = ("", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+
+async def distribution(
+    session: AsyncSession, spec: WindowSpec, *, by: str
+) -> list[tuple[int, int]]:
+    """Oynadagi xabarlar soat yoki hafta kuni bo'yicha — `count(*)`, mahalliy vaqtda.
+
+    `timezone(tz, published_at)` — `timestamptz` ni akkaunt mintaqasidagi
+    "devor soati"ga o'giradi: Toshkentda 23:30 da yozilgan xabar UTC'da
+    18:30 bo'lsa ham 23-soatga tushadi. Bo'sh bucket'lar qaytmaydi.
+    """
+    local = func.timezone(spec.tz or TW.DEFAULT_TZ, Message.published_at)
+    part = func.extract("hour" if by == "hour" else "isodow", local)
+    stmt = (
+        select(part.label("k"), func.count().label("n"))
+        .select_from(Message)
+        .join(Chat, Chat.id == Message.chat_id)
+        .where(*_conds(spec))
+        .group_by(part)
+        .order_by(part)
+    )
+    return [(int(k), int(n)) for k, n in (await session.execute(stmt)).all()]
 
 
 async def stats_window(
@@ -595,9 +626,18 @@ async def stats_window(
     *,
     top: int = STATS_TOP_CHATS,
     locale: str = "uz",
+    distributions: Sequence[str] = (),
 ) -> WindowStats:
-    """Chat va yuboruvchi bo'yicha agregatlar — **xabar tortilmaydi**."""
+    """Chat va yuboruvchi bo'yicha agregatlar — **xabar tortilmaydi**.
+
+    `distributions` — `hour` / `weekday`: qo'shimcha `count(*) GROUP BY
+    extract(...)` (faqat so'ralganda — har biri bitta arzon so'rov).
+    """
     out = WindowStats(direction=spec.direction)
+    if "hour" in distributions:
+        out.by_hour = await distribution(session, spec, by="hour")
+    if "weekday" in distributions:
+        out.by_weekday = await distribution(session, spec, by="weekday")
     owner_tg_id, owner_display = await SN.owner_info(session, spec.account_id)
     mine = func.count().filter(Message.out.is_(True))
     theirs = func.count().filter(Message.out.is_(False))
@@ -877,6 +917,15 @@ def _render_stats(
         for i, (name, n) in enumerate(stats.per_sender, 1):
             share = (100.0 * n / total) if total else 0.0
             lines.append(f"{i}. {U.attr(name)}: {n} ({share:.1f}%)")
+    tz = (spec.tz if spec is not None else "") or TW.DEFAULT_TZ
+    if stats.by_weekday:
+        lines.append(f"messages by weekday (local time, {tz}; same direction filter):")
+        lines.append(
+            "; ".join(f"{WEEKDAY_NAMES[d]} {n}" for d, n in stats.by_weekday if 1 <= d <= 7)
+        )
+    if stats.by_hour:
+        lines.append(f"messages by hour of day (local time, {tz}; HH = HH:00-HH:59):")
+        lines.append("; ".join(f"{h:02d}h {n}" for h, n in stats.by_hour))
     lines.append(
         f"sample lines below: {samples} (newest ≤{STATS_SAMPLE_PER_CHAT} per top chat, "
         "illustration only — not a basis for counting)"
@@ -964,6 +1013,7 @@ async def run_window(
     deadline: float | None = None,
     confirm: bool = True,
     locale: str = "uz",
+    distributions: Sequence[str] = (),
 ) -> SC.ScaleOutcome:
     """Oyna yo'lining to'liq yugurishi — `deep_search._run_pipeline` shu yerga kiradi.
 
@@ -1007,6 +1057,7 @@ async def run_window(
             account_id=account_id,
             started=started,
             locale=locale,
+            distributions=distributions,
         )
     stats.buckets_planned = max(count.groups, 0)
 
@@ -1208,6 +1259,7 @@ async def _run_stats(
     account_id: int,
     started: float,
     locale: str = "uz",
+    distributions: Sequence[str] = (),
 ) -> SC.ScaleOutcome:
     """Sanoq yo'li: `count(*)` agregatlari + top chatlardan bir nechta namuna.
 
@@ -1238,7 +1290,7 @@ async def _run_stats(
     samples: list[S.Hit] = []
     if count.total:
         async with session_factory() as session:
-            agg = await stats_window(session, spec, locale=locale)
+            agg = await stats_window(session, spec, locale=locale, distributions=distributions)
         top_ids = [row.chat_id for row in agg.per_chat[:STATS_TOP_N]]
         async with session_factory() as session:
             samples = await stats_samples(session, spec, top_ids, titles=titles)

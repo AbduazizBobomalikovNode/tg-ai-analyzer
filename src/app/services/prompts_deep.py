@@ -736,7 +736,16 @@ allowed skills). At most 4 steps. `answer_direct` and `clarify` are always a sin
 in the window and direction), mine, theirs, chats, days, weeks, months, top1_n … top5_n; by \
 `chat_digest`: chat_total, chat_mine, chat_days. Allowed: numbers, those names, + - * / \
 ( ), pct(a, b), avg(...), round(x, n). Examples: "total / days", "pct(mine, total)", \
-"top1_n - top2_n".
+"top1_n - top2_n". stats also gives first_at/last_at and days_since_first/days_since_last \
+("necha kun oldin", "necha kundan beri", "qachon oxirgi marta"). Typed sub-ops:
+  - two periods ("bu oy o'tgan oyga nisbatan", "this week vs last week", "по сравнению с \
+прошлым месяцем"): stats {"period": "this_month", "slot": "a"}, stats {"period": \
+"last_month", "slot": "b"}, then compute {"op": "compare_periods"} → a_n, b_n, diff, \
+pct_change, verdict, a_per_day, b_per_day, pct_change_per_day. Periods: today, yesterday, \
+this_week, last_week, this_month, last_month, this_year, last_year.
+  - day of week / hour of day ("haftaning qaysi kuni ko'p yozaman", "soat nechada faolman", \
+"в какое время я чаще пишу"): one stats {"by": "weekday"|"hour"|"both"} → top_weekday, \
+top_weekday_n, wd_mon_n … wd_sun_n, top_hour, top_hour_n.
 10. expected_answer_kind and output_budget describe the answer the user needs: a number \
 question is "number"/"short", a chat overview is "digest"/"short", a comparison of three \
 or more things is "table"/"normal", "batafsil"/"подробно"/"in detail" is "detailed".
@@ -765,6 +774,12 @@ latest: "bu oyda o'rtacha kuniga nechta xabar yozganman?"
 my messages this month"}, {"skill": "compute", "args": {"expr": "total / days", "label": \
 "avg_per_day"}, "why": "average per day"}], "expected_answer_kind": "number", \
 "output_budget": "short"
+
+latest: "bu oy o'tgan oyga nisbatan ko'proq yozdimmi?"
+  -> "retrieval_kind": "window", "steps": [{"skill": "stats", "args": {"period": \
+"this_month", "slot": "a"}}, {"skill": "stats", "args": {"period": "last_month", "slot": \
+"b"}}, {"skill": "compute", "args": {"op": "compare_periods"}}], "expected_answer_kind": \
+"number", "output_budget": "short"
 
 latest: "oxirgi 3 oyda ijara narxi qanday o'zgargan?"
   -> "steps": [{"skill": "search_local", "args": {}, "why": "topic search in the \

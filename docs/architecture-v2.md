@@ -552,6 +552,20 @@ va `clarify` tashlanadi. Tanlangan UI chatlari holatdan ustun.
 id/sarlavha/raqam/user matni: `_Taint.assert_state` (planner) va
 `state_leak` (saqlash) buni tekshiradi.
 
+**Sana/davr arifmetikasi.** Tipli `compute` sub-op'lari va `stats`
+argumentlari (planner katalogida misollar bilan):
+
+| savol | qadamlar (kod qo'riqchisi `typed_stats_steps`) | faktlar |
+|---|---|---|
+| "bu oy o'tgan oyga nisbatan ko'proq yozdimmi?" | `stats(period=this_month, slot=a)`, `stats(period=last_month, slot=b)`, `compute(op=compare_periods)` | `a_n`, `b_n`, `diff`, `pct_change`, `verdict`, `*_per_day`, `pct_change_per_day` |
+| "haftaning qaysi kuni ko'p yozaman?" | `stats(by=weekday)` | `top_weekday`, `top_weekday_n`, `wd_mon_n…wd_sun_n` |
+| "soat nechada faolman?" | `stats(by=hour)` | `top_hour`, `top_hour_n` (+ 24 soatlik qator blokda) |
+| "oxirgi marta necha kun oldin yozgan?" | `stats` / `chat_digest` | `last_at`, `days_since_last`, `first_at`, `days_since_first` |
+
+Taqsimot SQL'i (`window_search.distribution`) — `GROUP BY extract(isodow|hour
+FROM timezone(tz, published_at))`, oynaning o'sha `_conds` sharti bilan
+(yo'nalish ham); LLM yo'q, skan tokeni 0.
+
 ## 8. Telegram qamrovi
 
 `allowlist.READ` ga **11 ta** metod qo'shiladi (hech biri destruktiv emas,

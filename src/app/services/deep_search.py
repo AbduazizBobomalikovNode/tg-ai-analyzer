@@ -262,7 +262,7 @@ INBOX_RE = re.compile(
 OUTBOUND_RE = re.compile(
     r"\bkimga\b[^?.!]{0,40}?\b(?:yoz|yubor|jo'nat)\w*"
     r"|\b(?:yozdim|yozganman|yozibman|yozgandim|yuborganman|yubordim|yuboribman"
-    r"|jo'natganman|jo'natdim)\b"
+    r"|jo'natganman|jo'natdim|yozaman|yuboraman)(?:mi|mu)?\b"
     r"|\bmen\s+yozgan\b"
     r"|eng\s+ko'p\s+yozgan\s+chat\w*"
     r"|кому\s+(?:я\s+)?(?:[\w']+\s+){0,3}?(?:писал|написал|отправ|пишу)\w*"
