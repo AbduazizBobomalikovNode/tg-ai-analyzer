@@ -228,6 +228,66 @@ Izohlar:
 - Embedding modelini `reembed` siz almashtirmang; `EMBED_DIMS` ni moslang.
 - Sync'dagi `WAIT_BETWEEN_BATCHES`/ramp-up ga tegmang — bu LLM emas, ban xavfi.
 
+## O'lchov natijasi (2026-09-25)
+
+### Dayjest sintezida `minimal` fikrlash (B3-7, qisman)
+
+`LLM().chat(..., thinking=...)` — chaqiruv bo'yicha override; `deep_search`
+uni faqat `synth_budget(...).kind == "digest"` da beradi
+(`DEEP_DIGEST_THINKING`, default `minimal`). Jonli, deploy'dan oldin/keyin
+(`conversation_messages`, oyna yo'li, 8 soat):
+
+| Yo'l | Model | n | thinking o'rtacha | out o'rtacha | $ o'rtacha |
+|---|---|---:|---:|---:|---:|
+| window_stats, oldin | 3.5-flash | 4 | 1,276 | 3,825 | 0.0739 |
+| window_stats, keyin | 3.5-flash | 10 | **0** | 1,113 | **0.0172** |
+| window dayjest (pro), keyin | 3.1-pro | 4 | 1,167 | 736 | 0.0285 |
+
+Sanoq sintezida fikrlash yo'qoldi. Pro'dagi oyna dayjestiga ta'sir **yo'q**:
+3.1-pro `minimal` ni rad etadi, adapter `low` yuboradi, bu esa `DEEP`
+vazifasining o'z darajasi (keyingi qadam — C7, dayjestni flash'ga tiering).
+
+### Model mavjudligi (loyiha kaliti, `client.models.list()` + adapter orqali tool chaqiruvi)
+
+| Model | Ro'yxatda | Tool call + `thought_signature` (2 turn) | `minimal` | Qaytgan nom | `pricing.py` |
+|---|:-:|:-:|:-:|---|---|
+| `gemini-3.8-flash` | ha | ha (bytes sig, turn 2 STOP) | yo'q → adapter `low` | `gemini-3.8-flash` | bor ($0.75/$3.75) |
+| `gemini-3.7-flash` | ha | — | yo'q (hujjat) | — | bor |
+| `gemini-3.6-flash` | ha | — | — | — | bor |
+| `gemini-flash-latest` | ha | ha | yo'q → `low` | `gemini-flash-latest` | bor |
+| `gemini-3.5-flash` (joriy) | ha | ha | ha | `gemini-3.5-flash` | bor ($1.50/$9.00) |
+
+Gemini adapteri har chat modeliga `TOOLS` beradi (`_TOOL_CAPABLE` —
+faqat DeepSeek'da), ya'ni `LLM_MODEL_TOOLS=gemini-3.8-flash` jimgina
+fallback'siz qabul qilinadi — kod o'zgarishi kerak emas. Bir xil
+2 turnli sinovda turn-2 narxi: 3.8-flash $0.000146, 3.5-flash $0.000378.
+
+### A/B (daily P1, 18 senariy) — **tugallanmadi**
+
+| Konfiguratsiya | Yugurish | Pass (det+judge) | det | judge | $ | degraded | auto `stop_reason` | auto tool median |
+|---|---:|---:|---:|---:|---:|---:|---|---:|
+| baseline (3.5-flash) #1 | 1 | **15/18** | 17/18 | 21/24 | 0.710 | 0 | answered ×4 | 0 |
+| baseline #2 | — | yaroqsiz | | | 0.582 | | | |
+| candidate (3.8-flash) | 0 | — | | | | | | |
+
+Baseline #2 ning o'rtasida (daily-30, 6-turn'dan) har so'rov
+`chat.err.budget / tokens` bilan qaytdi: user 1 ning **24 soatlik sirpanuvchi**
+token byudjeti (`LLM_DAILY_TOKEN_BUDGET=4M`) tugadi — 4.00M token / $4.12,
+shundan 09:00–13:00 UTC da ≈ 3.3M (parallel eval/QA trafik). Byudjet
+xavfsizlik qopqog'i, uni o'lchov uchun ko'tarilmadi; to'liq qaytishi ≈ 20
+soat. Baseline #1 failed'lar: daily-04 (judge: oyna matnda yo'q), daily-16
+(exhaustive tasdiqsiz — bo'sh javob, judge), daily-45 (`must_propose_action`).
+
+**Qaror: almashtirilmadi**, `.env` o'zgarmagan (`LLM_MODEL_SEARCH/TOOLS=
+gemini-3.5-flash`). Qoida (kandidat pass ≥ baseline − 1, safety/multiturn'da
+takroriy flip yo'q, narx ≥ 25% past) 3×3 o'lchovsiz qo'llanmaydi. Izoh: daily
+P1 to'plami asosan deep turn'lar (20 deep / 4 auto, auto'da 0 tool
+chaqiruvi) — uning narxini pro sintez va flash-lite skan belgilaydi, TOOLS
+modeli emas. 3.8-flash qarori uchun agent-og'ir to'plam (`economy`,
+`multiturn`, `people`) ham qo'shilishi kerak; yugurishni byudjet bo'shagan
+kunda, boshqa eval trafigisiz qiling (6 yugurish ≈ 3M token — 4M limitga
+zo'rg'a sig'adi).
+
 ## Manbalar
 
 - Gemini API pricing — https://ai.google.dev/gemini-api/docs/pricing (yangilangan 2026-09-24): 3.8/3.7/3.6-flash $0.75/$3.75 (2026-12-31 gacha, keyin $1.50/$7.50), 3.5-flash $1.50/$9.00, 3.5-flash-lite $0.30/$2.50, 3.1-flash-lite $0.25/$1.50, 3.1-pro-preview $2/$12 (≤200k), cache $0.15 (3.5-flash), pro kesh saqlash $4.50/M/soat; "output price includes thinking tokens".
