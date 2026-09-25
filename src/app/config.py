@@ -94,6 +94,11 @@ class Settings(BaseSettings):
     # yo'q) — shu providerga o'tiladi. Gemini'dan boshqasini qo'yish tavsiya
     # etilmaydi: faqat u to'liq imkoniyatli.
     llm_fallback_provider: str = "gemini"
+    # Fon vazifalari (worker digest'lari, hafta tugunlari, briefing, judge)
+    # Gemini **Flex** tier'ida yuradi: narx yarmi, evaziga kechikish 1-15 daq
+    # va 429/503 da server zaxirasi yo'q (adapter bir marta standart tier'da
+    # qayta uradi). Interaktiv yo'l har doim standart. false = hammasi standart.
+    llm_flex_background: bool = True
 
     # Vazifa → `provider:model` spec. Bo'sh = llm_provider + standart model.
     llm_task_route: str = ""

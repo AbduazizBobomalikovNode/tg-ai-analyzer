@@ -326,6 +326,7 @@ async def build_daily_digests(ctx: dict[str, Any]) -> dict[str, Any]:
 
     from app.db.base import session_scope
     from app.db.models import Chat
+    from app.llm.router import background_tier
     from app.services.digests import chats_needing_digest, digest_for_day
 
     yesterday = datetime.now(UTC) - timedelta(days=1)
@@ -339,7 +340,7 @@ async def build_daily_digests(ctx: dict[str, Any]) -> dict[str, Any]:
             if chat is None:
                 continue
             try:
-                d = await digest_for_day(db, chat, yesterday)
+                d = await digest_for_day(db, chat, yesterday, tier=background_tier())
             except Exception as exc:  # bitta chat xatosi qolganini to'xtatmasin
                 log.warning("worker.digest_failed", chat_id=chat_id, error=str(exc)[:200])
                 continue

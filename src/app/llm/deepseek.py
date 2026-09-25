@@ -99,6 +99,7 @@ class DeepSeekProvider(BaseProvider):
         max_tokens: int | None = None,
         json_mode: bool = False,
         thinking_level: str | None = None,
+        service_tier: str | None = None,
     ) -> ChatResult:
         needed = [Capability.CHAT]
         if tools:

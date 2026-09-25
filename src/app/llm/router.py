@@ -388,6 +388,19 @@ def thinking_level(task: Task) -> str | None:
     return str(getattr(get_settings(), f"gemini_thinking_level_{task.value}", "") or "")
 
 
+TIER_STANDARD = "standard"
+TIER_FLEX = "flex"
+
+
+def background_tier() -> str:
+    """Fon vazifasi uchun tier: `flex` (`LLM_FLEX_BACKGROUND=true`) yoki `standard`.
+
+    Faqat fon yo'llari chaqiradi (worker digest/hafta tugunlari, briefing,
+    judge). Interaktiv yo'l (agent, deep, chat) tier bermaydi — standart.
+    """
+    return TIER_FLEX if get_settings().llm_flex_background else TIER_STANDARD
+
+
 class LLM:
     """Ilova kodi shu fasad bilan ishlaydi — provider nomini bilishi shart emas."""
 
@@ -400,7 +413,10 @@ class LLM:
         temperature: float = 0.7,
         max_tokens: int | None = None,
         json_mode: bool = False,
+        tier: str = TIER_STANDARD,
     ) -> ChatResult:
+        """`tier="flex"` — Gemini Flex (yarim narx, sekin); faqat fon ishlari
+        (`background_tier()`). Boshqa provider'da e'tiborsiz."""
         import time
 
         from app.observability import record_llm
@@ -416,6 +432,7 @@ class LLM:
                 max_tokens=max_tokens,
                 json_mode=json_mode,
                 thinking_level=thinking_level(task),
+                service_tier=tier if tier == TIER_FLEX else None,
             )
         except LLMError:
             record_llm(

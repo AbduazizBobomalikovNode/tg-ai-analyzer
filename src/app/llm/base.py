@@ -276,6 +276,7 @@ class BaseProvider(ABC):
         max_tokens: int | None = None,
         json_mode: bool = False,
         thinking_level: str | None = None,
+        service_tier: str | None = None,
     ) -> ChatResult: ...
 
     async def embed(

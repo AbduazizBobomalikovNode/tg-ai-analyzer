@@ -37,6 +37,15 @@ async def startup(ctx: dict[str, Any]) -> None:
     dims_error = embed_dims_mismatch(s)
     if dims_error:
         log.warning("worker.embed_dims_mismatch", error=dims_error)
+    if s.llm_flex_background:
+        # Fon LLM ishlari Flex'da — SDK uni bilmasa bu yerda (startupda) bir
+        # marta `llm.flex_unsupported` ogohlantirishi, keyin standart tier.
+        try:
+            from app.llm.gemini import flex_supported
+
+            flex_supported()
+        except Exception as exc:  # SDK import xatosi worker'ni to'xtatmasin
+            log.warning("worker.flex_check_failed", error=str(exc)[:200])
     await _reset_stuck_syncs()
     await _start_updates_listener()
     log.info("worker.start", max_jobs=WorkerSettings.max_jobs)

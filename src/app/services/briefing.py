@@ -56,6 +56,7 @@ from app.db.models import (
 )
 from app.llm import LLM, LLMError, Msg, Task
 from app.llm.pricing import result_cost
+from app.llm.router import background_tier
 from app.logging import get_logger
 from app.services import untrusted as U
 from app.services.nodes import LEVEL_DAY
@@ -519,6 +520,8 @@ async def synthesize(
             [Msg.system(BRIEFING_PROMPT), Msg.user(user_turn)],
             json_mode=True,
             max_tokens=BRIEFING_MAX_TOKENS,
+            # Briefing faqat cron'da quriladi (fon ishi) — Flex, yarim narx.
+            tier=background_tier(),
         )
     except LLMError as exc:
         log.warning("briefing.llm_failed", day=str(day), error=str(exc)[:200])
@@ -647,6 +650,7 @@ async def _densify(
             ],
             json_mode=True,
             max_tokens=BRIEFING_MAX_TOKENS,
+            tier=background_tier(),
         )
     except LLMError as exc:
         log.warning("briefing.cod_failed", error=str(exc)[:200])

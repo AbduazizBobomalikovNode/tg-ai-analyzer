@@ -137,7 +137,7 @@ def _is_fresh(cached: ChatDigest, fingerprint: str | None, msg_count: int) -> bo
 
 
 async def _summarize(
-    lines: list[str], *, title: str, day: datetime, llm: LLM
+    lines: list[str], *, title: str, day: datetime, llm: LLM, tier: str = "standard"
 ) -> tuple[str, int, int, str]:
     """Bir kunlik qatorlarni (kerak bo'lsa bo'laklab) digest qiladi."""
     chunks: list[list[str]] = [[]]
@@ -160,6 +160,7 @@ async def _summarize(
             Task.ROUTE,
             [Msg.system(MAP_DIGEST_PROMPT), Msg.user(f"{head}>\n{body}\n</untrusted_data>")],
             max_tokens=350,
+            tier=tier,
         )
         parts.append(res.text.strip())
         t_in += res.usage.tokens_in
@@ -169,9 +170,19 @@ async def _summarize(
 
 
 async def digest_for_day(
-    session: AsyncSession, chat: Chat, day: datetime, *, llm: LLM | None = None, force: bool = False
+    session: AsyncSession,
+    chat: Chat,
+    day: datetime,
+    *,
+    llm: LLM | None = None,
+    force: bool = False,
+    tier: str = "standard",
 ) -> DayDigest | None:
-    """Bir kun uchun digest (kesh → yo'q bo'lsa hisoblab yozadi). Xabar bo'lmasa None."""
+    """Bir kun uchun digest (kesh → yo'q bo'lsa hisoblab yozadi). Xabar bo'lmasa None.
+
+    `tier` — worker cron'i `router.background_tier()` beradi (Flex); savol
+    paytidagi (interaktiv) yo'l standart tier'da qoladi.
+    """
     day = _day_start(day)
     msgs = await day_messages(session, chat.id, day)
     if not msgs:
@@ -192,7 +203,7 @@ async def digest_for_day(
 
     try:
         summary, t_in, t_out, model = await _summarize(
-            lines, title=chat.title, day=day, llm=llm or LLM()
+            lines, title=chat.title, day=day, llm=llm or LLM(), tier=tier
         )
     except LLMError as exc:
         log.warning("digest.failed", chat_id=chat.id, day=str(day.date()), error=str(exc)[:200])

@@ -32,6 +32,11 @@ Web: `http://localhost:8080` → `/login` → QR (yoki telefon → kod) →
 rate, kontekst limitlari, auto-eval, sample), `AGENT_MAX_ITERATIONS`,
 `AGENT_TOOL_RESULT_TOKENS`, `WRITE_PROPOSAL_TTL_HOURS`, `WRITE_RATE_PER_HOUR`,
 `EMBED_ENABLED`, `DEFAULT_WRITE_MODE`, `MAX_ACCOUNTS`, `ALLOWED_USER_IDS`.
+LLM xarajati: `GEMINI_THINKING_LEVEL_ROUTE|SEARCH|TOOLS|DEEP` (vazifa bo'yicha
+fikrlash darajasi, default `minimal`/`low`/`low`/`low`) va `LLM_FLEX_BACKGROUND`
+(default `true` — worker digest'lari, hafta tugunlari, briefing va judge Gemini
+Flex tier'ida: yarim narx, 1-15 daq kechikish; `false` = hammasi standart).
+Batafsil — `docs/llm.md`.
 To'liq ro'yxat va izohlar — `.env.example`.
 
 ## Kuzatuv (8-bosqich)
@@ -47,6 +52,10 @@ To'liq ro'yxat va izohlar — `.env.example`.
 * Log'lar structlog, hodisa nomlari `modul.hodisa`: `ingest.sync_done`,
   `worker.snapshot.done`, `agent.done`, `chat.answer`, `write.proposed/executed/
   blocked`, `llm.fallback`, `mtproto.blocked`.
+* `llm.chat` har chaqiruvda `tokens_in/out/thinking/cached`, `thinking_level` va
+  `tier` ni yozadi (token sonlari maskalanmaydi); `llm.flex_fallback` — Flex
+  429/503 dan keyin standart tier'da qayta urildi; `llm.flex_unsupported` — SDK
+  Flex'ni bilmaydi (worker startupida tekshiriladi).
 * Dashboard `/dashboard`: token/xarajat/latency/sifat, ingestion holati, amallar.
 * Muhim signallar: `mtproto.blocked` (guardrail ishladi — kim/nima), FloodWait
   (`worker.sync_account.paused`), `pool.err.session_revoked` (akkaunt qayta login).

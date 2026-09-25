@@ -171,6 +171,29 @@ def thinking_config(
     return None
 
 
+_flex_warned = False
+
+
+def flex_supported() -> bool:
+    """O'rnatilgan google-genai `GenerateContentConfig.service_tier` ni biladimi.
+
+    Bilmasa Flex **no-op** (standart tier) va jarayonda bir marta
+    `llm.flex_unsupported` ogohlantirishi — jimgina "yarim narx" deb
+    hisoblamaslik uchun `ChatResult.service_tier` ham standart qoladi.
+    2.25.0 da bor (`types.ServiceTier.FLEX`, mldev `serviceTier`).
+    """
+    global _flex_warned
+    ok = "service_tier" in getattr(types.GenerateContentConfig, "model_fields", {}) and hasattr(
+        types, "ServiceTier"
+    )
+    if not ok and not _flex_warned:
+        _flex_warned = True
+        log.warning(
+            "llm.flex_unsupported", hint="google-genai yangilang; standart tier ishlatiladi"
+        )
+    return ok
+
+
 def l2_normalize(vec: list[float]) -> list[float]:
     """Birlik uzunlikka keltiradi; nol vektor o'zgarishsiz qaytadi."""
     norm = math.sqrt(sum(v * v for v in vec))
@@ -228,6 +251,7 @@ class GeminiProvider(BaseProvider):
         max_tokens: int | None = None,
         json_mode: bool = False,
         thinking_level: str | None = None,
+        service_tier: str | None = None,
     ) -> ChatResult:
         needed = [Capability.CHAT]
         if tools:
@@ -259,20 +283,41 @@ class GeminiProvider(BaseProvider):
                 disable=True
             )
 
-        config = types.GenerateContentConfig(**cfg_kwargs)
+        flex = service_tier == "flex" and flex_supported()
 
-        async def _call() -> Any:
+        async def _call_with(cfg: dict[str, Any]) -> Any:
+            config = types.GenerateContentConfig(**cfg)
+
+            async def _call() -> Any:
+                try:
+                    return await self._client.aio.models.generate_content(
+                        model=model,
+                        contents=contents,  # type: ignore[arg-type]
+                        config=config,
+                    )
+                except Exception as exc:
+                    raise LLMError(self.name, str(exc), status=_status_of(exc)) from exc
+
+            return await self._with_retry("chat", _call)
+
+        if flex:
+            # Flex: yarim narx, lekin 429/503 da **server zaxirasi yo'q**
+            # (ai.google.dev/gemini-api/docs/flex-inference). Retry'lardan keyin
+            # ham yiqilsa — bir marta standart tier'da: fon ishi to'xtab qolmasin.
             try:
-                return await self._client.aio.models.generate_content(
-                    model=model,
-                    contents=contents,  # type: ignore[arg-type]
-                    config=config,
-                )
-            except Exception as exc:
-                raise LLMError(self.name, str(exc), status=_status_of(exc)) from exc
-
-        resp: Any = await self._with_retry("chat", _call)
-        return _parse_chat(resp, model=model)
+                resp: Any = await _call_with({**cfg_kwargs, "service_tier": types.ServiceTier.FLEX})
+            except CapabilityError:
+                raise
+            except LLMError as exc:
+                log.warning("llm.flex_fallback", model=model, error=str(exc)[:200])
+            else:
+                result = _parse_chat(resp, model=model)
+                result.service_tier = "flex"
+                return result
+        resp = await _call_with(cfg_kwargs)
+        result = _parse_chat(resp, model=model)
+        result.service_tier = "standard" if service_tier else ""
+        return result
 
     # ── embedding ────────────────────────────────────────────────────────────
 

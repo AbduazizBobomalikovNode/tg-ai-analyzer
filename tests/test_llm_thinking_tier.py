@@ -118,3 +118,147 @@ async def test_gemini_adapter_sends_the_level_in_the_request() -> None:
     p._client = SimpleNamespace(aio=SimpleNamespace(models=_Models()))
     await p.chat([Msg.user("x")], model="gemini-3.5-flash-lite", thinking_level="minimal")
     assert seen[0].thinking_config.thinking_level == types.ThinkingLevel.MINIMAL
+
+
+# ─── Flex tier (fon ishlari) ─────────────────────────────────────────────────
+
+
+def test_background_tier_follows_the_kill_switch(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert R.background_tier() == "flex"  # default: LLM_FLEX_BACKGROUND=true
+    monkeypatch.setattr(get_settings(), "llm_flex_background", False)
+    assert R.background_tier() == "standard"
+
+
+async def test_facade_sends_flex_only_when_asked(captured: _CapturingProvider) -> None:
+    await R.LLM().chat(R.Task.SEARCH, [Msg.user("x")])
+    await R.LLM().chat(R.Task.ROUTE, [Msg.user("x")], tier="flex")
+    assert [k["service_tier"] for k in captured.kwargs] == [None, "flex"]
+
+
+def test_installed_sdk_supports_flex() -> None:
+    from app.llm.gemini import flex_supported
+
+    assert flex_supported() is True
+
+
+def _gemini_with(responses: list[Any]) -> tuple[Any, list[Any]]:
+    from types import SimpleNamespace
+
+    from app.llm.gemini import GeminiProvider
+
+    seen: list[Any] = []
+
+    class _Models:
+        async def generate_content(self, *, model: str, contents: Any, config: Any) -> Any:
+            seen.append(config)
+            item = responses.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+    p = GeminiProvider(api_key="test-key")
+    p.max_retries = 1
+    p._client = SimpleNamespace(aio=SimpleNamespace(models=_Models()))
+    return p, seen
+
+
+def _ok() -> Any:
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        candidates=[
+            SimpleNamespace(
+                content=SimpleNamespace(parts=[types.Part(text="ok")]), finish_reason="STOP"
+            )
+        ],
+        usage_metadata=SimpleNamespace(prompt_token_count=1, candidates_token_count=1),
+    )
+
+
+async def test_gemini_adapter_requests_flex_and_marks_the_result() -> None:
+    p, seen = _gemini_with([_ok()])
+    res = await p.chat([Msg.user("x")], model="gemini-3.5-flash-lite", service_tier="flex")
+    assert seen[0].service_tier == types.ServiceTier.FLEX
+    assert res.service_tier == "flex"
+    std, seen2 = _gemini_with([_ok()])
+    res2 = await std.chat([Msg.user("x")], model="gemini-3.5-flash-lite")
+    assert seen2[0].service_tier is None and res2.service_tier == ""
+
+
+async def test_flex_failure_falls_back_to_standard_once() -> None:
+    class _Busy(Exception):
+        code = 503
+
+    p, seen = _gemini_with([_Busy("flex capacity"), _ok()])
+    res = await p.chat([Msg.user("x")], model="gemini-3.5-flash-lite", service_tier="flex")
+    assert [c.service_tier for c in seen] == [types.ServiceTier.FLEX, None]
+    assert res.service_tier == "standard" and res.text == "ok"
+
+
+class _TierLLM:
+    def __init__(self, text: str = '{"relevance":5,"usefulness":5,"grounded":5,"note":"ok"}'):
+        self.tiers: list[str] = []
+        self.text = text
+
+    async def chat(self, task: Any, messages: list[Any], **kw: Any) -> ChatResult:
+        self.tiers.append(kw.get("tier", "standard"))
+        return ChatResult(
+            text=self.text,
+            tool_calls=[],
+            model="gemini-3.5-flash-lite",
+            provider="gemini",
+            usage=Usage(tokens_in=100, tokens_out=10),
+            service_tier=kw.get("tier", ""),
+        )
+
+
+async def test_judge_runs_on_flex_and_is_priced_as_flex() -> None:
+    from app.services import evaluation as E
+
+    llm = _TierLLM()
+    j = await E.judge("savol", "javob", had_context=True, llm=llm)  # type: ignore[arg-type]
+    assert llm.tiers == ["flex"]
+    assert j is not None and j.tier == "flex"
+
+
+async def test_week_node_and_digest_use_the_background_tier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import UTC, datetime
+
+    from app.services import digests as D
+
+    llm = _TierLLM(text="digest")
+    await D._summarize(
+        ["a: salom"],
+        title="t",
+        day=datetime(2026, 9, 20, tzinfo=UTC),
+        llm=llm,  # type: ignore[arg-type]
+        tier=R.background_tier(),
+    )
+    # Savol paytidagi (interaktiv) digest — standart
+    await D._summarize(
+        ["a: salom"],
+        title="t",
+        day=datetime(2026, 9, 20, tzinfo=UTC),
+        llm=llm,  # type: ignore[arg-type]
+    )
+    assert llm.tiers == ["flex", "standard"]
+
+
+def test_background_callers_pass_the_background_tier() -> None:
+    """Fon yo'llari tier'ni `background_tier()` dan oladi (grep-qo'riqchi)."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1] / "src" / "app"
+    for rel, n in (
+        ("services/nodes.py", 1),
+        ("services/briefing.py", 2),
+        ("services/evaluation.py", 1),
+        ("worker/tasks.py", 1),
+    ):
+        text = (root / rel).read_text(encoding="utf-8")
+        assert text.count("tier=background_tier()") == n, rel
+    # Interaktiv yo'llar tier bermaydi
+    for rel in ("services/agent.py", "services/deep_search.py", "services/chat_service.py"):
+        assert "background_tier" not in (root / rel).read_text(encoding="utf-8"), rel

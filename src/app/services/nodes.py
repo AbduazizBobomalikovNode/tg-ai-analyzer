@@ -38,6 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.db.models import Chat, ChatDigest, Message, RetrievalNode, RetrievalNodeEmbedding
 from app.llm import EMBED_DOCUMENT, LLM, LLMError, Msg, Task
+from app.llm.router import background_tier
 from app.logging import get_logger
 from app.services import untrusted as U
 from app.services.episodes import to_signed64
@@ -400,6 +401,8 @@ async def build_week_nodes(
             Task.ROUTE,
             [Msg.system(WEEK_DIGEST_PROMPT), Msg.user(_week_envelope(chat, children))],
             max_tokens=WEEK_MAX_TOKENS,
+            # Faqat worker cron'i quradi — fon ishi, Flex (yarim narx).
+            tier=background_tier(),
         )
     except LLMError as exc:
         log.warning("nodes.week_failed", chat_id=chat_id, error=str(exc)[:200])

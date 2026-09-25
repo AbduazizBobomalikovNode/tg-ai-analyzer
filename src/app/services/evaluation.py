@@ -23,6 +23,7 @@ from app.config import get_settings
 from app.db.base import session_scope
 from app.db.models import ConversationMessage
 from app.llm import LLM, LLMError, Msg, Task
+from app.llm.router import background_tier
 from app.logging import get_logger
 
 log = get_logger(__name__)
@@ -143,7 +144,12 @@ async def judge(
     )
     try:
         res = await (llm or LLM()).chat(
-            Task.ROUTE, [Msg.system(JUDGE_PROMPT), Msg.user(user)], json_mode=True, max_tokens=200
+            Task.ROUTE,
+            [Msg.system(JUDGE_PROMPT), Msg.user(user)],
+            json_mode=True,
+            max_tokens=200,
+            # Javobdan keyin, fonda — foydalanuvchi kutmaydi: Flex (yarim narx).
+            tier=background_tier(),
         )
     except LLMError as exc:
         log.warning("eval.judge_failed", error=str(exc)[:200])

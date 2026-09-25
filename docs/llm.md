@@ -84,6 +84,33 @@ qo'llamaydigan modellarga (3.7/3.8-flash, 3.1-pro, `*-latest` aliaslari) adapter
 (konfiguratsiya yuborilmaydi); 2.5 avlodda byudjet (token soni) ishlatiladi,
 daraja emas. Daraja almashtirish sifatni tebratadi — `make eval-run` ×3 bilan.
 
+### Flex tier — fon ishlari
+
+`LLM().chat(..., tier="flex")` → Gemini `GenerateContentConfig.service_tier=FLEX`
+(google-genai ≥ 2.25; eski SDK'da no-op + `llm.flex_unsupported`, worker startupida
+tekshiriladi). Narx Standard'ning **yarmi** (input, output+thinking, kesh —
+`pricing.FLEX_MULTIPLIER`), evaziga kechikish 1-15 daqiqa va 429/503 da server
+zaxirasi yo'q — adapter retry'lardan keyin **bir marta** standart tier'da qayta
+uradi (`llm.flex_fallback`), `ChatResult.service_tier` haqiqatda qaysi tier
+ishlaganini aytadi va narx shunga qarab hisoblanadi (`pricing.result_cost`).
+
+Kim Flex'da (`router.background_tier()`): worker kunlik digest'lari
+(`build_daily_digests` → `digest_for_day(tier=...)`), hafta tugunlari
+(`nodes.build_week_nodes`), briefing (ikkala chaqiruv), judge
+(`evaluation.judge`). Embedding allaqachon Batch API'da. Interaktiv yo'l
+(agent, deep, chat, savol paytidagi digest) **hech qachon** Flex emas —
+`tests/test_llm_thinking_tier.py` grep bilan qo'riqlaydi.
+`LLM_FLEX_BACKGROUND=false` — hammasi standart.
+
+### Token hisobi
+
+`ChatResult.tokens_thinking` / `tokens_cached` (Gemini `thoughts_token_count` /
+`cached_content_token_count`) → `conversation_messages.tokens_thinking/
+tokens_cached` (migratsiya 0022) va `context_used`. `estimate_cost`: thinking —
+output narxida, cached — `CACHED_PRICES` (jadvalda yo'q model → to'liq narx,
+bir marta `pricing.no_cached_price`). `limits.daily_usage` token byudjetiga
+thinking ham kiradi.
+
 ## Model override va embedding modelini almashtirish (phase4/B)
 
 `LLM_TASK_*` provider bilan modelni birga beradi; `LLM_MODEL_*` esa **faqat
