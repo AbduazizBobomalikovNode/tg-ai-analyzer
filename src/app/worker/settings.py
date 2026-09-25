@@ -118,6 +118,7 @@ class WorkerSettings:
         *tasks.PHASE2_FUNCTIONS,  # phase2/A: epizod/tugun indeksi
         *tasks.PHASE3C_FUNCTIONS,  # phase3/C: alert skaneri va yetkazish
         *tasks.PHASE3B_FUNCTIONS,  # phase3/B: briefing qurish va yetkazish
+        *tasks.REMINDER_FUNCTIONS,  # eslatmalar: deliver_reminders (skills_ext `remind`)
         *tasks.PHASE4B_FUNCTIONS,  # phase4/B: reembed_all (cron yo'q, qo'lda)
         *tasks.PHASE4A_FUNCTIONS,  # phase4/A: entity backfill (kursorli)
         *tasks.PHASE4C_FUNCTIONS,  # phase4/C: batch embedding joblarini o'qish
@@ -128,6 +129,7 @@ class WorkerSettings:
         *tasks.PHASE2_CRONS,  # phase2/A: embed_nodes (15 daq), week_nodes (du 03:30)
         *tasks.PHASE3C_CRONS,  # phase3/C: scan_alerts (5 daq), deliver_alerts (5 daq)
         *tasks.PHASE3B_CRONS,  # phase3/B: build_briefings (soatiga), deliver_briefings (15 daq)
+        *tasks.REMINDER_CRONS,  # eslatmalar: deliver_reminders (har daqiqa)
         *tasks.PHASE4A_CRONS,  # phase4/A: entity backfill (soatiga, ish bo'lmasa darhol chiqadi)
         *tasks.PHASE4C_CRONS,  # phase4/C: poll_embed_batches (5 daq)
         *tasks.UI_R1A_CRONS,  # ui/R1a: refresh_all_chat_profiles (soatiga, :40)

@@ -18,9 +18,11 @@ from typing import Any
 
 import pytest
 
-from app.db.models import Account, AgentAction, AlertRule
+from app.db.models import Account, AgentAction, AgentRun, AlertRule
 from app.services import actions as ACT
 from app.services import automation as AU
+from app.services import deep_search as DS
+from app.services import skills_ext as SX
 from app.services import write_tools as W
 
 
@@ -54,6 +56,20 @@ class _Session:
         )
 
 
+class _Factory:
+    def __init__(self, session: _Session) -> None:
+        self.session = session
+
+    def __call__(self) -> _Factory:
+        return self
+
+    async def __aenter__(self) -> _Session:
+        return self.session
+
+    async def __aexit__(self, *a: Any) -> None:
+        return None
+
+
 def _chat(**kw: Any) -> Any:
     base = dict(id=11, account_id=5, title="Ijara <b>chat</b>", tg_peer_id=1001)
     base.update(kw)
@@ -69,6 +85,31 @@ def _objects() -> dict[tuple[str, int], Any]:
         ),
         ("AgentRun", 7): SimpleNamespace(id=7, account_id=5, user_id=1),
     }
+
+
+def _ctx(question: str, session: _Session, **kw: Any) -> Any:
+    base: dict[str, Any] = {
+        "raw_question": question,
+        "question": question,
+        "locale": "uz",
+        "account_id": 5,
+        "user_id": 1,
+        "run_id": None,
+        "action_ids": [],
+        "selected": [],
+        "chats_by_id": {11: _chat()},
+        "plan": DS.DeepPlan(),
+        "tz": "Asia/Tashkent",
+        "facts": {},
+        "claims": [],
+        "session_factory": _Factory(session),
+    }
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def _actions(session: _Session) -> list[AgentAction]:
+    return [o for o in session.added if isinstance(o, AgentAction)]
 
 
 # ─── tahlil (sof) ────────────────────────────────────────────────────────────
@@ -106,6 +147,61 @@ def test_parse_alert_request_none() -> None:
 )
 def test_parse_briefing_request(text: str, enabled: bool, hour: int | None) -> None:
     assert AU.parse_briefing_request(text) == (enabled, hour)
+
+
+# ─── taklif (ko'nikma) ───────────────────────────────────────────────────────
+
+
+async def test_create_alert_skill_only_proposes() -> None:
+    s = _Session(_objects())
+    ctx = _ctx("'ijara' so'zi chiqsa xabar ber", s)
+    res = await SX._create_alert(ctx, {"chat_id": 11})
+    [a] = _actions(s)
+    assert a.tool == "create_alert" and a.status == "proposed" and a.target_peer_id is None
+    assert a.args["kind"] == "keyword" and a.args["pattern"] == "ijara"
+    assert a.args["chat_id"] == 11 and a.args["account_id"] == 5
+    assert a.args["cooldown_minutes"] == AU.ALERT_DEFAULT_COOLDOWN
+    assert "ijara" in a.args["summary"] and "<b>" not in a.args["summary"]
+    assert not any(isinstance(o, AlertRule) for o in s.added)  # yaratilmagan!
+    assert res.stop and f"#{a.id}" in res.answer and ctx.action_ids == [a.id]
+    assert res.summary == {"proposed": True, "tool": "create_alert"}
+    assert any(isinstance(o, AgentRun) for o in s.added)
+
+
+async def test_create_alert_refuses_without_intent_or_pattern() -> None:
+    s = _Session(_objects())
+    res = await SX._create_alert(_ctx("ijara haqida nima yozishdi?", s), {"pattern": "ijara"})
+    assert res.stop and res.summary["reason"] == "no_intent" and s.added == []
+    res = await SX._create_alert(_ctx("xabar ber", s), {})
+    assert res.summary["reason"] == "no_pattern" and s.added == []
+
+
+async def test_create_alert_semantic_from_planner_and_foreign_chat() -> None:
+    s = _Session(_objects())
+    res = await SX._create_alert(_ctx("buni kuzatib xabar ber", s), {"pattern": "kripto"})
+    [a] = _actions(s)
+    assert a.args["kind"] == "semantic" and a.args["chat_id"] is None and res.stop
+    s2 = _Session(_objects())
+    res = await SX._create_alert(_ctx("'ijara' chiqsa xabar ber", s2), {"chat_id": 12})
+    assert res.summary["reason"] == "unknown_chat" and _actions(s2) == []
+
+
+async def test_set_briefing_skill_proposes() -> None:
+    s = _Session(_objects())
+    res = await SX._set_briefing(_ctx("har kuni ertalab 8 da briefing yubor", s), {})
+    [a] = _actions(s)
+    assert a.tool == "set_briefing" and a.args == {
+        "account_id": 5,
+        "enabled": True,
+        "hour": 8,
+        "summary": a.args["summary"],
+    }
+    assert "08:00" in a.args["summary"] and "Asia/Tashkent" in a.args["summary"]
+    assert res.stop
+    s2 = _Session(_objects())
+    await SX._set_briefing(_ctx("briefingni o'chir", s2), {})
+    [b] = _actions(s2)
+    assert b.args["enabled"] is False and b.args["hour"] is None
 
 
 # ─── tasdiq → bajarish ───────────────────────────────────────────────────────

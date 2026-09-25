@@ -739,6 +739,53 @@ def _phase3b_crons() -> list[Any]:
 PHASE3B_CRONS: list[Any] = _phase3b_crons()
 
 
+# ─── eslatmalar (skills_ext `remind`, `services/scheduled.py`) ───────────────
+
+
+async def deliver_reminders(ctx: dict[str, Any]) -> dict[str, Any]:
+    """Har daqiqa: muddati kelgan `scheduled_jobs(type='reminder')` → egasining botiga.
+
+    Har eslatma **o'z** tranzaksiyasida: band qilish (`scheduled.claim`) →
+    push → yakun. Bitta xato qolganlarini to'xtatmaydi. Jim soatlar
+    qo'llanmaydi — vaqtni foydalanuvchi o'zi aytgan.
+    """
+    from datetime import UTC, datetime
+
+    from app.db.base import session_scope
+    from app.services import scheduled as SCH
+
+    now = datetime.now(UTC)
+    async with session_scope() as db:
+        ids = await SCH.due_ids(db, now)
+    counts: dict[str, int] = {}
+    for job_id in ids:
+        try:
+            async with session_scope() as db:
+                out = await SCH.deliver_one(db, job_id, now=now)
+            counts[out.status] = counts.get(out.status, 0) + 1
+        except Exception as exc:  # bitta eslatma xatosi qolganlarini to'xtatmasin
+            counts["error"] = counts.get("error", 0) + 1
+            log.warning("worker.reminder_failed", job_id=job_id, error=str(exc)[:200])
+    if ids:
+        log.info("worker.reminders.delivered", due=len(ids), **counts)
+    await heartbeat("deliver_reminders", extra={"due": len(ids), **counts})
+    return {"due": len(ids), **counts}
+
+
+#: Eslatma ishi va cron'i — `worker/settings.py` ga `*tasks.REMINDER_*` bo'lib qo'shiladi.
+REMINDER_FUNCTIONS: list[Any] = [deliver_reminders]
+
+
+def _reminder_crons() -> list[Any]:
+    from arq.cron import cron
+
+    # Har daqiqa: eslatma aniq vaqtga aytilgan, ≤60 s kechikish qabul qilinadi.
+    return [cron(deliver_reminders, minute=set(range(60)), run_at_startup=False, timeout=120)]
+
+
+REMINDER_CRONS: list[Any] = _reminder_crons()
+
+
 # ─── 4-bosqich/B: model almashtirgandan keyin qayta embedding ────────────────
 #
 # Embedding modeli o'zgarsa (`EMBED_MODEL` / `LLM_MODEL_EMBED`) eski vektorlar

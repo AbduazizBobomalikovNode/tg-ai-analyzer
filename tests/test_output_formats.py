@@ -17,11 +17,14 @@ import shutil
 import subprocess
 from datetime import UTC, date, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from app.services import deep_search as DS
 from app.services import output_formats as OF
+from app.services import skills_ext as SX
 from app.services.compute import Fact
 
 MD_JS = Path(__file__).resolve().parents[1] / "src/app/web/static/md.js"
@@ -208,3 +211,75 @@ def test_wrap_extract_and_ensure_blocks() -> None:
     assert OF.ensure_blocks(answer, ctx) == answer
     lost = OF.ensure_blocks("Qisqa javob.", ctx)
     assert lost.endswith(block) and lost.startswith("Qisqa javob.")
+
+
+# ─── ko'nikma (soxta holat) ──────────────────────────────────────────────────
+
+
+def _ctx(question: str, facts: list[Fact] | None = None, **kw: Any) -> Any:
+    base: dict[str, Any] = {
+        "raw_question": question,
+        "facts": {f.name: f for f in (facts or [])},
+        "claims": [],
+        "notes": [],
+        "window_meta": {},
+        "plan": DS.DeepPlan(),
+        "tz": "Asia/Tashkent",
+        "selected": [],
+        "chats_by_id": {1: SimpleNamespace(id=1), 2: SimpleNamespace(id=2)},
+        "session_factory": None,
+    }
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+async def test_skill_ranking_table_goes_to_claims_block() -> None:
+    ctx = _ctx("eng faol chatlarni jadval qil", _ranking_facts())
+    res = await SX._format_output(ctx, {})
+    assert res.summary == {"format": "table", "kind": "ranking", "rows": 3}
+    assert res.notes == [OF.FORMAT_NOTE]
+    [claim] = ctx.claims
+    assert claim.startswith(OF.PRE_START) and claim.endswith(OF.PRE_END)
+    [block] = OF.extract_blocks(ctx.claims)
+    assert "| 1 | Ish \\| chat | 700 |" in block
+    assert not res.answer and not res.stop
+
+
+async def test_skill_chart_per_day_uses_count_series(monkeypatch: pytest.MonkeyPatch) -> None:
+    since = datetime(2026, 9, 19, 19, 0, tzinfo=UTC)
+    until = datetime(2026, 9, 22, 19, 0, tzinfo=UTC)
+    seen: dict[str, Any] = {}
+
+    async def fake_series(session: Any, **kw: Any) -> tuple[str, dict[date, int]]:
+        seen.update(kw)
+        return "day", {date(2026, 9, 20): 4, date(2026, 9, 22): 9}
+
+    class _Factory:
+        async def __aenter__(self) -> Any:
+            return object()
+
+        async def __aexit__(self, *a: Any) -> None:
+            return None
+
+    monkeypatch.setattr(OF, "count_series", fake_series)
+    ctx = _ctx(
+        "bu hafta kunlik grafik",
+        window_meta={"since": since, "until": until, "tz": "Asia/Tashkent", "direction": "out"},
+        session_factory=_Factory,
+    )
+    res = await SX._format_output(ctx, {})
+    assert res.summary["kind"] == "series" and res.summary["rows"] == 3
+    assert seen["direction"] == "out" and seen["chat_ids"] == [1, 2]
+    [block] = OF.extract_blocks(ctx.claims)
+    spec = json.loads(block.split("\n")[1])
+    assert spec["type"] == "line"
+    assert spec["labels"] == ["09-20", "09-21", "09-22"]
+    assert spec["series"][0]["values"] == [4, 0, 9]
+    names = {f.name: f.value for f in res.facts}
+    assert names == {"series_total": 13, "series_peak": 9}
+
+
+async def test_skill_without_numbers_is_a_noop() -> None:
+    ctx = _ctx("jadval qil", [Fact("period", "2026-09", source="x")])
+    res = await SX._format_output(ctx, {})
+    assert ctx.claims == [] and res.summary["rows"] == 0 and res.notes
