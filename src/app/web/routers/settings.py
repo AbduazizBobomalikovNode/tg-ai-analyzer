@@ -2,6 +2,8 @@
 
     GET  /api/settings/prefs               → {prefs: {...}}
     PUT  /api/settings/prefs   {…}         → {prefs: {...}}   (faqat tanilgan kalitlar)
+    GET/PUT /api/settings/budget, POST/DELETE /api/settings/budget/boost
+                                           → kunlik byudjet (pastda)
     DELETE /api/accounts/{id}              → akkauntni uzish (ma'lumot qoladi)
     GET  /api/accounts/{id}/sync/status    → yengil holat (5 s poll uchun)
     GET  /api/accounts/{id}/sync/stream    → o'sha holat SSE bo'lib (2 s)
@@ -15,9 +17,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import time
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -29,6 +32,7 @@ from app.db.base import session_scope
 from app.db.models import Account, AccountStatus, Chat, SyncState, User
 from app.logging import get_logger
 from app.services import ingestion as ing
+from app.services import limits as LIM
 from app.services import prefs as P
 from app.services import sync_progress as SP
 from app.web.routers.chatdata import avatar_url
@@ -496,3 +500,126 @@ async def sync_stream(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# ─── kunlik byudjet (foydalanuvchi bo'yicha override + bugungi qo'shimcha) ───
+#
+#   GET    /api/settings/budget[?account_id=]      → holat (sarf, limit, boost)
+#   PUT    /api/settings/budget        {token_budget?, cost_budget_usd?}
+#          (berilmagan maydon o'zgarmaydi, `null` — global standartga qaytadi)
+#   POST   /api/settings/budget/boost  {tokens?, usd?, hours?, account_id?}
+#          (standart muddat — akkaunt `tz` sidagi keyingi yarim tun)
+#   DELETE /api/settings/budget/boost
+#
+# Byudjet **foydalanuvchi** bo'yicha (sarf ham shunday sanaladi) — UI uni
+# har akkaunt sozlamalarida ko'rsatadi, lekin qiymat hammasi uchun umumiy.
+# `account_id` faqat vaqt zonasi uchun (egalik tekshiriladi).
+
+
+class BudgetIn(BaseModel):
+    token_budget: int | None = None
+    cost_budget_usd: float | None = None
+
+
+class BoostIn(BaseModel):
+    tokens: int | None = None
+    usd: float | None = None
+    hours: float | None = None
+    account_id: int | None = None
+
+
+def _bad(code: str = "web.budget.err_invalid") -> HTTPException:
+    return HTTPException(status_code=400, detail={"code": code})
+
+
+def _check_tokens(v: int | None) -> None:
+    if v is not None and not (0 <= v <= LIM.MAX_TOKENS):
+        raise _bad()
+
+
+def _check_usd(v: float | None) -> None:
+    if v is not None and not (math.isfinite(v) and 0 <= v <= LIM.MAX_USD):
+        raise _bad()
+
+
+async def _budget_tz(db: Any, user_id: int, account_id: int | None) -> str:
+    """Vaqt zonasi: berilgan (o'ziniki) akkaunt → birinchi akkaunt → standart."""
+    if account_id is not None:
+        acc = await _own_account(db, user_id, account_id)
+        return str(acc.tz or LIM.DEFAULT_TZ)
+    tz = (
+        await db.execute(
+            select(Account.tz).where(Account.user_id == user_id).order_by(Account.id).limit(1)
+        )
+    ).scalar_one_or_none()
+    return str(tz or LIM.DEFAULT_TZ)
+
+
+@router.get("/api/settings/budget")
+async def get_budget(
+    ident: Annotated[WebIdentity, Depends(require_identity)], account_id: int | None = None
+) -> dict[str, Any]:
+    async with session_scope() as db:
+        tz = await _budget_tz(db, ident.user_id, account_id)
+        return await LIM.budget_view(db, ident.user_id, tz=tz)
+
+
+@router.put("/api/settings/budget", dependencies=[Depends(require_csrf)])
+async def put_budget(
+    body: BudgetIn,
+    ident: Annotated[WebIdentity, Depends(require_identity)],
+    account_id: int | None = None,
+) -> dict[str, Any]:
+    fields = body.model_fields_set
+    if not fields & {"token_budget", "cost_budget_usd"}:
+        raise _bad()
+    _check_tokens(body.token_budget)
+    _check_usd(body.cost_budget_usd)
+    kwargs: dict[str, Any] = {}
+    if "token_budget" in fields:
+        kwargs["token_budget"] = body.token_budget
+    if "cost_budget_usd" in fields:
+        kwargs["cost_budget_usd"] = body.cost_budget_usd
+    async with session_scope() as db:
+        tz = await _budget_tz(db, ident.user_id, account_id)
+        await LIM.set_user_budget(db, ident.user_id, **kwargs)
+        out = await LIM.budget_view(db, ident.user_id, tz=tz)
+    await LIM.invalidate(ident.user_id)  # commit'dan keyin — kesh faqat yozilganni ko'rsin
+    return out
+
+
+@router.post("/api/settings/budget/boost", dependencies=[Depends(require_csrf)])
+async def post_boost(
+    body: BoostIn, ident: Annotated[WebIdentity, Depends(require_identity)]
+) -> dict[str, Any]:
+    tokens = int(body.tokens or 0)
+    usd = float(body.usd or 0.0)
+    _check_tokens(tokens)
+    _check_usd(usd)
+    if tokens <= 0 and usd <= 0:
+        raise _bad("web.budget.err_boost_empty")
+    if body.hours is not None and not (0 < body.hours <= LIM.MAX_BOOST_HOURS):
+        raise _bad()
+    async with session_scope() as db:
+        tz = await _budget_tz(db, ident.user_id, body.account_id)
+        until = (
+            datetime.now(UTC) + timedelta(hours=float(body.hours))
+            if body.hours is not None
+            else LIM.next_local_midnight(tz)
+        )
+        await LIM.add_boost(db, ident.user_id, tokens=tokens, usd=usd, until=until)
+        out = await LIM.budget_view(db, ident.user_id, tz=tz)
+    await LIM.invalidate(ident.user_id)
+    return out
+
+
+@router.delete("/api/settings/budget/boost", dependencies=[Depends(require_csrf)])
+async def delete_boost(
+    ident: Annotated[WebIdentity, Depends(require_identity)], account_id: int | None = None
+) -> dict[str, Any]:
+    async with session_scope() as db:
+        tz = await _budget_tz(db, ident.user_id, account_id)
+        await LIM.clear_boost(db, ident.user_id)
+        out = await LIM.budget_view(db, ident.user_id, tz=tz)
+    await LIM.invalidate(ident.user_id)
+    return out

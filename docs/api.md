@@ -133,6 +133,25 @@ bayroqqa qarab yashiradi. `since: null` + `window_kind: "all_time"` —
 | GET | `/api/accounts/{id}/sync/status` | `{running: bool, chats: [{chat_id, state, progress, synced_total, total_estimate, error}], counts: {<state>: n}, poll_seconds}` — yengil (dialoglar RPC'si yo'q), 5 s poll uchun. `chats` = hozir `running`/`failed` bo'lganlar (≤50) |
 | GET | `/api/accounts/{id}/sync/stream` | SSE: har 2 s `status` (yuqoridagi tana), sync tugagach `done {running:false}`. `GET` — CSRF kerak emas, `EventSource` ham ishlaydi |
 
+### Kunlik byudjet (foydalanuvchi bo'yicha)
+Limit **foydalanuvchi** bo'yicha (sarf ham shunday sanaladi, sirpanuvchi 24 soat) —
+bitta qiymat uning barcha akkauntlari uchun umumiy. `?account_id=` (ixtiyoriy,
+egalik tekshiriladi) faqat vaqt zonasini tanlaydi.
+
+| Metod | Yo'l | Tana / javob |
+|---|---|---|
+| GET | `/api/settings/budget[?account_id=]` | `{usage_24h:{tokens, usd, requests}, limits:{tokens, usd, source:"global"｜"custom", global:{tokens, usd}, custom:{tokens, usd}, ceiling:{tokens, usd}｜null}, boost:{tokens, usd, until}｜null, blocked:"tokens"｜"cost"｜null, last_hit:{at, kind}｜null, resets_hint:{window_hours:24, at｜null}, tz, boost_default_until, max:{tokens, usd, hours}}`. `limits.tokens/usd` — **samarali** qiymat (override + faol boost, shiftga qisilgan), `null` = cheksiz |
+| PUT | `/api/settings/budget[?account_id=]` | `{token_budget?, cost_budget_usd?}` — berilmagan maydon o'zgarmaydi, `null` global standartga qaytaradi, `0` = cheksiz (shift bo'lsa shiftga). Javob — GET shakli |
+| POST | `/api/settings/budget/boost` | `{tokens?, usd?, hours?, account_id?}` — bugungi qo'shimcha; standart muddat akkaunt `tz` sidagi keyingi yarim tun (yoki `now + hours`). Faol boost bo'lsa miqdor **qo'shiladi**, muddat kechrog'i. Javob — GET shakli |
+| DELETE | `/api/settings/budget/boost[?account_id=]` | boost'ni bekor qiladi → GET shakli |
+
+O'zgartiruvchi yo'llar `X-Requested-With: fetch` + imzolangan cookie talab
+qiladi. Validatsiya: manfiy emas, `tokens ≤ 1e9`, `usd ≤ 1000`, `0 < hours ≤ 48`,
+boost'da kamida bitta musbat miqdor — aks holda `400 {code:
+"web.budget.err_invalid"｜"web.budget.err_boost_empty"}`. Byudjet tugaganda chat
+yo'llari `429 chat.err.budget` (deep oqimida `error {code:"budget"}`) qaytaradi;
+Ask sahifasi banneri "Sozlamalar → Byudjet" havolasini ko'rsatadi.
+
 `prefs.locale` to'ldirilgan bo'lsa sahifa tili **shundan** olinadi (`?lang=` va
 `lang` cookie mantiqi o'z joyida qoladi; aniq `?lang=` bir safarga ustun).
 

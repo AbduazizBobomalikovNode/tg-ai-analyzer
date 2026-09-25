@@ -676,6 +676,20 @@ serverga boradi, shift bir xil.
   metrikani shu yerga qo'shing; heartbeat cron oxirida (`heartbeat(name)`).
 - Kunlik byudjet (`services/limits.py`) chat so'rovidan **oldin** tekshiriladi;
   agent/digest/judge chaqiruvlari ham `conversation_messages` tokenlariga kiradi.
+- **Limit foydalanuvchi bo'yicha sozlanadi** (migratsiya 0023, `user_budgets`):
+  `limits.effective_budget` = override (`token_budget`/`cost_budget_usd`, NULL
+  = global `LLM_DAILY_*`) + faol "bugungi qo'shimcha" (`boost_*`,
+  `boost_until > now`, standart muddat — akkaunt `tz` sidagi yarim tun,
+  faol boost ustiga qo'shiladi), keyin ixtiyoriy qattiq shift
+  `LLM_DAILY_TOKEN_BUDGET_MAX` / `LLM_DAILY_COST_BUDGET_USD_MAX` (0 = yo'q;
+  faqat foydalanuvchi o'zgartirgan qiymatga qo'llanadi). **Har** tekshiruv
+  (`daily_usage` → `check_daily_budget` / `assert_within_budget` /
+  `blocked_user_ids` / `account_budget_blocked`) shu yerdan o'tadi — global
+  sozlamani boshqa joyda to'g'ridan-to'g'ri solishtirmang. Xom qator Redis'da
+  60 s keshlanadi (`limits:budget:<uid>`, yozuvda o'chiriladi); Redis nosoz →
+  DB, DB ham nosoz → global (fail-open). API: `GET/PUT /api/settings/budget`,
+  `POST/DELETE /api/settings/budget/boost` (CSRF + cookie), UI — Sozlamalar →
+  Byudjet (bitta limit foydalanuvchining barcha akkauntlari uchun umumiy).
 - CI invariant qadamini (`tests/test_allowlist.py`, `test_peer_guard.py`,
   `test_write_actions.py`, delete-grep) yumshatmang.
 - **Worker metrikalari alohida portdan.** `api` dagi `/metrics` faqat api

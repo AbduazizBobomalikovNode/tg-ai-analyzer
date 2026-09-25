@@ -27,6 +27,30 @@ from app.config import get_settings
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.fixture(autouse=True)
+def _global_budget_only(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Boshqa testlarda byudjet — faqat global standart (`user_budgets` o'qilmaydi).
+
+    `limits.daily_usage` endi foydalanuvchi override'ini ham o'qiydi (kesh →
+    DB). Ssenariy bo'yicha `execute` natijalarini navbat bilan beradigan soxta
+    sessiyalar esa bu qo'shimcha so'rovni kutmaydi va navbat siljiydi; Redis
+    keshi (test DB 10) esa testlar orasida holat tashiydi. Override yo'lini
+    `tests/test_budget.py` o'zi qo'riqlaydi — u yerda qo'riqchi o'chiq.
+    """
+    if request.module.__name__.rsplit(".", 1)[-1] == "test_budget":
+        return
+    from app.services import limits
+
+    async def _none(session: object, user_id: int) -> None:
+        return None
+
+    async def _no_rows(session: object) -> dict[int, object]:
+        return {}
+
+    monkeypatch.setattr(limits, "budget_row", _none)
+    monkeypatch.setattr(limits, "_load_rows", _no_rows)
+
+
 @pytest.fixture(scope="session")
 def settings():
     return get_settings()

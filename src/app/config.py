@@ -184,6 +184,11 @@ class Settings(BaseSettings):
     # Foydalanuvchi bo'yicha kunlik LLM byudjeti (0 = cheksiz)
     llm_daily_token_budget: int = Field(default=2_000_000, ge=0)
     llm_daily_cost_budget_usd: float = Field(default=5.0, ge=0.0)
+    # Foydalanuvchi o'zgartirgan limit (Sozlamalar → Byudjet, `user_budgets`)
+    # va bugungi qo'shimcha uchun **qattiq shift** (0 = shiftsiz). Berilsa
+    # override + boost shu qiymatga qisiladi va UI shiftni ko'rsatadi.
+    llm_daily_token_budget_max: int = Field(default=0, ge=0)
+    llm_daily_cost_budget_usd_max: float = Field(default=0.0, ge=0.0)
     # Chat so'rovlari: foydalanuvchi bo'yicha daqiqasiga
     chat_rate_per_minute: int = Field(default=20, ge=1, le=600)
 

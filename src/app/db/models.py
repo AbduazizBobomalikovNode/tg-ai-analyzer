@@ -26,6 +26,7 @@ from sqlalchemy import (
     Index,
     Integer,
     LargeBinary,
+    Numeric,
     SmallInteger,
     String,
     Text,
@@ -994,3 +995,29 @@ class ScanRun(Base):
     truncated: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     elapsed_ms: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now())
+
+
+class UserBudget(Base):
+    """Foydalanuvchi bo'yicha kunlik byudjet va bugungi qo'shimcha (0023).
+
+    Yagona o'qish/yozish nuqtasi — `services/limits.py` (`effective_budget`,
+    `set_user_budget`, `add_boost`, `clear_boost`). `token_budget` /
+    `cost_budget_usd` NULL = global standart (`.env`). Boost faqat
+    `boost_until > now()` da qo'shiladi.
+    """
+
+    __tablename__ = "user_budgets"
+
+    user_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    token_budget: Mapped[int | None] = mapped_column(BigInteger)
+    cost_budget_usd: Mapped[float | None] = mapped_column(Numeric(12, 4, asdecimal=False))
+    boost_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    boost_usd: Mapped[float] = mapped_column(
+        Numeric(12, 4, asdecimal=False), default=0.0, server_default="0"
+    )
+    boost_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=_now(), onupdate=_now()
+    )
