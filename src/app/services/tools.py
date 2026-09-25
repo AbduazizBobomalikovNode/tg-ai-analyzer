@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
@@ -83,8 +84,15 @@ def _clip(text: str, n: int = MAX_RESULT_CHARS) -> str:
     return text if len(text) <= n else text[: n - 40].rstrip() + "\n… (truncated for budget)"
 
 
+#: Chat indeksidagi ichki id ko'rinishlari: `[id:3836]`, `id:3836`, `id 3836`.
+#: Jonli yugurishda (conv 284) model indeksdagi `[id:3836]` ni aynan shu
+#: shaklda `chat` ga berdi va `list_members` "no chat resolved" qaytardi —
+#: bitta iteratsiya va ~13k token behuda.
+_INDEX_ID_RE = re.compile(r"^\[?\s*id\s*[:=\s]\s*(\d{1,12})\s*\]?$", re.IGNORECASE)
+
+
 async def _resolve_chat(ctx: ToolContext, args: dict[str, Any]) -> Chat | None:
-    """`chat` argumenti: DB id, @username, sarlavha bo'lagi; yo'q bo'lsa pinned."""
+    """`chat` argumenti: DB id, `[id:N]`, @username, sarlavha bo'lagi; yo'q bo'lsa pinned."""
     raw = args.get("chat")
     q = select(Chat).where(Chat.account_id == ctx.account_id, Chat.synced_total > 0)
     if raw is None or str(raw).strip() == "":
@@ -92,6 +100,8 @@ async def _resolve_chat(ctx: ToolContext, args: dict[str, Any]) -> Chat | None:
             return None
         return await ctx.session.get(Chat, ctx.pinned_chat_id)
     s = str(raw).strip()
+    if (m := _INDEX_ID_RE.match(s)) is not None:
+        s = m.group(1)
     if s.isdigit():
         chat = await ctx.session.get(Chat, int(s))
         if chat is not None and chat.account_id == ctx.account_id:

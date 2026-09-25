@@ -11,8 +11,9 @@ Qo'riqlaydi:
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -1009,3 +1010,262 @@ async def test_repeat_guard_block_ends_the_tool_loop_immediately(
     assert out.text == "javob"
     assert len(llm.calls) == 2 and llm.calls[1]["tools"] is None
     assert llm.calls[1]["messages"][-1].content == A.FINAL_NUDGE
+
+
+# ─── nomlangan odam: chat maslahatlari va "oldinga siljish yo'q" ──────────────
+# Jonli o'lchov (conv 284): "Otabek bilan oxirgi marta nima gaplashganmiz?" —
+# list_chats → search_global → get_user_info (xato) → list_members("[id:3836]",
+# xato) → list_members, 7 iteratsiya, $0.105, noto'g'ri javob. "Otabek"
+# shaxsiy chatlari 25 talik indeksga sig'magan edi.
+
+
+def _chat(
+    cid: int,
+    title: str,
+    kind: str = "private",
+    *,
+    username: str | None = None,
+    msgs: int = 10,
+    last: datetime | None = None,
+) -> Any:
+    return SimpleNamespace(
+        id=cid,
+        title=title,
+        type=kind,
+        username=username,
+        synced_total=msgs,
+        last_message_at=last,
+        participants_count=None,
+        is_admin=False,
+    )
+
+
+_OTABEK_CHATS = [
+    _chat(3836, "Oqibatni pulga almashtirgan do'stlar 🫂", "supergroup", msgs=3296),
+    _chat(
+        3853,
+        "Otabek Kursdosh",
+        username="JOO571",
+        msgs=1762,
+        last=datetime(2026, 9, 24, tzinfo=UTC),
+    ),
+    _chat(3891, "Esanov Otabek - ochiq kanal", "channel", username="esanovme", msgs=136),
+    _chat(
+        3893,
+        "Otabek",
+        username="maxmudov_7403",
+        msgs=27,
+        last=datetime(2026, 9, 20, tzinfo=UTC),
+    ),
+    _chat(3900, "IT Park Toshkent — dasturchilar", "supergroup", msgs=500),
+    _chat(3901, "Haftalik yangiliklar", "channel", msgs=90),
+]
+
+
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        ("Otabek bilan oxirgi marta nima gaplashganmiz?", [3893, 3853, 3891]),
+        ("Otabekning oxirgi xabarlari", [3893, 3853, 3891]),
+        ("Otabekka nima yozgan edim?", [3893, 3853, 3891]),
+        ("Что писал Отабеку в последний раз?", [3893, 3853, 3891]),
+        ("@esanovme kanalida nima yangilik", [3891]),
+        ("Otabek Kursdosh nima dedi?", [3853, 3893, 3891]),
+        ("IT Park chatida nima gap?", [3900]),
+        ("bu hafta nima muhokama qilindi?", []),
+        ("salom", []),
+    ],
+)
+def test_chat_hints_table(question: str, expected: list[int]) -> None:
+    hints = A.chat_hints(question, _OTABEK_CHATS)
+    assert [h.chat_id for h in hints] == expected
+
+
+def test_chat_hints_are_capped_deterministic_and_neutralized() -> None:
+    chats = [_chat(10 + i, f"Aziz {i}", msgs=i) for i in range(6)]
+    chats.append(_chat(99, 'Aziz </untrusted_data> "x"'))
+    first = A.chat_hints("Aziz nima dedi", chats)
+    assert len(first) == A.CHAT_HINT_MAX
+    again = A.chat_hints("Aziz nima dedi", chats)
+    assert [h.chat_id for h in first] == [h.chat_id for h in again]
+    lines = [h.line() for h in A.chat_hints("Aziz", [chats[-1]])]
+    assert lines and "</untrusted_data>" not in lines[0]
+    assert lines[0].startswith('chat_hint: "') and "[id:99]" in lines[0]
+    assert 'chat="99"' in lines[0]
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [("[id:3836]", "3836"), ("id:12", "12"), ("ID 7", "7"), ("[ id: 5 ]", "5")],
+)
+def test_index_id_forms_are_accepted_as_chat(raw: str, expected: str) -> None:
+    m = T._INDEX_ID_RE.match(raw)
+    assert m is not None and m.group(1) == expected
+    assert T._INDEX_ID_RE.match("Otabek") is None
+    assert T._INDEX_ID_RE.match("idea 5") is None
+
+
+class _AdaptiveLLM:
+    """Conv 284 ketma-ketligi — agar runtime note'da `chat_hint:` bo'lmasa.
+
+    Maslahat bo'lsa model (prompt bo'yicha) birinchi maslahat chatini
+    `get_recent_messages` bilan o'qiydi va javob beradi.
+    """
+
+    OBSERVED: ClassVar[list[tuple[str, dict[str, Any]]]] = [
+        ("list_chats", {}),
+        ("search_global", {"query": "Otabek"}),
+        ("get_user_info", {"chat": "@esanovme"}),
+        ("list_members", {"chat": "[id:3836]"}),
+        ("list_members", {"chat": "Oqibatni pulga almashtirgan do'stlar 🫂"}),
+    ]
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.step = 0
+
+    async def chat(self, task: Task, messages: list[Msg], **kw: Any) -> ChatResult:
+        self.calls.append({"messages": list(messages), "tools": kw.get("tools")})
+        first_user = next(m.content for m in messages if m.role.value == "user")
+        hint = next((ln for ln in first_user.splitlines() if ln.startswith("chat_hint:")), "")
+        if not kw.get("tools"):
+            return _res("Oxirgi suhbat: ...")
+        if hint:
+            if self.step == 0:
+                self.step += 1
+                cid = hint.split("[id:", 1)[1].split("]", 1)[0]
+                return _res(calls=[ToolCall("h1", "get_recent_messages", {"chat": cid})])
+            return _res("Oxirgi suhbat: ...")
+        if self.step < len(self.OBSERVED):
+            name, args = self.OBSERVED[self.step]
+            self.step += 1
+            return _res(calls=[ToolCall(f"o{self.step}", name, args)])
+        return _res(calls=[ToolCall("again", "list_members", {"chat": "x"})])
+
+
+async def _run_named(chats: list[Any], llm: Any) -> A.AgentOutcome:
+    return await A.run_agent(
+        _Session(chats=chats),  # type: ignore[arg-type]
+        user_id=1,
+        account_id=2,
+        question="Otabek bilan oxirgi marta nima gaplashganmiz?",
+        history=[],
+        pinned_chat=None,
+        locale="uz",
+        llm=llm,
+        max_iterations=6,
+    )
+
+
+async def test_named_person_resolves_from_hints_in_at_most_three_calls(
+    fake_tool: list[dict[str, Any]],
+) -> None:
+    llm = _AdaptiveLLM()
+    out = await _run_named(_OTABEK_CHATS, llm)
+    assert out.calls_executed <= 3 and out.stop_reason == "answered"
+    assert [c["tool"] for c in out.tool_calls] == ["get_recent_messages"]
+    assert fake_tool[0]["args"] == {"chat": "3893"}
+    note = llm.calls[0]["messages"][-1].content
+    assert note.count("chat_hint:") == 3
+
+
+async def test_named_person_without_a_matching_chat_replays_the_observed_loop(
+    fake_tool: list[dict[str, Any]],
+) -> None:
+    """Nazorat: moslik bo'lmasa (eski holat) — kuzatilgan 5 chaqiruvli sikl."""
+    llm = _AdaptiveLLM()
+    out = await _run_named([_chat(1, "Ish chat", "group")], llm)
+    assert out.calls_executed == 5
+    assert "chat_hint:" not in llm.calls[0]["messages"][-1].content
+
+
+@pytest.fixture
+def empty_tool(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    seen: list[dict[str, Any]] = []
+
+    async def fake_run(name: str, ctx: Any, args: dict[str, Any]) -> T.ToolResult:
+        seen.append({"name": name, "args": args})
+        return T.ToolResult(f'no matches for "{args.get("query")}" in "C"', meta={"hits": 0})
+
+    monkeypatch.setattr(A.T, "run_tool", fake_run)
+    return seen
+
+
+async def _run_q5(llm: Any) -> A.AgentOutcome:
+    return await A.run_agent(
+        _Session(),  # type: ignore[arg-type]
+        user_id=1,
+        account_id=5,
+        question="q",
+        history=[],
+        pinned_chat=None,
+        locale="uz",
+        llm=llm,
+        max_iterations=6,
+    )
+
+
+async def test_no_progress_stops_after_two_empty_rounds_with_the_same_tool(
+    empty_tool: list[dict[str, Any]],
+) -> None:
+    llm = _LLM(
+        [
+            _res(calls=[ToolCall("a", "search_messages", {"query": "x"})]),
+            _res(calls=[ToolCall("b", "search_messages", {"query": "y"})]),
+            _res("topilmadi"),
+        ]
+    )
+    out = await _run_q5(llm)
+    assert out.stop_reason == "no_progress" and out.text == "topilmadi"
+    assert len(empty_tool) == 2 and len(llm.calls) == 3
+    assert llm.calls[2]["tools"] is None
+    assert any(m.content == A.FINAL_NUDGE for m in llm.calls[2]["messages"])
+
+
+async def test_no_progress_waits_while_the_model_tries_a_new_tool(
+    empty_tool: list[dict[str, Any]],
+) -> None:
+    llm = _LLM(
+        [
+            _res(calls=[ToolCall("a", "search_messages", {"query": "x"})]),
+            _res(calls=[ToolCall("b", "get_window_digest", {"days": 7})]),
+            _res(calls=[ToolCall("c", "search_messages", {"query": "z"})]),
+            _res("topilmadi"),
+        ]
+    )
+    out = await _run_q5(llm)
+    # 2-raund yangi tool (davom etadi), 3-raund eski tool va yana bo'sh → to'xtash
+    assert out.stop_reason == "no_progress" and len(empty_tool) == 3
+    assert llm.calls[1]["tools"] and llm.calls[2]["tools"]
+    assert llm.calls[3]["tools"] is None
+
+
+async def test_a_productive_round_resets_the_no_progress_counter(
+    fake_tool: list[dict[str, Any]],
+) -> None:
+    llm = _LLM(
+        [
+            _res(calls=[ToolCall("a", "get_recent_messages", {"limit": 5})]),
+            _res(calls=[ToolCall("b", "get_recent_messages", {"limit": 6})]),
+            _res("javob"),
+        ]
+    )
+    out = await _run_q5(llm)
+    assert out.stop_reason == "answered"
+
+
+def test_unproductive_classification() -> None:
+    ok = T.ToolResult("chat=C latest 3 messages", meta={"n": 3})
+    assert not A.unproductive(ok, cached=False)
+    assert A.unproductive(ok, cached=True)
+    assert A.unproductive(T.ToolResult("error: x", ok=False), cached=False)
+    assert A.unproductive(T.ToolResult("no matches", meta={"hits": 0}), cached=False)
+
+
+def test_agent_prompt_routes_named_people_to_recent_messages() -> None:
+    assert P.PROMPT_VERSION == "2026-09-25.3"
+    p = P.AGENT_SYSTEM_PROMPT
+    assert "chat_hint:" in p and "Otabek bilan oxirgi marta" in p
+    tail = p.split("chat_hint:", 1)[1].split("\n- ", 1)[0]
+    for tool in ("get_recent_messages", "search_global", "get_chat_info"):
+        assert tool in tail

@@ -7,6 +7,8 @@ Xarajat nazorati:
     "bor narsa bilan javob ber" turn'i qo'shiladi (`stop_reason`);
   * takror-qo'riqchisi (`repeat_guard`) raunddagi yagona chaqiruvni to'ssa — xuddi
     shunday darhol "javob ber" turn'i (`stop_reason="repeat_guard"`);
+  * ikki ketma-ket natijasiz raund va yangi tool yo'q — `stop_reason="no_progress"`;
+  * savolda nomlangan odam/chat kodda topiladi (`chat_hints`, runtime note'da ≤3 qator);
   * tool natijalari umumiy byudjeti `AGENT_TOOL_RESULT_TOKENS` — oshsa keskin kesiladi;
   * tarix qisqartirilgan (`chat_service.build_history`), system prompt barqaror (kesh);
   * oxirgi iteratsiyada tool'siz "javob ber" chaqiruvi — sikl hech qachon javobsiz tugamaydi.
@@ -36,6 +38,7 @@ from app.logging import get_logger
 from app.observability import TOOL_CALLS
 from app.services import tool_cache as TC
 from app.services import tools as T
+from app.services import untrusted as U
 from app.services import write_tools as W
 from app.services.prompts import AGENT_SYSTEM_PROMPT, runtime_note
 from app.services.search import est_tokens
@@ -83,7 +86,7 @@ class AgentOutcome:
     action_ids: list[int] = field(default_factory=list)  # taklif/bajarilgan yozish amallari
     calls_executed: int = 0  # to'silmagan (haqiqatan bajarilgan) chaqiruvlar
     cache_hits: int = 0  # suhbat keshidan olingan tool natijalari (`tool_cache`)
-    # `answered` | `call_budget` | `cost_budget` | `repeat_guard` | `iterations`
+    # `answered` | `call_budget` | `cost_budget` | `repeat_guard` | `no_progress` | `iterations`
     stop_reason: str = ""
     #: Takror-qo'riqchisi ishladimi: keshdan kelgan qidiruvdan keyin kamida
     #: bitta server qidiruvi to'sildi (eval `econ-01`).
@@ -258,6 +261,184 @@ def _blocked_reresearch(call: Any, local_queries: dict[str, int]) -> T.ToolResul
     )
 
 
+# ─── chat maslahatlari (nomlangan odam/chat → [id:N]) ─────────────────────────
+#
+# Jonli o'lchov (conv 284, "Otabek bilan oxirgi marta nima gaplashganmiz?"):
+# `runtime_note` dagi indeks faqat eng faol `CHAT_INDEX_LIMIT` (25) chatni
+# oladi, "Otabek" shaxsiy chatlari unda yo'q edi. Model `list_chats` →
+# `search_global` → `get_user_info` → `list_members` x2 bilan 7 iteratsiya
+# aylandi ($0.105, 94k in) va noto'g'ri javob berdi ("shaxsiy chat topilmadi").
+# Shuning uchun moslik **akkauntning hamma** sinxronlangan chati bo'yicha
+# kodda qidiriladi (bepul, deterministik) va ≤3 ta aniq maslahat qatori
+# qo'shiladi — model chatni o'zi izlamaydi.
+
+#: Qo'shiladigan maslahatlar soni (runtime_note har iteratsiyada qayta ketadi).
+CHAT_HINT_MAX = 3
+#: Savol so'zi va sarlavha so'zi o'xshashligi (`difflib`, uz_fold dan keyin).
+CHAT_HINT_MIN_RATIO = 0.8
+#: Shundan qisqa so'zlar solishtirilmaydi ("IT", "va" — tasodifiy moslik).
+CHAT_HINT_MIN_CHARS = 3
+#: Maslahat uchun o'qiladigan chatlar qopqog'i (akkaunt bo'yicha).
+CHAT_HINT_SCAN_MAX = 2_000
+_HINT_WORD_RE = re.compile(r"[a-z0-9]+")
+#: Qo'shimchalar: "Otabekning" / "Otabekka" / "Otabekdan" → "otabek".
+#: Kirill uz_fold'da lotinga o'tadi ("Отабеком" → "otabekom" — o'xshashlik yetadi).
+_HINT_SUFFIXES = (
+    "lardan",
+    "larga",
+    "larni",
+    "ning",
+    "dagi",
+    "niki",
+    "dan",
+    "lar",
+    "ga",
+    "ka",
+    "qa",
+    "da",
+    "ni",
+)
+#: Sarlavhada ham, savolda ham ko'p uchraydigan umumiy so'zlar — ular bo'yicha
+#: moslik "shu chat" degani emas ("IT chat", "ochiq kanal", "bu hafta").
+_HINT_STOPWORDS = frozenset(
+    """
+    chat chats chati chatda chatlar guruh guruhi gruppa group groups kanal kanali channel
+    channels ochiq rasmiy official news yangiliklar yangilik uzbekistan ozbekiston toshkent
+    tashkent bilan oxirgi marta nima nimalar haqida qachon kim kimlar bugun kecha hafta oy yil
+    bu shu men meni menga mening biz bizning siz sizning uchun va yoki ham emas bor yoq
+    gaplashganmiz gaplashdik yozgan yozdi dedi degan aytdi
+    the and for with from what when who last about this that
+    chto kak kogda kto eto dlya ili posledniy poslednie
+    """.split()
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ChatHint:
+    chat_id: int
+    title: str
+    kind: str
+    msgs: int
+    last: datetime | None
+    score: float
+
+    def line(self) -> str:
+        last = f" last={self.last.strftime('%Y-%m-%d')}" if self.last else ""
+        return (
+            f'chat_hint: "{self.title}" [id:{self.chat_id}] {self.kind} msgs={self.msgs}{last} '
+            f'— use get_recent_messages / search_messages with chat="{self.chat_id}"'
+        )
+
+
+def _hint_words(text: str) -> list[str]:
+    return _HINT_WORD_RE.findall(uz_fold(text or "").lower())
+
+
+def _word_forms(word: str) -> set[str]:
+    forms = {word}
+    for suffix in _HINT_SUFFIXES:
+        if word.endswith(suffix) and len(word) - len(suffix) >= CHAT_HINT_MIN_CHARS:
+            forms.add(word[: -len(suffix)])
+    return forms
+
+
+def _similar(a: str, b: str) -> float:
+    if a == b:
+        return 1.0
+    from difflib import SequenceMatcher
+
+    return SequenceMatcher(None, a, b).ratio()
+
+
+def chat_hints(question: str, chats: list[Any], *, limit: int = CHAT_HINT_MAX) -> list[ChatHint]:
+    """Savoldagi nom/sarlavha bilan mos keladigan chatlar — **deterministik**, LLM'siz.
+
+    Moslik: savol so'zi (qo'shimchasi olib tashlangan shakllari bilan) va
+    sarlavhaning "o'ziga xos" so'zi (umumiy so'z emas, ≥3 belgi) `uz_fold`
+    dan keyin `difflib` o'xshashligi ≥ `CHAT_HINT_MIN_RATIO`; `@username`
+    ham xuddi shunday. Tartib: sarlavha so'zlarining qancha qismi mos kelgani
+    (to'liq nom birinchi), keyin shaxsiy chat, oxirgi faollik, xabarlar soni.
+    Chat nomi begona matn — qator `untrusted.attr` dan o'tadi.
+    """
+    q_forms: set[str] = set()
+    for word in _hint_words(question):
+        if len(word) < CHAT_HINT_MIN_CHARS or word in _HINT_STOPWORDS:
+            continue
+        q_forms |= _word_forms(word)
+    if not q_forms:
+        return []
+    scored: list[tuple[tuple[Any, ...], ChatHint]] = []
+    for c in chats:
+        title = str(getattr(c, "title", "") or "")
+        words = [
+            w
+            for w in dict.fromkeys(_hint_words(title))
+            if len(w) >= CHAT_HINT_MIN_CHARS and w not in _HINT_STOPWORDS
+        ]
+        uname = (getattr(c, "username", "") or "").lower()
+        matched = sum(
+            1 for w in words if max(_similar(f, w) for f in q_forms) >= CHAT_HINT_MIN_RATIO
+        )
+        by_user = bool(uname) and (max(_similar(f, uname) for f in q_forms) >= CHAT_HINT_MIN_RATIO)
+        if not matched and not by_user:
+            continue
+        frac = 1.0 if by_user else (matched / len(words) if words else 0.0)
+        kind = str(getattr(getattr(c, "type", ""), "value", getattr(c, "type", "")) or "")
+        last = getattr(c, "last_message_at", None)
+        msgs = int(getattr(c, "synced_total", 0) or 0)
+        hint = ChatHint(
+            chat_id=int(c.id),
+            title=U.attr(title) or f"chat {c.id}",
+            kind=kind,
+            msgs=msgs,
+            last=last if isinstance(last, datetime) else None,
+            score=round(frac, 3),
+        )
+        key = (
+            -frac,
+            0 if kind == "private" else 1,
+            -(last.timestamp() if isinstance(last, datetime) else 0.0),
+            -msgs,
+            int(c.id),
+        )
+        scored.append((key, hint))
+    scored.sort(key=lambda p: p[0])
+    return [h for _k, h in scored[: max(0, limit)]]
+
+
+async def load_chat_hints(session: AsyncSession, account_id: int, question: str) -> list[ChatHint]:
+    """Akkauntning **hamma** sinxronlangan chati bo'yicha `chat_hints` (bitta so'rov)."""
+    from sqlalchemy import select
+
+    rows = await session.execute(
+        select(Chat)
+        .where(Chat.account_id == account_id, Chat.synced_total > 0)
+        .order_by(Chat.last_message_at.desc().nulls_last())
+        .limit(CHAT_HINT_SCAN_MAX)
+    )
+    return chat_hints(question, list(rows.scalars().all()))
+
+
+# ─── "oldinga siljish yo'q" to'xtashi ─────────────────────────────────────────
+#
+# Ikki ketma-ket raundda bajarilgan chaqiruvlar hech narsa bermagan (xato /
+# bo'sh / faqat keshdan) va model yangi tool ham sinamayapti — uchinchi raund
+# natijani o'zgartirmaydi, faqat prefiksni (~8k token) yana bir marta yeydi.
+NO_PROGRESS_ROUNDS = 2
+
+
+def unproductive(result: T.ToolResult, *, cached: bool) -> bool:
+    """Chaqiruv yangi ma'lumot bermadi: xato, to'silgan, bo'sh yoki keshdan."""
+    if cached or not result.ok:
+        return True
+    meta = result.meta or {}
+    for key in ("hits", "n"):
+        if key in meta and not meta.get(key):
+            return True
+    head = (result.text or "").lstrip().lower()
+    return head.startswith(("no ", "note:", "error"))
+
+
 async def run_agent(
     session: AsyncSession,
     *,
@@ -341,6 +522,10 @@ async def run_agent(
     from app.services.deep_search import direct_intent
 
     gate_intent = direct_intent(question)
+    # Savolda nomlangan odam/chat — indeksga sig'magan bo'lsa ham kodda topiladi.
+    hints = [] if gate_intent else await load_chat_hints(session, account_id, question)
+    if hints:
+        note = f"{note}\n\n" + "\n".join(h.line() for h in hints)
     if gate_intent:
         note = f"{note}\n\n{direct_intent_note(gate_intent, locale)}"
     messages: list[Msg] = [
@@ -379,6 +564,9 @@ async def run_agent(
     repeat_seen = repeat_turn
     repeat_guard = repeat_turn
     tools_off = False  # byudjet tugadi — keyingi chaqiruv tool'siz
+    # "Oldinga siljish yo'q": ketma-ket natijasiz raundlar va sinalgan tool nomlari.
+    idle_rounds = 0
+    tried_tools: set[str] = set()
     cost_usd: float | None = None
     call_cap = max(1, int(s.agent_max_executed_calls or MAX_EXECUTED_CALLS_PER_RUN))
     if repeat_turn:
@@ -429,6 +617,10 @@ async def run_agent(
         messages.append(Msg.assistant(res.text, res.tool_calls, signature=res.signature))
         executed_before = calls_executed
         guard_hit = False
+        round_progress = False
+        round_names = {c.name for c in res.tool_calls[:MAX_CALLS_PER_TURN]}
+        new_tool_tried = bool(round_names - tried_tools)
+        tried_tools |= round_names
         for call in res.tool_calls[:MAX_CALLS_PER_TURN]:
             t0 = time.monotonic()
             cached_text: str | None = None
@@ -506,6 +698,8 @@ async def run_agent(
                         hits = int(result.meta.get("hits") or 0)
                         local_queries[folded] = max(local_queries.get(folded, 0), hits)
             seen_calls.add(sig)
+            if not unproductive(result, cached=cached_text is not None):
+                round_progress = True
             text = result.text
             # umumiy byudjet — oshsa keskin qisqartiramiz
             cost = est_tokens(text)
@@ -575,6 +769,14 @@ async def run_agent(
         if not tools_off and guard_hit and calls_executed == executed_before:
             tools_off, stop_reason = True, "repeat_guard"
             log.info("agent.repeat_guard_stop", run_id=run.id, iteration=it)
+            messages.append(Msg.user(FINAL_NUDGE))
+        # ── oldinga siljish yo'q: ikki raund bo'sh, yangi tool ham yo'q ─────────
+        # Qopqoqlar (`call_cap`, `cost_cap`, iteratsiya) o'zgarmaydi — bu faqat
+        # ulardan **oldin** to'xtaydi: uchinchi bo'sh raund javobni o'zgartirmaydi.
+        idle_rounds = 0 if round_progress else idle_rounds + 1
+        if not tools_off and idle_rounds >= NO_PROGRESS_ROUNDS and not new_tool_tried:
+            tools_off, stop_reason = True, "no_progress"
+            log.info("agent.no_progress_stop", run_id=run.id, iteration=it)
             messages.append(Msg.user(FINAL_NUDGE))
         # ── yugurish byudjetlari: chaqiruvlar soni va taxminiy narx ──────────
         if not tools_off and calls_executed >= call_cap:
