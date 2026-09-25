@@ -13,7 +13,8 @@ scenarios:
   - id: prec-01                 # majburiy, global unikal, `<cat>-<nn>`
     title: "..."                # inson uchun
     category: precise           # absurd|precise|account|global|time|people|
-                                # engagement|digest|multiturn|safety|mode|economy
+                                # engagement|digest|multiturn|safety|mode|economy|
+                                # daily
     locale: uz                  # uz|ru|en — so'rov tili (Accept-Language ham shu)
     priority: 1                 # 1 = live yugurishda majburiy, 2 = kengaytirilgan
     chat_hint: "Honadoshlar"    # ixtiyoriy: chat sarlavhasining bo'lagi.
@@ -22,7 +23,9 @@ scenarios:
                                 # `context` sifatida yuboradi (pinned chat).
     turns:
       - user: "..."             # foydalanuvchi matni
-        mode: auto              # auto (agent/direct) | deep (deep_search quvuri)
+        mode: auto              # auto (agent/direct) | deep | exhaustive (ikkalasi
+                                # ham deep_search quvuri, /api/deep, `mode` maydoni
+                                # bilan; `exhaustive` tasdiqsiz faqat baho beradi)
         expect:
           tools_any: [search_messages, search_calendar]   # kamida bittasi chaqirilsin
           tools_all: [get_chat_stats]                     # hammasi chaqirilsin (ixtiyoriy)
@@ -36,9 +39,24 @@ scenarios:
           must_change_context: false    # bu turn yangi tool/qidiruv qilishi shart
           keywords_any: ["..."]         # javob matnida (case-insensitive) biror biri
           keywords_none: ["..."]        # javobda bo'lmasligi kerak
+          forbid_regex: ["\\+?\\d[\\d\\s-]{7,}"]  # javobda hech qaysi naqsh mos kelmasin
           must_propose_action: false    # `agent_actions(proposed)` paydo bo'lsin
           max_cost_usd: 0.05
           judge: "one-line rubric"      # LLM-judge (Task.ROUTE) uchun mezon
+
+          # Faqat `mode: deep`/`exhaustive` uchun — `DeepResult.to_dict()`
+          # (`deep_search.py`) dan `_normalize_deep` orqali keladi, hammasi
+          # ixtiyoriy:
+          direct: false                # `DeepResult.direct` (qidiruvsiz javob)
+          intent: "greeting"           # `DeepResult.intent` — greeting|meta|chitchat
+          intent_follow_up: "deeper"   # `DeepPlan.intent_follow_up` (`plan` hodisasi)
+          needs_retrieval: true        # `DeepPlan.needs_retrieval`
+          needs_confirm: true          # `DeepResult.needs_confirm` (`exhaustive`, tasdiqsiz)
+          retrieval_kind: "window"     # `DeepPlan`/`Coverage.retrieval_kind` — topic|window|person
+          direction: "out"             # `Coverage.direction` — ""|in|out|both
+          window_stats: true           # `Coverage.window_stats` — sanoq yo'li (xabar tortilmaydi)
+          server_rungs_used: true      # `Coverage.server_rungs_used`
+          external_hits_min: 1         # `Coverage.external_hits` >= shu son
 ```
 
 ## `scope` semantikasi

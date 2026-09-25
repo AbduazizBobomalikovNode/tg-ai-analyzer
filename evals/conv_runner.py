@@ -66,6 +66,11 @@ CSRF_HEADER = "X-Requested-With"
 CSRF_VALUE = "fetch"
 MAX_CALLS_PER_TOOL = 3  # agent.py bilan bir xil bo'lishi shart
 
+#: `turn.mode` qiymatlari — ikkalasi ham `/api/deep` orqali yuguradi
+#: (`exhaustive` narx/tasdiq qopqog'i bilan, CLAUDE.md "Korpus miqyosidagi
+#: kaskad"). `auto` esa `/api/conversations/{id}/messages` orqali.
+DEEP_MODES = frozenset({"deep", "exhaustive"})
+
 CATEGORIES = (
     "absurd",
     "precise",
@@ -79,6 +84,7 @@ CATEGORIES = (
     "safety",
     "mode",
     "economy",
+    "daily",
 )
 
 GLOBAL_TOOLS = {"discover_channels", "search_global"}
@@ -291,7 +297,7 @@ def check_turn(
     executed, blocked = _split_calls(calls)
     names_all = {str(c.get("tool")) for c in calls}
     names_exec = {str(c.get("tool")) for c in executed}
-    is_deep = mode == "deep" or ctx.get("mode") == "deep"
+    is_deep = mode in DEEP_MODES or ctx.get("mode") in DEEP_MODES
 
     def add(name: str, ok: bool, detail: str = "") -> None:
         checks.append(Check(name, ok, detail))
@@ -376,6 +382,98 @@ def check_turn(
         if not executed:
             found += sorted(set(BARE_CITE_RE.findall(answer or "")))[:5]
         add("no_fabricated_citations", not found, f"citation-like tokens: {found}")
+    if want := expect.get("forbid_regex"):
+        # Umumiy: `keywords_none` faqat aniq so'zlarni ushlaydi (masalan
+        # telefon raqami cheksiz shaklda bo'ladi) — bu yerda erkin regex.
+        bad = [pat for pat in want if re.search(pat, answer or "")]
+        add("forbid_regex", not bad, f"matched forbidden patterns: {bad}" if bad else "")
+
+    if is_deep:
+        # Deep quvurining reja/qamrov maydonlari — `DeepResult.to_dict()`
+        # (`deep_search.py`) dan `_normalize_deep` orqali keladi. Hammasi
+        # ixtiyoriy: faqat senariy so'ragani tekshiriladi.
+        plan = ctx.get("plan") or {}
+        coverage = ctx.get("coverage") or {}
+        if "direct" in expect:
+            got_direct = bool(ctx.get("direct"))
+            add(
+                "direct",
+                got_direct == bool(expect["direct"]),
+                f"direct={got_direct!r} vs want {expect['direct']!r}",
+            )
+        if want := expect.get("intent"):
+            # Faqat qidiruvsiz javoblarda to'ladi (`greeting|meta|chitchat`) —
+            # `answer_direct` yo'li, `DeepResult.intent`.
+            got_intent = str(ctx.get("intent") or "")
+            add("intent", got_intent == str(want), f"intent={got_intent!r} vs want {want!r}")
+        if want := expect.get("intent_follow_up"):
+            # Follow-up turi — `DeepPlan.intent_follow_up`
+            # (`none|deeper|repeat|correction|context_switch|reformat|explain|about_prior`).
+            got_follow_up = str(plan.get("intent_follow_up") or "")
+            add(
+                "intent_follow_up",
+                got_follow_up == str(want),
+                f"intent_follow_up={got_follow_up!r} vs want {want!r}",
+            )
+        if "needs_retrieval" in expect:
+            got_needs_retrieval = plan.get("needs_retrieval")
+            add(
+                "needs_retrieval",
+                bool(got_needs_retrieval) == bool(expect["needs_retrieval"]),
+                f"needs_retrieval={got_needs_retrieval!r} vs want {expect['needs_retrieval']!r}",
+            )
+        if "needs_confirm" in expect:
+            got_needs_confirm = bool(ctx.get("needs_confirm"))
+            add(
+                "needs_confirm",
+                got_needs_confirm == bool(expect["needs_confirm"]),
+                f"needs_confirm={got_needs_confirm!r} vs want {expect['needs_confirm']!r}",
+            )
+        if want := expect.get("retrieval_kind"):
+            # `topic|window|person` — `plan.retrieval_kind`, qamrovda ham
+            # (aks holda reja bo'lmasa) ko'chirilgan bo'ladi.
+            got_kind = str(plan.get("retrieval_kind") or coverage.get("retrieval_kind") or "")
+            add(
+                "retrieval_kind",
+                got_kind == str(want),
+                f"retrieval_kind={got_kind!r} vs want {want!r}",
+            )
+        if (want := expect.get("direction")) is not None:
+            # `""|in|out|both` — `Coverage.direction` (qamrov haqiqatda
+            # ishlatgani), yo'q bo'lsa rejadagisi.
+            got_direction_raw = coverage.get("direction")
+            if got_direction_raw is None:
+                got_direction_raw = plan.get("direction")
+            got_direction = str(got_direction_raw or "")
+            add(
+                "direction",
+                got_direction == str(want),
+                f"direction={got_direction!r} vs want {want!r}",
+            )
+        if "window_stats" in expect:
+            got_window_stats_raw = coverage.get("window_stats")
+            if got_window_stats_raw is None:
+                got_window_stats_raw = plan.get("window_stats")
+            got_window_stats = bool(got_window_stats_raw)
+            add(
+                "window_stats",
+                got_window_stats == bool(expect["window_stats"]),
+                f"window_stats={got_window_stats!r} vs want {expect['window_stats']!r}",
+            )
+        if "server_rungs_used" in expect:
+            got_server_rungs = bool(coverage.get("server_rungs_used"))
+            add(
+                "server_rungs_used",
+                got_server_rungs == bool(expect["server_rungs_used"]),
+                f"server_rungs_used={got_server_rungs!r} vs want {expect['server_rungs_used']!r}",
+            )
+        if (cap := expect.get("external_hits_min")) is not None:
+            got_external = int(coverage.get("external_hits") or 0)
+            add(
+                "external_hits_min",
+                got_external >= int(cap),
+                f"external_hits={got_external} < min {cap}",
+            )
 
     if (cap := expect.get("max_cost_usd")) is not None and cost is not None:
         add("max_cost_usd", cost <= float(cap) * 1.5, f"${cost:.4f} vs cap ${cap}")
@@ -503,19 +601,17 @@ class Api:
         out: dict[str, Any] = r.json()
         return out
 
-    async def send_deep(self, conv_id: int, text: str, locale: str) -> dict[str, Any]:
-        r = await self.client.post(
-            "/api/deep",
-            json={"conversation_id": conv_id, "question": text, "deep": True},
-            headers={"Accept-Language": locale},
-        )
+    async def send_deep(
+        self, conv_id: int, text: str, locale: str, *, mode: str = "deep"
+    ) -> dict[str, Any]:
+        # `mode` — `deep` (fan-out quvuri) yoki `exhaustive` (korpus kaskadi,
+        # `confirm` berilmasa faqat baho: CLAUDE.md "Korpus miqyosidagi
+        # kaskad"). `deep: True` eski klientlar bilan moslik uchun qoladi.
+        body = {"conversation_id": conv_id, "question": text, "deep": True, "mode": mode}
+        r = await self.client.post("/api/deep", json=body, headers={"Accept-Language": locale})
         if r.status_code == 429 and "rate_limited" in r.text:
             await asyncio.sleep(30.0)
-            r = await self.client.post(
-                "/api/deep",
-                json={"conversation_id": conv_id, "question": text, "deep": True},
-                headers={"Accept-Language": locale},
-            )
+            r = await self.client.post("/api/deep", json=body, headers={"Accept-Language": locale})
         if r.status_code >= 400:
             return {"_http_error": r.status_code, "_body": r.text[:400]}
         out: dict[str, Any] = r.json()
@@ -537,11 +633,15 @@ def conversation_missing(raw: dict[str, Any]) -> bool:
 def _normalize_deep(raw: dict[str, Any]) -> dict[str, Any]:
     """`DeepResult.to_dict()` → chat API javobi bilan bir xil shaklga."""
     ctx = {
-        "mode": "deep",
+        "mode": raw.get("mode") or "deep",
         "strategy": "deep",
         "citations": raw.get("citations"),
         "clusters": raw.get("clusters"),
         "coverage": raw.get("coverage"),
+        "plan": raw.get("plan"),
+        "direct": raw.get("direct"),
+        "intent": raw.get("intent"),
+        "needs_confirm": raw.get("needs_confirm"),
         "degraded": raw.get("degraded"),
         "messages": raw.get("evidence") or raw.get("evidence_count"),
         "run_id": raw.get("run_id"),
@@ -572,8 +672,8 @@ async def run_scenario(
     total_cost = 0.0
 
     async def ask(turn_mode: str, text: str) -> dict[str, Any]:
-        if turn_mode == "deep":
-            return await api.send_deep(conv_id, text, sc.locale)
+        if turn_mode in DEEP_MODES:
+            return await api.send_deep(conv_id, text, sc.locale, mode=turn_mode)
         return await api.send_auto(conv_id, text, chat, sc.locale)
 
     for idx, turn in enumerate(sc.turns, 1):
@@ -604,7 +704,7 @@ async def run_scenario(
             history.append((turn.user, ""))
             continue
 
-        reply = _normalize_deep(raw) if turn.mode == "deep" else raw
+        reply = _normalize_deep(raw) if turn.mode in DEEP_MODES else raw
         answer = reply.get("text") or ""
         ctx = reply.get("context") or {}
         cost = reply.get("cost_usd")
@@ -676,7 +776,7 @@ async def run_scenario(
                 "deterministic_passed": det_ok,
             }
         )
-        await asyncio.sleep(pace_deep if turn.mode == "deep" else pace_auto)
+        await asyncio.sleep(pace_deep if turn.mode in DEEP_MODES else pace_auto)
 
     return {
         "id": sc.id,
@@ -738,7 +838,7 @@ def render_md(result: dict[str, Any]) -> str:
     out.append("")
 
     # ── yugurish byudjeti ────────────────────────────────────────────────────
-    all_turns = [t for r in rows for t in r["turns"] if t.get("mode") != "deep"]
+    all_turns = [t for r in rows for t in r["turns"] if t.get("mode") not in DEEP_MODES]
     if all_turns:
         stops: dict[str, int] = defaultdict(int)
         for t in all_turns:
@@ -837,8 +937,8 @@ async def main_async(args: argparse.Namespace) -> int:
     if args.limit:
         scenarios = scenarios[: args.limit]
 
-    n_auto = sum(1 for s in scenarios for t in s.turns if t.mode != "deep")
-    n_deep = sum(1 for s in scenarios for t in s.turns if t.mode == "deep")
+    n_auto = sum(1 for s in scenarios for t in s.turns if t.mode not in DEEP_MODES)
+    n_deep = sum(1 for s in scenarios for t in s.turns if t.mode in DEEP_MODES)
     print(f"scenarios={len(scenarios)} auto_turns={n_auto} deep_turns={n_deep}", file=sys.stderr)
     if args.dry_run:
         for s in scenarios:
@@ -911,8 +1011,8 @@ async def main_async(args: argparse.Namespace) -> int:
             "passed": sum(1 for r in rows if r["passed"]),
             "pass_rate": (sum(1 for r in rows if r["passed"]) / len(rows)) if rows else 0.0,
             "turns": len(turns),
-            "turns_auto": sum(1 for t in turns if t["mode"] != "deep"),
-            "turns_deep": sum(1 for t in turns if t["mode"] == "deep"),
+            "turns_auto": sum(1 for t in turns if t["mode"] not in DEEP_MODES),
+            "turns_deep": sum(1 for t in turns if t["mode"] in DEEP_MODES),
             "cost_usd": sum(float(r["cost_usd"] or 0) for r in rows),
             "stopped_early": stopped or None,
         },

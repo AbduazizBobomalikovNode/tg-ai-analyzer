@@ -501,6 +501,197 @@ def _scenario(scenario_id: str) -> dict:
     raise AssertionError(f"{scenario_id} senariysi topilmadi")
 
 
+# ─── conv_runner: deep quvur reja/qamrov maydonlari (daily-*) ──────────────
+
+
+def _deep_ctx(**overrides: object) -> dict:
+    ctx = {
+        "mode": "deep",
+        "tool_calls": [],
+        "citations": [],
+        "coverage": {
+            "retrieval_kind": "window",
+            "direction": "out",
+            "window_stats": True,
+            "server_rungs_used": False,
+            "external_hits": 0,
+        },
+        "plan": {
+            "retrieval_kind": "window",
+            "direction": "out",
+            "window_stats": True,
+            "needs_retrieval": True,
+            "intent_follow_up": "none",
+        },
+        "direct": False,
+        "intent": "",
+        "needs_confirm": False,
+    }
+    ctx.update(overrides)
+    return ctx
+
+
+def test_check_turn_deep_plan_fields_pass_when_matching() -> None:
+    from evals.conv_runner import check_turn
+
+    expect = {
+        "retrieval_kind": "window",
+        "direction": "out",
+        "window_stats": True,
+        "needs_retrieval": True,
+        "direct": False,
+        "needs_confirm": False,
+    }
+    checks = check_turn(
+        expect=expect,
+        mode="deep",
+        answer="Bu yilda eng ko'p Alisherga yozgansiz (42 ta xabar).",
+        ctx=_deep_ctx(),
+        cost=0.02,
+        actions=[],
+        chat_hint=None,
+    )
+    assert all(c.ok for c in checks), [c for c in checks if not c.ok]
+    names = {c.name for c in checks}
+    assert {
+        "retrieval_kind",
+        "direction",
+        "window_stats",
+        "needs_retrieval",
+        "direct",
+        "needs_confirm",
+    } <= names
+
+
+def test_check_turn_deep_plan_fields_fail_when_mismatched() -> None:
+    """`retrieval_kind`/`direction` senariy kutgani bilan mos kelmasa yiqilsin."""
+    from evals.conv_runner import check_turn
+
+    expect = {"retrieval_kind": "topic", "direction": "in"}
+    checks = check_turn(
+        expect=expect,
+        mode="deep",
+        answer="javob",
+        ctx=_deep_ctx(),  # coverage aslida window/out
+        cost=0.02,
+        actions=[],
+        chat_hint=None,
+    )
+    by_name = {c.name: c for c in checks}
+    assert by_name["retrieval_kind"].ok is False
+    assert by_name["direction"].ok is False
+
+
+def test_check_turn_needs_confirm_and_direct_for_exhaustive_estimate() -> None:
+    """`exhaustive` tasdiqsiz — faqat baho, `needs_confirm=True`, qidiruv emas (`direct=False`)."""
+    from evals.conv_runner import check_turn
+
+    ctx = _deep_ctx(
+        needs_confirm=True,
+        coverage={"retrieval_kind": "topic", "direction": "", "window_stats": False},
+        plan={"retrieval_kind": "topic", "needs_retrieval": True, "intent_follow_up": "none"},
+    )
+    checks = check_turn(
+        expect={"needs_confirm": True, "direct": False},
+        mode="exhaustive",  # `DEEP_MODES` ga kiradi — `is_deep` bo'lishi shart
+        answer="Bu butun davr uchun qimmat yugurish, tasdiqlaysizmi?",
+        ctx=ctx,
+        cost=0.005,
+        actions=[],
+        chat_hint=None,
+    )
+    by_name = {c.name: c for c in checks}
+    assert by_name["needs_confirm"].ok is True
+    assert by_name["direct"].ok is True
+
+
+def test_check_turn_greeting_direct_intent() -> None:
+    from evals.conv_runner import check_turn
+
+    ctx = _deep_ctx(direct=True, intent="greeting", plan={"intent_follow_up": "chitchat"})
+    checks = check_turn(
+        expect={"direct": True, "intent": "greeting"},
+        mode="deep",
+        answer="Salom! Sizga qanday yordam bera olaman?",
+        ctx=ctx,
+        cost=0.001,
+        actions=[],
+        chat_hint=None,
+    )
+    assert all(c.ok for c in checks)
+
+
+def test_check_turn_forbid_regex_catches_phone_like_pattern() -> None:
+    from evals.conv_runner import check_turn
+
+    expect = {"forbid_regex": [r"\+?\d[\d\s-]{7,}"]}
+    bad = check_turn(
+        expect=expect,
+        mode="auto",
+        answer="Uning raqami +998 90 123 45 67 edi.",
+        ctx={"tool_calls": []},
+        cost=0.01,
+        actions=[],
+        chat_hint=None,
+    )
+    good = check_turn(
+        expect=expect,
+        mode="auto",
+        answer="Bu haqda telefon raqami keltirilmagan, faqat ism bor.",
+        ctx={"tool_calls": []},
+        cost=0.01,
+        actions=[],
+        chat_hint=None,
+    )
+    assert not next(c for c in bad if c.name == "forbid_regex").ok
+    assert next(c for c in good if c.name == "forbid_regex").ok
+
+
+def test_check_turn_exhaustive_mode_is_treated_as_deep_not_auto() -> None:
+    """`exhaustive` `tools_*`/deterministik auto tekshiruvlaridan o'tkazilmasin."""
+    from evals.conv_runner import check_turn
+
+    checks = check_turn(
+        expect={"tools_any": ["search_messages"], "retrieval_kind": "topic"},
+        mode="exhaustive",
+        answer="baho",
+        ctx=_deep_ctx(coverage={"retrieval_kind": "topic"}, plan={"retrieval_kind": "topic"}),
+        cost=0.005,
+        actions=[],
+        chat_hint=None,
+    )
+    names = {c.name for c in checks}
+    assert "tools_any" not in names  # auto-only tekshiruv o'tkazib yuborildi
+    assert "retrieval_kind" in names
+
+
+def test_normalize_deep_carries_plan_direct_and_needs_confirm() -> None:
+    """`_normalize_deep` `DeepResult.to_dict()` maydonlarini `ctx` ga to'liq ko'chirsin.
+
+    Ilgari faqat `citations`/`clusters`/`coverage` ko'chirilardi — `plan`,
+    `direct`, `intent`, `needs_confirm` yo'qolib, yangi `check_turn` tekshiruvlari
+    hech qachon ishlamas edi.
+    """
+    from evals.conv_runner import _normalize_deep
+
+    raw = {
+        "mode": "exhaustive",
+        "direct": False,
+        "intent": "",
+        "needs_confirm": True,
+        "answer": "",
+        "plan": {"retrieval_kind": "topic", "intent_follow_up": "none"},
+        "coverage": {"retrieval_kind": "topic"},
+        "citations": [],
+        "clusters": [],
+    }
+    ctx = _normalize_deep(raw)["context"]
+    assert ctx["mode"] == "exhaustive"
+    assert ctx["needs_confirm"] is True
+    assert ctx["plan"] == raw["plan"]
+    assert ctx["direct"] is False
+
+
 def test_global_04_rubric_fails_an_answer_with_no_external_source_and_no_note() -> None:
     """Judge "faqat o'z chatlarim" javobini **yiqitishi** shart (jonli miss).
 
