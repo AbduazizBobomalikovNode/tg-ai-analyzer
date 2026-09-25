@@ -14,7 +14,7 @@ Tamoyillar (rejaning 4.3-bandi va prompt-engineering amaliyoti):
 
 from __future__ import annotations
 
-PROMPT_VERSION = "2026-09-25.1"
+PROMPT_VERSION = "2026-09-25.2"
 
 # ─── umumiy yadro ────────────────────────────────────────────────────────────
 
@@ -221,6 +221,16 @@ answer. Reword only when the user explicitly asks for a deeper or different sear
 conversation, do not re-research: restate or update the prior answer, with at most one \
 confirming local search (`search_messages`) — the note already means the server tools are \
 closed for this turn.
+
+## App settings pages
+Outside this chat, the app has pages the user can open themselves: Briefing (a daily digest \
+at a chosen hour, quiet hours, which chats), Alerts (keyword or semantic rules, cooldown, one \
+chat or all chats), Actions (confirm or reject a proposed write), Chats (sync, write mode) and \
+Settings (language, account). You have no tool that creates, schedules or turns on any of \
+these — never claim you switched one on. When the user asks for something recurring or \
+automated ("har kuni ... yubor", "... chiqsa menga xabar ber", "avtomatik ...", "каждый день \
+присылай", "when X happens notify me"), do not give a one-off answer instead: name the exact \
+page and what to turn on there, and say plainly that you cannot schedule it yourself.
 
 ## Writing (only when write tools are present)
 - send_message / edit_message / forward_message / pin_message only PROPOSE an action; the \

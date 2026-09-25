@@ -2573,7 +2573,12 @@ def test_deep_prompts_describe_the_follow_up_contract() -> None:
     # (`about_prior` — javobning **kelib chiqishi** haqida, "bu qaysi
     # chatdan edi" kabi, mazmunini kengaytirish emas; jonli regressiya:
     # eval `daily-30` planner "2-band"ni `about_prior` deb hal qilardi).
-    assert DEEP_PROMPT_VERSION == "2026-09-25.1"
+    # 2026-09-25.2 — sintez "kimdir yuborgan/aytgan" savolida sitata yonida
+    # yuboruvchi va chatni ham aytishi kerak (jonli regressiya: eval
+    # `daily-20` — javob manzilni kim yuborganini aytmagan); imkoniyatlar
+    # matni (`capabilities_text`) endi Brifing/Alertlar sahifalariga ham
+    # yo'naltiradi.
+    assert DEEP_PROMPT_VERSION == "2026-09-25.2"
     assert "retrieval_kind" in DEEP_PLAN_PROMPT
     for field_name in ("standalone_question", "intent_follow_up", "needs_retrieval"):
         assert field_name in DEEP_PLAN_PROMPT
@@ -2596,6 +2601,34 @@ def test_synth_prompt_forbids_corpus_wide_absence_on_thin_evidence() -> None:
     assert "fewer than 10 messages" in DEEP_SYNTH_PROMPT
     # Prompt bayt darajasida barqaror: o'zgaruvchan qism yo'q (kesh prefiksi).
     assert "2026-" not in DEEP_SYNTH_PROMPT
+
+
+def test_synth_prompt_names_sender_and_chat_for_who_sent_lookups() -> None:
+    """daily-20 jonli regressiya: "kimdir yuborgan edi, topib ber" javobi kim yuborganini
+    aytmagan edi — sintez endi bunday savolda sitata yonida yuboruvchi/chatni talab qiladi.
+    """
+    low = DEEP_SYNTH_PROMPT.lower()
+    assert "kimdir yuborgan edi, topib ber" in DEEP_SYNTH_PROMPT
+    assert "name the sender and the chat" in low
+    assert "implies a person" in low
+    # Prompt bayt darajasida barqaror qoladi (kesh prefiksi).
+    assert "2026-" not in DEEP_SYNTH_PROMPT
+
+
+def test_capabilities_text_points_to_briefing_and_alerts_pages() -> None:
+    """daily-47/48 jonli regressiya: model o'zi rejalashtira olmasligini va qaysi sahifadan
+    yoqishni aytishi kerak — imkoniyatlar matni endi shu ikkalasini ham nomlaydi.
+    """
+    from app.services.prompts_deep import capabilities_text
+
+    for locale, page_words in (
+        ("uz", ("Brifing", "Alertlar")),
+        ("ru", ("Брифинг", "Алерты")),
+        ("en", ("Briefing", "Alerts")),
+    ):
+        text = capabilities_text(locale)
+        for word in page_words:
+            assert word in text, (locale, word)
 
 
 def test_agent_prompt_explains_follow_ups() -> None:

@@ -26,7 +26,7 @@ system'ga emas, user turn'iga qo'shiladi.
 
 from __future__ import annotations
 
-DEEP_PROMPT_VERSION = "2026-09-25.1"
+DEEP_PROMPT_VERSION = "2026-09-25.2"
 
 # Ishonch qoidalari yagona manbadan (`prompts._CORE`) olinadi — ikkala joyda
 # ikki xil yozilib qolmasin. Import bo'lmasa (masalan prompt'lar bo'lingan
@@ -360,6 +360,12 @@ answer are not evidence — never copy an id you cannot see in this turn's evide
 Never shorten an id to just its number, never merge two ids, and never invent one. Every \
 factual sentence carries at least one citation, and an id that is not in the evidence is \
 dropped by the system.
+- When the question asks to find, recall or check something someone sent, said, shared, \
+promised or agreed to ("kimdir yuborgan edi, topib ber", "kim aytgan edi", "kim va'da \
+bergan", "кто присылал", "who sent", "who said"), name the sender and the chat next to each \
+item you cite, not the id alone — the evidence line's `[chat | date | sender]` bracket \
+already has both. More generally, whenever the question implies a person, state that person \
+next to the fact you cite, not just its message id.
 - When the evidence disagrees with itself, say so and cite both sides. When it does not \
 contain the answer, say that plainly and name what is missing — never fill the gap with a \
 guess.
@@ -530,13 +536,20 @@ global qidiruv; so'rasangiz — siz a'zo bo'lmagan ochiq kanallarni ham topaman.
 (sinxronlangan butun oraliq; avval narx bahosi ko'rsatiladi va tasdig'ingiz so'raladi).
 - Chat va odam profillari, a'zolar ro'yxati, reaksiyalar, post izohlari, statistika va \
 faollik grafiklari.
-- Dayjestlar, har kunlik brifing, kalit so'z yoki ma'no bo'yicha alertlar — botga push.
-- Xabar yozish/tahrirlash/yuborish — **faqat siz tasdiqlaganingizdan keyin**.
+- Dayjestlar, har kunlik brifing va kalit so'z yoki ma'no bo'yicha alertlar — botga push, \
+lekin ularni ilovaning Brifing (soat, jim soatlar, chatlar) va Alertlar (qoida, cooldown, \
+bitta yoki barcha chat) sahifalaridan yoqasiz — men o'zim hech qanday avtomatlashtirishni \
+yarata olmayman.
+- Xabar yozish/tahrirlash/yuborish — **faqat siz tasdiqlaganingizdan keyin**, Amallar \
+sahifasida ko'rib chiqasiz.
+- Boshqa sozlamalar ham ilovaning o'zida: Chatlar (sinxronlash, yozish rejimi), Sozlamalar \
+(til, akkaunt).
 - Qamrov haqida rostini aytaman: qaysi chatlarda tarix to'liq emas, qayerda bo'shliq bor.
 
 Qila olmaydiganlarim: xabar mediasini (rasm/video/ovoz) yuklab olmayman va saqlamayman; \
 telefon raqamlarini qaytarmayman; hech narsani o'chirmayman; tasdig'ingizsiz hech qayerga \
-xabar yubormayman."""
+xabar yubormayman; hech qanday cron/rejalashtiruvchi o'zim yarata olmayman — buning uchun \
+ilova sahifalari bor."""
 
 CAPABILITIES_RU = """- Ищу по вашему архиву Telegram: локальный индекс (по словам и по \
 смыслу), дайджесты эпизодов/дней/недель. Каждое утверждение — со ссылкой на сообщение.
@@ -547,12 +560,18 @@ CAPABILITIES_RU = """- Ищу по вашему архиву Telegram: лока�
 подтверждение).
 - Профили чатов и людей, участники, реакции, комментарии к постам, статистика и графики \
 активности.
-- Дайджесты, ежедневный брифинг, алерты по ключевым словам или по смыслу — пуш в бота.
-- Написать/отредактировать/отправить сообщение — **только после вашего подтверждения**.
+- Дайджесты, ежедневный брифинг и алерты по ключевым словам или по смыслу — пуш в бота, но \
+включаете вы их на страницах приложения: Брифинг (час, тихие часы, чаты) и Алерты (правило, \
+cooldown, один чат или все) — сам я никакую автоматизацию не создаю.
+- Написать/отредактировать/отправить сообщение — **только после вашего подтверждения**, \
+на странице Действия.
+- Остальные настройки — тоже в приложении: Чаты (синхронизация, режим записи), Настройки \
+(язык, аккаунт).
 - Про охват говорю честно: где история неполная и где остались пробелы.
 
 Чего я не делаю: не скачиваю и не храню медиа из сообщений; не возвращаю номера телефонов; \
-ничего не удаляю; ничего не отправляю без вашего подтверждения."""
+ничего не удаляю; ничего не отправляю без вашего подтверждения; не создаю cron/расписание \
+сам — для этого есть страницы приложения."""
 
 CAPABILITIES_EN = """- I search your own Telegram archive: the local index (keyword and \
 meaning), plus episode/day/week digests. Every claim comes with a link to the message.
@@ -562,12 +581,16 @@ you do not name a chat; and, on request, public channels you are not a member of
 (the whole synced range — I show a cost estimate and ask you to confirm first).
 - Chat and people profiles, member lists, reactions, post comments, statistics and \
 activity charts.
-- Digests, a daily briefing, keyword or semantic alerts pushed to the bot.
-- Writing, editing and sending messages — **only after you confirm**.
+- Digests, a daily briefing and keyword or semantic alerts pushed to the bot — but you turn \
+them on from the app's own pages, Briefing (hour, quiet hours, chats) and Alerts (rule, \
+cooldown, one chat or all) — I cannot create any automation myself.
+- Writing, editing and sending messages — **only after you confirm**, on the Actions page.
+- The rest lives in the app too: Chats (sync, write mode), Settings (language, account).
 - I am honest about coverage: which chats are incompletely synced and where the gaps are.
 
 What I never do: download or store message media; return phone numbers; delete anything; \
-send anything anywhere without your confirmation."""
+send anything anywhere without your confirmation; set up any cron or schedule myself — that \
+is what the app's own pages are for."""
 
 _CAPABILITIES = {"uz": CAPABILITIES_UZ, "ru": CAPABILITIES_RU, "en": CAPABILITIES_EN}
 

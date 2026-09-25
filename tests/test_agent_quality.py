@@ -1134,6 +1134,25 @@ def test_agent_prompt_resolves_a_named_chat_from_the_index_not_server_search() -
     assert "message *content*" in low
 
 
+def test_agent_prompt_points_recurring_requests_at_the_app_settings_pages() -> None:
+    """`daily-47`/`daily-48` jonli regressiya: "har kuni briefing yubor" va "'ijara' chiqsa
+    xabar ber" javoblari qaysi sahifadan yoqishni aytmagan, faqat avtomatlashtira olmasligini
+    takrorlagan. Prompt endi Brifing/Alertlar sahifalarini nomma-nom ko'rsatadi va model o'zi
+    hech qanday rejalashtiruvchi tool chaqirmasligini aytadi.
+    """
+    from app.services.prompts import AGENT_SYSTEM_PROMPT
+
+    assert "## App settings pages" in AGENT_SYSTEM_PROMPT
+    assert "Briefing (a daily digest" in AGENT_SYSTEM_PROMPT
+    assert "Alerts (keyword or semantic rules" in AGENT_SYSTEM_PROMPT
+    assert "Actions (confirm or reject a proposed write)" in AGENT_SYSTEM_PROMPT
+    low = AGENT_SYSTEM_PROMPT.lower()
+    assert "name the exact page and what to turn on there" in low
+    assert "cannot schedule it yourself" in low
+    # Cacheable: sana yo'q.
+    assert "2026" not in AGENT_SYSTEM_PROMPT
+
+
 def _wire_chat(monkeypatch: pytest.MonkeyPatch, chat: Chat) -> None:
     async def fake_resolve(ctx: Any, args: Any) -> Chat:
         return chat
