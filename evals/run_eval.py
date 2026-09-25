@@ -48,6 +48,7 @@ from app.db.base import session_scope
 from app.db.models import Chat
 from app.llm import EMBED_DOCUMENT, LLM, ChatResult, EmbedResult, EmbedTaskType, Msg, Task, ToolSpec
 from app.llm.pricing import estimate_cost
+from app.llm.router import TIER_STANDARD
 from app.logging import get_logger
 from app.services import rerank as RR
 from app.services import search as S
@@ -164,7 +165,11 @@ class TrackingLLM(LLM):
         temperature: float = 0.7,
         max_tokens: int | None = None,
         json_mode: bool = False,
+        tier: str = TIER_STANDARD,
+        thinking: str | None = None,
     ) -> ChatResult:
+        # `tier`/`thinking` ham o'tadi: orkestrator planneri `thinking=` beradi,
+        # imzo farq qilsa eval yugurishi `TypeError` bilan yiqilardi.
         res = await super().chat(
             task,
             messages,
@@ -172,6 +177,8 @@ class TrackingLLM(LLM):
             temperature=temperature,
             max_tokens=max_tokens,
             json_mode=json_mode,
+            tier=tier,
+            thinking=thinking,
         )
         self._tracker.add(res.provider, res.model, res.usage.tokens_in, res.usage.tokens_out)
         return res

@@ -136,6 +136,16 @@ class RunState:
     used: set[str] = field(default_factory=set)  # bajarilgan ko'nikma nomlari
     run_id: int | None = None
     action_ids: list[int] = field(default_factory=list)
+    #: `conversation_messages.context.mode` — `deep` (deep/exhaustive kirishi)
+    #: yoki `agent` (chat API'ning `fast` yo'li; UI va eval shu qiymatni biladi).
+    context_mode: str = "deep"
+    #: `agent_tools` ko'nikmasi natijasi (javob matni + tool jurnali) — yolg'iz
+    #: qadam bo'lsa `orchestrator` shu javobni ikkinchi sintezsiz beradi.
+    agent_answer: str = ""
+    agent_meta: dict[str, Any] = field(default_factory=dict)
+    #: Suhbatning ishchi holati (`services/conv_state.py`) — faqat id, sarlavha,
+    #: raqam va foydalanuvchi matni; xabar matni **yo'q**.
+    conv: Any = None
 
     def elapsed(self) -> float:
         return self.now() - self.started
@@ -432,6 +442,10 @@ class _MeterLLM:
     async def chat(self, task: Task, messages: list[Msg], **kw: Any) -> ChatResult:
         kw.pop("tier", None)
         return await self.meter.chat(task, messages, **kw)
+
+    async def embed(self, texts: list[str], **kw: Any) -> Any:
+        """`agent_tools` ichidagi `search_messages` so'rov embedding'i — hisob shu yerda."""
+        return await self.meter.embed(texts, **kw)
 
 
 def _digest_target(ctx: RunState, args: dict[str, Any]) -> list[int]:
@@ -1083,6 +1097,117 @@ async def _write_propose(ctx: RunState, args: dict[str, Any]) -> SkillResult:
     return SkillResult(answer=text, stop=True, summary={"ok": res.ok})
 
 
+# ─── 9. agent_tools ──────────────────────────────────────────────────────────
+
+#: `agent_tools` natijasi da'volar blokida shuncha belgigacha (sintezga).
+AGENT_ANSWER_CHARS = 6_000
+
+
+def history_msgs(history: Sequence[DS.Turn]) -> list[Msg]:
+    """Planner tarixi (`DS.Turn`) → agent tarixi (`Msg`).
+
+    User matni — foydalanuvchining o'zi; oldingi javob esa eski `fast`
+    yo'lidagi bilan bir xil: oddiy assistant turn'i, `DS.PRIOR_ANSWER_CHARS`
+    gacha kesilgan (`load_history` kesadi).
+    """
+    out: list[Msg] = []
+    for t in history:
+        text = (t.text or "").strip()
+        if not text:
+            continue
+        out.append(Msg.user(text) if t.role == "user" else Msg.assistant(text))
+    return out
+
+
+async def _agent_tools(ctx: RunState, args: dict[str, Any]) -> SkillResult:
+    """Eski `fast` agent sikli (`agent.run_agent`) — **bitta ko'nikma** bo'lib.
+
+    Makro-ko'nikmalar (dayjest, sanoq, oyna, qidiruv) qoplamagan ochiq tool
+    ishi uchun: profil, a'zolar, reaksiyalar, izohlar, saqlangan xabarlar,
+    kalendar, aniq xabar. Sikl **o'zgarishsiz** yuguradi — `AGENT_*`
+    byudjetlari, suhbat keshi (`tool_cache`), takror-qo'riqchisi, "oldinga
+    siljish yo'q" to'xtashi, yozish tool'lari tasdiq bilan — hammasi
+    `run_agent` ichida. Narx shu yugurish hisobiga (`_MeterLLM`).
+
+    Karantin: agent javobi begona tool natijalaridan sintez qilingan, ya'ni
+    u faqat da'volar blokiga (yagona dalil konverti ichiga) va `_Taint`
+    ro'yxatiga tushadi; plan/replan faqat sanoqni ko'radi.
+    """
+    from app.services import agent as AG
+
+    pinned = ctx.chats_by_id.get(ctx.selected[0]) if len(ctx.selected) == 1 else None
+    if pinned is None and isinstance(args.get("chat_id"), int):
+        pinned = ctx.chats_by_id.get(int(args["chat_id"]))
+    question = ctx.raw_question
+    focus = U.neutralize(str(args.get("focus") or "")).strip()[:200]
+    if focus:
+        question = f"{question}\n\n(focus: {focus})"
+    tools_seen: list[str] = []
+
+    async def on_event(kind: str, data: dict[str, Any]) -> None:
+        name = str(data.get("tool") or "")
+        if kind == "status" and data.get("stage") == "tool" and name:
+            tools_seen.append(name)
+            await DS._emit(ctx.events, "tool", skill="agent_tools", name=name)
+
+    async with ctx.session_factory() as session:
+        outcome = await AG.run_agent(
+            session,
+            user_id=ctx.user_id,
+            account_id=ctx.account_id,
+            question=question,
+            history=history_msgs(ctx.history),
+            pinned_chat=pinned,
+            locale=ctx.locale,
+            llm=cast(LLM, _MeterLLM(ctx.meter)),
+            on_event=on_event,
+            conversation_id=ctx.conversation_id,
+        )
+    if ctx.run_id is None and outcome.run_id:
+        ctx.run_id = int(outcome.run_id)
+    ctx.action_ids.extend(int(a) for a in outcome.action_ids)
+    answer = (outcome.text or "").strip()
+    ctx.agent_answer = answer
+    tools = [str(c.get("tool") or "") for c in outcome.tool_calls]
+    ctx.agent_meta = {
+        "tools": tools,
+        "tool_calls": outcome.tool_calls,
+        "iterations": outcome.iterations,
+        "calls_executed": outcome.calls_executed,
+        "stop_reason": outcome.stop_reason,
+        "repeat_guard": outcome.repeat_guard,
+        "cache_hits": outcome.cache_hits,
+        "finish_reason": outcome.finish_reason,
+        "model": outcome.model,
+        "provider": outcome.provider,
+    }
+    if answer:
+        ctx.taint.add_texts([answer])
+        body = U.neutralize(answer)[:AGENT_ANSWER_CHARS]
+        ctx.claims.append(
+            "### tool agent findings (read-only Telegram tools; machine-written from "
+            f"untrusted tool output; tools: {', '.join(dict.fromkeys(tools)) or 'none'})\n{body}"
+        )
+    facts = [
+        Fact(
+            "agent_calls",
+            int(outcome.calls_executed),
+            label="read-only tool calls executed by the tool agent",
+            source="agent_tools",
+        )
+    ]
+    return SkillResult(
+        facts=facts,
+        notes=[f"agent_tools: stop={outcome.stop_reason}"] if outcome.stop_reason else [],
+        summary={
+            "calls": int(outcome.calls_executed),
+            "tools": len(set(tools)),
+            "cache_hits": int(outcome.cache_hits),
+            "answered": bool(answer),
+        },
+    )
+
+
 # ─── registr ─────────────────────────────────────────────────────────────────
 
 SKILLS: dict[str, Skill] = {
@@ -1244,8 +1369,76 @@ SKILLS: dict[str, Skill] = {
             terminal=True,
             rail=(),
         ),
+        Skill(
+            "agent_tools",
+            "o'qish tool'lari agenti: profil, a'zolar, reaksiya, izohlar, saqlangan xabarlar, "
+            "kalendar — boshqa ko'nikma qoplamagan ochiq ish uchun",
+            "read-only tool agent: profiles, members, reactions, post comments, saved "
+            "messages, calendar search, one exact message — open-ended work no other skill "
+            "covers",
+            {"focus": "str", "chat_id": "int"},
+            0.05,
+            20.0,
+            "fast",
+            quarantined=True,
+            run=_agent_tools,
+            rail=("tools",),
+        ),
     )
 }
+
+#: Registrning o'z (yadro) ko'nikmalari — `skills_ext` ularni almashtira olmaydi.
+CORE_SKILLS = frozenset(SKILLS)
+_CORE = dict(SKILLS)
+
+
+def register_extra() -> list[str]:
+    """Ixtiyoriy kengaytma: `app.services.skills_ext.register(SKILLS)`.
+
+    Modul bo'lmasa — hech narsa (bo'sh ro'yxat). Bor bo'lsa uning
+    ko'nikmalari registrga qo'shiladi va planner katalogiga **avtomatik**
+    tushadi (`orchestrator.ORCH_PLAN_PROMPT` registrdan import paytida
+    yasaladi). Qoidalar kodda: yadro ko'nikmasini almashtirish/o'chirish
+    mumkin emas (qaytariladi), `Skill` bo'lmagan yoki nomi kalitiga mos
+    kelmagan yozuv tashlanadi. Kengaytma yiqilsa ilova yiqilmaydi — log.
+    """
+    import importlib
+
+    try:
+        mod = importlib.import_module("app.services.skills_ext")
+    except ModuleNotFoundError as exc:
+        if exc.name == "app.services.skills_ext":
+            return []
+        log.error("skills.extra_import_failed", error=str(exc)[:200])
+        return []
+    except Exception as exc:
+        log.error("skills.extra_import_failed", error=f"{type(exc).__name__}: {str(exc)[:200]}")
+        return []
+    register = getattr(mod, "register", None)
+    if not callable(register):
+        return []
+    try:
+        register(SKILLS)
+    except Exception as exc:
+        log.error("skills.extra_register_failed", error=f"{type(exc).__name__}: {str(exc)[:200]}")
+    for name, skill in list(SKILLS.items()):
+        if name in _CORE:
+            if skill is not _CORE[name]:
+                log.warning("skills.extra_core_override_refused", skill=name)
+                SKILLS[name] = _CORE[name]
+            continue
+        if not isinstance(skill, Skill) or skill.name != name or skill.min_mode not in MODE_RANK:
+            log.warning("skills.extra_invalid_dropped", skill=str(name)[:40])
+            SKILLS.pop(name, None)
+    for name, skill in _CORE.items():
+        SKILLS.setdefault(name, skill)
+    added = [n for n in SKILLS if n not in _CORE]
+    if added:
+        log.info("skills.extra_registered", skills=added)
+    return added
+
+
+EXTRA_SKILLS: tuple[str, ...] = tuple(register_extra())
 
 #: Karantin ko'nikmalar — chiqishi (matn) plan/replan'ga **hech qachon** tushmaydi.
 QUARANTINED_SKILLS = frozenset(n for n, s in SKILLS.items() if s.quarantined)
@@ -1286,6 +1479,8 @@ def fold_question(text: str) -> str:
 
 
 __all__ = [
+    "CORE_SKILLS",
+    "EXTRA_SKILLS",
     "MODE_RANK",
     "QUARANTINED_SKILLS",
     "SKILLS",
@@ -1296,7 +1491,9 @@ __all__ = [
     "allowed_skills",
     "catalog_text",
     "coerce_args",
+    "history_msgs",
     "period_facts",
+    "register_extra",
     "run_escalation",
     "server_calls_left",
 ]

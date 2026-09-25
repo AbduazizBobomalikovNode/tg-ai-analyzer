@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -88,6 +89,18 @@ REPLAN_SKILLS = frozenset(
 #: System prompt — eski reja prompti + katalog (registrdan, kodda). Bayt
 #: darajasida barqaror: registr o'zgarmaguncha matn o'zgarmaydi.
 ORCH_PLAN_PROMPT = DEEP_PLAN_PROMPT + ORCH_PLAN_ADDENDUM.replace("{catalog}", SK.catalog_text())
+
+#: Planner yiqilganda (yoki qadam bermaganda) — makro-ko'nikma qoplamaydigan
+#: tool ishi: profil, a'zolar, reaksiyalar, izohlar, saqlangan xabarlar,
+#: kalendar. Faqat **sukut** yo'lida ishlatiladi; planner tanlovini bosmaydi.
+AGENT_WORK_RE = re.compile(
+    r"\ba'zo\w*|\bazo(?:lar)?\w*|\bmembers?\b|участник\w*|подписчик\w*"
+    r"|reaksiya\w*|reaction\w*|реакци\w*|\blayk\w*|\blike[sd]?\b"
+    r"|\bizoh\w*|komment\w*|comment\w*|коммент\w*"
+    r"|saqlangan\s+xabar\w*|saved\s+messages?|избранн\w*"
+    r"|\bprofil\w*|\bprofile\b|профил\w*|\bbio\b|\bkalendar\w*|\bcalendar\b",
+    re.I,
+)
 
 
 # ─── reja tuzilmasi ──────────────────────────────────────────────────────────
@@ -267,6 +280,8 @@ def default_steps(plan: DS.DeepPlan, *, mode: str, question: str) -> list[Step]:
         and (plan.intent == "summary")
     ):
         return [Step("chat_digest", {}, "overview of the named chat", "fallback")]
+    if AGENT_WORK_RE.search(question or "") and "agent_tools" in SK.SKILLS:
+        return [Step("agent_tools", {}, "tool work no macro-skill covers", "fallback")]
     out = [Step("search_local", {}, "topic search", "fallback")]
     if plan.server_scope == "discover" and SK.SKILLS["discover"].allowed(mode):
         out.append(Step("discover", {}, "public channels were asked about", "fallback"))
@@ -676,6 +691,7 @@ async def run_pipeline(
     mode: str = "deep",
     confirm: bool = True,
     chat_ids: list[int] | None = None,
+    context_mode: str = "deep",
 ) -> DS.DeepResult:
     """Orkestrator yugurishi — `deep_search.run_deep_search` (hisob kafolati) ichidan."""
     question = (question or "").strip()
@@ -742,6 +758,7 @@ async def run_pipeline(
         soft_wall=soft_wall,
         hard_wall=hard_wall,
         now=time.monotonic,
+        context_mode=context_mode if context_mode in ("deep", "agent") else "deep",
     )
     if len(selected_rows) > len(selected):
         ctx.notes.append("selected: some context chats are not synced yet")
@@ -821,6 +838,11 @@ async def run_pipeline(
                     return await _finish_terminal(
                         ctx, orch, res, intent=intent, gate="plan", state=state
                     )
+            # ── yolg'iz `agent_tools`: uning javobi — yakuniy javob ─────────
+            # Ikkinchi sintez faqat narx qo'shardi (eski `fast` yo'li ham
+            # agent javobini to'g'ridan-to'g'ri berardi).
+            if ctx.used == {"agent_tools"}:
+                return await _finish_agent(ctx, orch, state=state)
             # ── server qo'riqchisi (`needs_server`, kodda) ──────────────────
             guard = await _server_guard(ctx)
             if guard is not None:
@@ -1006,7 +1028,7 @@ async def _finish_terminal(
         question=ctx.raw_question,
         result=result,
         context_meta={
-            "mode": "deep",
+            "mode": ctx.context_mode,
             "scale_mode": ctx.mode,
             "strategy": "direct",
             "source": "deep",
@@ -1024,6 +1046,7 @@ async def _finish_terminal(
             "finish_reason": res.result.finish_reason if res.result else "",
             "evidence_refs": DS.prior_refs(ctx.history),
             "reused_evidence": False,
+            **(agent_context(ctx) if ctx.context_mode == "agent" else {}),
         },
         run_id=ctx.run_id,
     )
@@ -1049,6 +1072,131 @@ async def _finish_terminal(
         citations=[],
         invalid_citations=0,
         steps=[s.skill for s in orch.steps],
+        actions=await _actions(ctx),
+        model=result.model,
+        provider=result.provider,
+        latency_ms=result.latency_ms,
+        assistant_message_id=result.assistant_message_id,
+        conversation_id=ctx.conversation_id,
+        **usage,
+    )
+    return result
+
+
+_EMPTY_AGENT = "…"
+
+
+def agent_context(ctx: SK.RunState) -> dict[str, Any]:
+    """`agent` rejimi (chat API `fast`) uchun eski `context_used` maydonlari.
+
+    UI (`messages.js::contextLine`) `mode == "agent"` da `tools` chiplarini
+    chizadi, judge (`evaluation.run_flags`) `tool_calls` ga qaraydi — shu
+    kalitlar o'z nomi bilan qoladi. Ko'nikma nomlari ham "tool" bo'lib
+    ko'rinadi (`stats`, `chat_digest`, …), agent tool'lari esa ularning
+    ichida.
+    """
+    meta = ctx.agent_meta or {}
+    tools = [s for s in sorted(ctx.used) if s != "agent_tools"] + list(meta.get("tools") or [])
+    out: dict[str, Any] = {
+        "tools": tools,
+        "tools_available": True,
+        "iterations": int(meta.get("iterations") or len(ctx.used) or 1),
+    }
+    if meta:
+        out.update(
+            tool_calls=meta.get("tool_calls") or [],
+            calls_executed=int(meta.get("calls_executed") or 0),
+            stop_reason=meta.get("stop_reason") or "",
+            repeat_guard=bool(meta.get("repeat_guard")),
+            cache_hits=int(meta.get("cache_hits") or 0),
+        )
+    return out
+
+
+async def _finish_agent(
+    ctx: SK.RunState, orch: OrchPlan, *, state: dict[str, Any]
+) -> DS.DeepResult:
+    """Yolg'iz `agent_tools` qadami — agent javobi yakuniy javob (ikkinchi sintez yo'q).
+
+    Yozuv o'sha yagona yozuvchida (`_persist`), `context.orchestrator` bilan.
+    Qamrov da'vosi yo'q: agent nimani ko'rgani tool jurnalida (`tool_calls`).
+    """
+    meta = ctx.agent_meta or {}
+    answer = ctx.agent_answer or _EMPTY_AGENT
+    full_answer = f"{answer}{steps_footer(ctx, orch.steps)}"
+    state["answer"] = full_answer
+    for start in range(0, len(answer), DS.TOKEN_CHUNK_CHARS):
+        await DS._emit(ctx.events, "token", text=answer[start : start + DS.TOKEN_CHUNK_CHARS])
+    usage = _usage(ctx.meter)
+    finish_reason = str(meta.get("finish_reason") or "")
+    result = DS.DeepResult(
+        answer=full_answer,
+        plan=orch.to_dict(),
+        mode=ctx.mode,
+        intent="agent",
+        model=str(meta.get("model") or ""),
+        provider=str(meta.get("provider") or ""),
+        latency_ms=int(ctx.elapsed() * 1000),
+        conversation_id=ctx.conversation_id,
+        **usage,
+    )
+    facts = list(ctx.facts.values())
+    context_meta: dict[str, Any] = {
+        "mode": ctx.context_mode,
+        "scale_mode": ctx.mode,
+        "strategy": "agent" if ctx.context_mode == "agent" else "deep",
+        "source": "tools",
+        "account_id": ctx.account_id,
+        "intent": "agent",
+        "messages": sum(
+            int(c.get("hits") or c.get("n") or 0) for c in (meta.get("tool_calls") or [])
+        )
+        or None,
+        "candidates": 0,
+        "plan": result.plan,
+        "orchestrator": _orch_meta(orch, ctx),
+        "facts": [f.to_dict() for f in facts],
+        "selected_chats": list(ctx.selected),
+        "citations": [],
+        "est_tokens": S.est_tokens(answer),
+        "finish_reason": finish_reason,
+        "truncated_answer": DS.is_length_finish(finish_reason),
+        "evidence_refs": [],
+        "reused_evidence": False,
+        **agent_context(ctx),
+    }
+    await DS._persist(
+        ctx.session_factory,
+        conversation_id=ctx.conversation_id,
+        user_id=ctx.user_id,
+        account_id=ctx.account_id,
+        question=ctx.raw_question,
+        result=result,
+        context_meta=context_meta,
+        run_id=ctx.run_id,
+    )
+    state["persisted"] = True
+    state["status"] = "ok"
+    DEEP_RUNS.labels("ok").inc()
+    DEEP_LATENCY.observe(ctx.elapsed())
+    if result.cost_usd:
+        DEEP_COST.inc(result.cost_usd)
+    log.info(
+        "orch.agent_done",
+        conversation_id=ctx.conversation_id,
+        mode=ctx.mode,
+        tools=meta.get("tools"),
+        stop_reason=meta.get("stop_reason"),
+        llm_calls=ctx.meter.calls,
+        cost_usd=result.cost_usd,
+    )
+    await DS._emit(
+        ctx.events,
+        "done",
+        citations=[],
+        invalid_citations=0,
+        steps=[s.skill for s in orch.steps],
+        tools=meta.get("tools") or [],
         actions=await _actions(ctx),
         model=result.model,
         provider=result.provider,
@@ -1284,7 +1432,7 @@ async def _finish_answer(
         **usage,
     )
     context_meta: dict[str, Any] = {
-        "mode": "deep",
+        "mode": ctx.context_mode,
         "scale_mode": ctx.mode,
         "scan": ctx.scan_meta,
         "estimate": ctx.estimate_meta,
@@ -1317,6 +1465,7 @@ async def _finish_answer(
         "selected_chats": list(ctx.selected),
         "evidence_refs": DS.evidence_refs(kept),
         "reused_evidence": "reuse_prior" in ctx.used,
+        **(agent_context(ctx) if ctx.context_mode == "agent" or ctx.agent_meta else {}),
     }
     scan_persist = ctx.scan_meta if ctx.used & {"scan_corpus", "window", "stats"} else None
     await DS._persist(

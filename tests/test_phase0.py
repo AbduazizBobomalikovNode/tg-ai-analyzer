@@ -147,6 +147,19 @@ class _FailoverLLM:
         )
 
 
+@pytest.fixture
+def legacy_agent_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Eski `fast` → `run_agent` yo'li (`ORCHESTRATOR=false`) — qaytish yo'li tirik qolsin.
+
+    Sukutda `fast` orkestrator orqali ketadi (`chat_service.use_orchestrator`);
+    orkestratorning failover'i `test_orchestrator.py` da.
+    """
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "orchestrator", False)
+
+
+@pytest.mark.usefixtures("legacy_agent_path")
 async def test_agent_failover_writes_single_user_row() -> None:
     db = _Session()
     conv = SimpleNamespace(id=1, title="", account_id=1, updated_at=None)
@@ -170,6 +183,7 @@ async def test_agent_failover_writes_single_user_row() -> None:
     assert failed and failed[0].finished_at is not None
 
 
+@pytest.mark.usefixtures("legacy_agent_path")
 async def test_agent_failover_is_visible() -> None:
     """Failover **jim** bo'lmasligi kerak: log + metrika + javob metadata'si.
 

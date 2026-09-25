@@ -213,9 +213,40 @@ synth → qamrov. Web: `POST /api/conversations/{id}/messages` `mode="deep"`
 
 ### Orkestrator (`services/orchestrator.py`, `services/skills.py`)
 
-Deep/exhaustive kirishi (`/api/deep*`, `chat_service` deep yo'li) endi
-**orkestrator**: planner katalogdan "eng arzon yetarli yo'l" qadamlarini
-tanlaydi, executor ularni tartibda yuritadi. `fast`/agent yo'li o'zgarmagan.
+**Yagona miya**: har rejim (`fast` ham) **orkestrator** orqali —
+`/api/deep*`, `chat_service` deep yo'li va chat API'ning `auto`/`agent`
+(UI "Tez") yo'li (`chat_service._send_via_orchestrator`, `mode="fast"`).
+Planner katalogdan "eng arzon yetarli yo'l" qadamlarini tanlaydi, executor
+ularni tartibda yuritadi. Rejim — faqat **qopqoq**: `fast` ≤ `search_server`
+(+ `agent_tools`), `deep` + `discover`/`scan_corpus` (≤200 bucket),
+`exhaustive` — to'liq.
+
+- **`agent_tools`** — eski `fast` agent sikli (`agent.run_agent`) bitta
+  karantin ko'nikma bo'lib: profil, a'zolar, reaksiya, izohlar, saqlangan
+  xabarlar, kalendar — makro-ko'nikma qoplamagan ochiq tool ishi. Sikl
+  o'zgarishsiz: `AGENT_*` byudjetlari, `tool_cache`, takror-qo'riqchisi,
+  `no_progress`, yozish tool'lari tasdiq bilan; tarix `skills.history_msgs`
+  (`DS.Turn` → `Msg`), narx `_MeterLLM` orqali shu yugurishga. Yolg'iz qadam
+  bo'lsa javobi **yakuniy** (`orchestrator._finish_agent`, ikkinchi sintez
+  yo'q); boshqa qadamlar bilan bo'lsa javobi da'volar blokiga (yagona
+  evidence konverti ichida, `_Taint.add_texts`). Planner makro-ko'nikmani
+  afzal ko'radi (prompt 11-qoida); planner yiqilsa `AGENT_WORK_RE` sukuti.
+  UI reykida bitta `tools` bosqichi, tafsilotda tool nomlari (`tool` hodisasi).
+- **Chat oqimi**: orkestrator hodisalari `chat_service.deep_events_to_chat`
+  bilan eski shartnomaga (`status {stage:"tool", tool}` / `writing` /
+  `token`) o'giriladi — javob sintezdan bo'laklab keladi, `done.text` —
+  saqlangan to'liq matn. `context_used.mode` `fast` da **`agent`**
+  (`RunState.context_mode`), `tools`/`tool_calls`/`iterations` o'z nomi
+  bilan (UI chiplari, judge). Deep shifti (`DEEP_RATE_PER_MINUTE`) `fast` ga
+  tegmaydi. `LLMError` → eski qoida: direct rejim + `degraded {from:
+  "orchestrator"}` + `tgai_agent_fallbacks_total`.
+- **Kengaytma ilgagi**: `skills.register_extra()` import paytida
+  `app.services.skills_ext.register(SKILLS)` ni chaqiradi (modul bo'lsa) —
+  qo'shilgan ko'nikmalar planner katalogiga avtomatik tushadi. Yadro
+  (`CORE_SKILLS`) almashtirilmaydi, `Skill` bo'lmagan yozuv tashlanadi,
+  kengaytma yiqilsa ilova yiqilmaydi (log).
+- `ORCHESTRATOR=false` — eski bo'linish: `fast` → `run_agent`, deep →
+  `_run_pipeline`.
 
 - **Katalog** (`skills.SKILLS`): `answer_direct`, `clarify`, `reuse_prior`,
   `chat_digest`, `stats`, `compute`, `window`, `search_local`,

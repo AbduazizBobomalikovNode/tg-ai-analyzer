@@ -740,6 +740,12 @@ in the window and direction), mine, theirs, chats, days, weeks, months, top1_n �
 10. expected_answer_kind and output_budget describe the answer the user needs: a number \
 question is "number"/"short", a chat overview is "digest"/"short", a comparison of three \
 or more things is "table"/"normal", "batafsil"/"подробно"/"in detail" is "detailed".
+11. `agent_tools` is the general read-only tool agent. Use it ONLY for work no other skill \
+covers: a person's or chat's profile/bio, members of a group, reactions or comments on a \
+post, saved messages, a calendar/date jump, one exact message by link or id. Prefer the \
+macro-skills whenever they fit — an overview is `chat_digest`, a count is `stats`, a time \
+window is `window`, a subject is `search_local`. `agent_tools` is usually the only step; \
+args: {"focus": "<what to fetch, in the user's words>", "chat_id": <id when known>}.
 
 ## Examples
 selected chat "Honadoshlar" / latest: "bu chatda nima bor edi!"
@@ -760,6 +766,11 @@ local index"}], "expected_answer_kind": "text", "output_budget": "normal"
 mode_ceiling exhaustive / latest: "butun telegramda kommunal to'lovlar qanday o'zgargan?"
   -> "target_chats": "all", "steps": [{"skill": "scan_corpus", "args": {}, "why": "subject \
 across all chats over the whole history"}], "expected_answer_kind": "text", \
+"output_budget": "normal"
+
+latest: "IT guruhida kimlar a'zo?"
+  -> "steps": [{"skill": "agent_tools", "args": {"focus": "list the members of the IT \
+group"}, "why": "members need the tool agent"}], "expected_answer_kind": "list", \
 "output_budget": "normal"
 
 latest: "u nima dedi?" (no history, nothing selected)

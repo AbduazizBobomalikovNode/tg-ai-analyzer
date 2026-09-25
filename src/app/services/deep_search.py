@@ -768,6 +768,9 @@ class DeepResult:
     direct: bool = False
     #: `greeting|meta|chitchat` — `direct=True` bo'lganda nima uchun.
     intent: str = ""
+    #: `_persist` yozgan `conversation_messages.context` — chat API javobi
+    #: (`Reply.context_used`) aynan saqlangan meta bilan bir xil bo'lsin.
+    context: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -3563,6 +3566,7 @@ async def _persist(
         result.run_id = run.id
         result.user_message_id = user_row.id
         result.assistant_message_id = assistant_row.id
+        result.context = context_meta
 
 
 async def _persist_scan_only(
@@ -3741,6 +3745,7 @@ async def run_deep_search(
     confirm: bool = True,
     orchestrate: bool = False,
     chat_ids: Sequence[int] = (),
+    context_mode: str = "deep",
 ) -> DeepResult:
     """Deep search quvuri + **hisob kafolati** (H2).
 
@@ -3777,6 +3782,7 @@ async def run_deep_search(
                 mode=normalize_mode(mode, deep=False),
                 confirm=confirm,
                 chat_ids=list(chat_ids),
+                context_mode=context_mode,
             )
         return await _run_pipeline(
             session_factory,

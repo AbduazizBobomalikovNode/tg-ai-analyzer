@@ -663,7 +663,7 @@ async def bench_fanout(
         return _expansion()
 
     orig_expand = QE.expand
-    QE.expand = fake_expand  # type: ignore[assignment]
+    QE.expand = fake_expand
     try:
         plan = DS.DeepPlan(
             since=since, until=until, subqueries=list(FANOUT_SUBQUERIES), levels=[0, 1, 2]
@@ -721,7 +721,7 @@ async def bench_fanout(
                 note_from=lambda r: f"hits={len(r)}",
             )
     finally:
-        QE.expand = orig_expand  # type: ignore[assignment]
+        QE.expand = orig_expand
 
 
 async def _scale_pool(sm: async_sessionmaker[AsyncSession], account_id: int) -> list[Any]:

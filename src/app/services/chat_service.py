@@ -417,13 +417,45 @@ async def send_message(
             chat_ids=[pinned_chat.id] if pinned_chat is not None else None,
         )
 
+    orchestrated = chosen == "agent" and acc_id is not None and use_orchestrator()
+    if orchestrated and acc_id is not None:
+        # Yagona miya: `fast` ham orkestrator orqali — rejim faqat **qopqoq**
+        # (`fast` ≤ `search_server`), eski agent sikli `agent_tools` ko'nikmasi.
+        # Yozuvni orkestrator o'zi qiladi (`deep_search._persist`), shuning
+        # uchun user qatori bu yerda yaratilmaydi.
+        try:
+            return await _send_via_orchestrator(
+                user_id=user_id,
+                conversation=conversation,
+                text=text,
+                account_id=acc_id,
+                locale=locale,
+                deep=deep,
+                started=started,
+                llm=llm,
+                events=events,
+                pinned=await _pinned_chat(session, context),
+            )
+        except LLMError as exc:
+            # Eski agent yo'lidagi qoida: provider yiqilsa — direct rejim,
+            # lekin **ko'rinadigan** degradatsiya bilan (log + metrika + meta).
+            reason = type(exc).__name__
+            log.warning(
+                "chat.orchestrator_fallback",
+                conversation_id=conversation.id,
+                reason=reason,
+                error=str(exc)[:200],
+            )
+            AGENT_FALLBACKS.labels(reason).inc()
+            degraded = {"from": "orchestrator", "reason": reason}
+
     # User turn'i **bir marta** yoziladi: agent yo'li uzilsa ham (LLMError →
     # direct rejim) shu yozuv qayta ishlatiladi, ikkinchi nusxa yaratilmaydi.
     user_row = ConversationMessage(conversation_id=conversation.id, role="user", content=text)
     session.add(user_row)
     await session.flush()
 
-    if chosen == "agent" and acc_id is not None:
+    if chosen == "agent" and acc_id is not None and not orchestrated:
         try:
             return await _send_via_agent(
                 session,
@@ -665,6 +697,119 @@ async def _send_via_deep(
         "run_id": result.run_id,
     }
     await _stream_answer(events, result.answer)
+    return Reply(
+        conversation_id=conversation.id,
+        user_message_id=result.user_message_id or 0,
+        assistant_message_id=result.assistant_message_id or 0,
+        text=result.answer,
+        model=result.model,
+        provider=result.provider,
+        tokens_in=result.tokens_in,
+        tokens_out=result.tokens_out,
+        context_used=context_used,
+        latency_ms=result.latency_ms or int((time.monotonic() - started) * 1000),
+        cost_usd=result.cost_usd,
+    )
+
+
+def use_orchestrator() -> bool:
+    """`fast`/`auto` agent yo'li orkestrator orqalimi (`ORCHESTRATOR`, sukut `true`).
+
+    `false` — eski ikki yo'lli bo'linish: `fast` → `agent.run_agent`,
+    `deep`/`exhaustive` → `deep_search._run_pipeline` (qaytish yo'li).
+    """
+    return bool(get_settings().orchestrator)
+
+
+def deep_events_to_chat(events: EventSink | None) -> Any:
+    """Orkestrator hodisalari (`DeepEvent`) → chat oqimi shartnomasi.
+
+    Chat SSE (`/messages/stream`) faqat `status {stage}` va `token` ni biladi
+    (`static/pages/ask/answer.js::statusStrip`). Ko'nikma qadami va agent
+    tool'i — `status {stage: "tool", tool}` chipi; javob bo'laklari — `token`
+    (birinchisidan oldin `status {stage: "writing"}`). Qolgan hodisalar
+    (reja, qamrov, …) bu yuzada ko'rsatilmaydi.
+    """
+    if events is None:
+        return None
+    writing = False
+
+    async def sink(event: Any) -> None:
+        nonlocal writing
+        kind, data = event.kind, event.data
+        if kind == "step" and data.get("state") == "start" and data.get("skill"):
+            await events("status", {"stage": "tool", "tool": str(data["skill"])})
+        elif kind == "tool" and data.get("name"):
+            await events("status", {"stage": "tool", "tool": str(data["name"])})
+        elif kind == "token":
+            if not writing:
+                writing = True
+                await events("status", {"stage": "writing"})
+            await events("token", {"text": str(data.get("text") or "")})
+
+    return sink
+
+
+async def _send_via_orchestrator(
+    *,
+    user_id: int,
+    conversation: Conversation,
+    text: str,
+    account_id: int,
+    locale: str,
+    deep: bool,
+    started: float,
+    llm: LLM | None = None,
+    events: EventSink | None = None,
+    pinned: Chat | None = None,
+) -> Reply:
+    """`fast` (chat API `auto`/`agent`) → orkestrator, rejim qopqog'i `fast`.
+
+    Deep shifti (`DEEP_RATE_PER_MINUTE`) va `DEEP_SEARCH_ENABLED` bu yo'lga
+    **tegmaydi**: bu oddiy chat, faqat miyasi bitta. Javob oqimda keladi
+    (`token` hodisalari sintezdan), yakuniy matn `done.text` da.
+    `context_used.mode` — eskicha `agent` (UI tool chiplari, judge bayrog'i).
+    """
+    from app.db.base import session_scope
+    from app.services.deep_search import DeepSearchError, run_deep_search
+
+    try:
+        result = await run_deep_search(
+            session_scope,
+            account_id,
+            conversation.id,
+            text,
+            locale=locale,
+            deep=deep,
+            llm=llm,
+            events=deep_events_to_chat(events),
+            mode="fast",
+            confirm=True,
+            orchestrate=True,
+            chat_ids=[pinned.id] if pinned is not None else [],
+            context_mode="agent",
+        )
+    except DeepSearchError as exc:
+        raise ChatError(exc.code, exc.detail) from exc
+    context_used: dict[str, Any] = {
+        "mode": "agent",
+        "scale_mode": "fast",
+        "orchestrator": True,
+        "direct": result.direct,
+        "intent": result.intent,
+        "strategy": "agent",
+        "source": "tools",
+        "account_id": account_id,
+        "title": pinned.title if pinned else None,
+        "steps": [s.get("skill") for s in result.plan.get("steps", []) if isinstance(s, dict)],
+        "messages": result.evidence_count,
+        "coverage": result.coverage.to_dict(),
+        "citations": result.citations,
+        "run_id": result.run_id,
+        "tools_available": True,
+    }
+    # Saqlangan meta (`_persist`) ustun: API javobi tarixdagi qator bilan bir xil.
+    context_used.update(result.context or {})
     return Reply(
         conversation_id=conversation.id,
         user_message_id=result.user_message_id or 0,

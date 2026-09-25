@@ -238,7 +238,7 @@ function citeChip(part, index, seq) {
  */
 export const STAGE_ORDER = [
   "plan", "digest", "estimate", "stats", "compute", "buckets", "pull", "filter", "select",
-  "search", "server", "map", "reduce", "cluster", "rerank", "write",
+  "search", "server", "tools", "map", "reduce", "cluster", "rerank", "write",
 ];
 
 /**
@@ -249,7 +249,7 @@ export const STAGE_ORDER = [
 const SKILL_STAGE = {
   chat_digest: "digest", stats: "stats", compute: "compute", window: "estimate",
   search_local: "search", reuse_prior: "search", search_server: "server",
-  discover: "server", scan_corpus: "estimate",
+  discover: "server", scan_corpus: "estimate", agent_tools: "tools",
 };
 
 /**
@@ -277,7 +277,7 @@ function nextStage(model, key) {
 }
 
 const STAGE_ICON = {
-  plan: "brain", digest: "list", compute: "hash", server: "send",
+  plan: "brain", digest: "list", compute: "hash", server: "send", tools: "bolt",
   estimate: "activity", stats: "bar-chart-3", buckets: "layers", pull: "database",
   filter: "filter", select: "check-check", search: "search", map: "bolt",
   reduce: "layers", cluster: "layers", rerank: "filter", write: "edit-3",
@@ -285,7 +285,7 @@ const STAGE_ICON = {
 
 const STAGE_LABEL = {
   plan: "web.deep.step_plan", digest: "web.ask.stage_digest", compute: "web.ask.stage_compute",
-  server: "web.ask.stage_server",
+  server: "web.ask.stage_server", tools: "web.ask.stage_tools",
   estimate: "web.ask.stage_estimate", stats: "web.ask.stage_stats",
   buckets: "web.ask.stage_buckets", pull: "web.ask.stage_pull",
   filter: "web.ask.stage_filter", select: "web.ask.stage_select",
@@ -321,7 +321,7 @@ export function emptyModel(mode = "deep") {
       selected: 0, chats: 0, weeks: 0, days: 0, grain: "", bucketsTotal: 0, trimmed: 0,
       statsTotal: 0, statsDirection: "",
       chunk: 0, chunks: 0, claims: 0, claimsIn: 0, contradictions: 0,
-      searched: 0, served: 0, planned: 0,
+      searched: 0, served: 0, planned: 0, tools: [],
     },
   };
 }
@@ -488,6 +488,13 @@ export function reduceEvent(model, kind, d = {}, at = 0) {
       f.claimsIn = numOr(d.claims_in, f.claimsIn);
       f.contradictions = numOr(d.contradictions, f.contradictions);
       advance("reduce", "write");
+      break;
+
+    // `agent_tools` ko'nikmasi ichidagi har bir o'qish tool'i — bitta
+    // `tools` bosqichi, tafsilotda tool nomlari.
+    case "tool":
+      if (d.name && !f.tools.includes(String(d.name))) f.tools.push(String(d.name));
+      touch("tools", "active");
       break;
 
     case "search":
@@ -932,6 +939,8 @@ function stageDetail(key, model, shownCandidates) {
       return t("web.deep.step_cluster", { n: (model.clusters || []).length });
     case "rerank":
       return f.reranked != null ? t("web.deep.step_rank", { n: num(f.reranked) }) : "";
+    case "tools":
+      return (f.tools || []).slice(0, 6).join(" · ");
     default:
       return "";
   }

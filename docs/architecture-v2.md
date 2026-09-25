@@ -512,6 +512,30 @@ mos kelmasa hech narsa. `days` = oynadagi kalendar kunlari (bugun ham).
 `_run_pipeline` ni chaqiradi (`run_deep_search(orchestrate=False)`, kutubxona
 sukuti ham shu).
 
+### 7.2 v2-core: yagona miya (2026-09-26)
+
+**Bitta kirish.** Chat API'ning `auto`/`agent` yo'li (UI "Tez") ham endi
+orkestrator (`chat_service._send_via_orchestrator` → `run_deep_search(mode=
+"fast", orchestrate=True, context_mode="agent")`). Rejim — **qopqoq**, buyruq
+emas:
+
+| rejim | ruxsat etilgan eng qimmat qadam |
+|---|---|
+| `fast` | `search_server`, `agent_tools` |
+| `deep` | + `discover`, `scan_corpus` (≤`BUCKET_MAX_DEEP`=200) |
+| `exhaustive` | hammasi (skan tasdiq bilan) |
+
+**`agent_tools`.** Eski 19 tool'li agent sikli bitta karantin ko'nikma:
+`run_agent` o'zgarishsiz yuguradi (byudjetlar, kesh, takror-qo'riqchi,
+`no_progress`), tarix `history_msgs(ctx.history)`, narx `_MeterLLM` orqali.
+Yolg'iz qadam → javob yakuniy (`_finish_agent`, sintez yo'q, eski `fast`
+narxi); boshqa qadamlar bilan → javob da'volar blokiga (yagona evidence
+konverti). `tool` hodisasi reykda bitta `tools` bosqichi.
+
+**Kengaytma.** `skills.register_extra()` → `skills_ext.register(SKILLS)`;
+yadro ko'nikmalari himoyalangan, katalog planner promptiga import paytida
+kiradi.
+
 ## 8. Telegram qamrovi
 
 `allowlist.READ` ga **11 ta** metod qo'shiladi (hech biri destruktiv emas,
