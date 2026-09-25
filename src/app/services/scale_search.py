@@ -141,6 +141,11 @@ BUCKET_FALLBACK_CHATS_FULL = 200
 #: Nega: "bugun" degan savolda oylik bucket butun oyni tortardi va reja
 #: "1 hafta / 34 bo'lak" bo'lib ko'rinardi — savolda esa bir kun bor edi.
 SHORT_WINDOW_DAYS = 31
+#: Oyna shundan qisqa (va `SHORT_WINDOW_DAYS` dan uzun) bo'lsa grid
+#: **haftalik**: "bu yil" (≈268 kun) ≈ 38 hafta, oylik 9 bo'lak emas. Undan
+#: uzun yoki chegarasiz oyna — oylik (yillar bo'yi haftalik grid qopqoqqa
+#: sig'maydigan minglab mayda bo'lak berardi).
+WEEK_GRID_MAX_DAYS = 400
 PLAN_CHAT_BONUS = 0.10  # reja aniq nomlagan chat — ballga qo'shimcha
 FALLBACK_SCORE = 0.35  # (chat, oy) bucket'ining bazaviy bali
 
@@ -430,6 +435,24 @@ class Bucket:
 
 
 @dataclass(slots=True)
+class BucketSummary:
+    """`plan_buckets` ning **qopqoqdan oldingi** manzarasi — baho uchun.
+
+    Reja `BUCKET_MAX` bilan kesiladi; baho esa "400 / 12 062 bo'lak ·
+    38 hafta · 214 chat" deyishi kerak, "12 062 bo'lak · 0 hafta" emas.
+    """
+
+    grain: str = "month"  # day | week | month
+    total: int = 0  # oynadagi alohida (chat, davr) juftliklari
+    chats_total: int = 0
+    periods: int = 0  # alohida davrlar (kun/hafta/oy) — xabari borlari
+    planned: int = 0
+    planned_chats: int = 0
+    days: int = 0  # oyna uzunligi (kun)
+    weeks: int = 0
+
+
+@dataclass(slots=True)
 class Estimate:
     """Skan boshlanishidan **oldingi** baho — bucket sanog'i x k x narx jadvali."""
 
@@ -452,11 +475,26 @@ class Estimate:
     #: ilgari u `weeks <= 2` da har doim chiqardi va "bugun" degan savolga
     #: ham "oralig'ini ko'rsating" deb yozardi.
     window_from_question: bool = False
+    #: Qopqoqdan **oldingi** grid kattaligi: "400 / 12 062 bo'lak" — reja
+    #: qisqartirilganini yashirmaslik uchun. 0 — noma'lum (eski chaqiruvchi).
+    buckets_total: int = 0
+    #: Reja (qopqoqdan keyin) qamragan chatlar va oynadagi hamma chat.
+    chats: int = 0
+    chats_total: int = 0
+    #: Grid donadorligi: `day | week | month`. UI "K hafta" yoki "K kun" deydi.
+    grain: str = ""
+    #: Oyna uzunligi kunlarda (0 — noma'lum).
+    days: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "mode": self.mode,
             "buckets": self.buckets,
+            "buckets_total": max(self.buckets_total, self.buckets),
+            "chats": self.chats,
+            "chats_total": max(self.chats_total, self.chats),
+            "grain": self.grain,
+            "days": self.days,
             "est_messages": self.est_messages,
             "est_cost_usd": round(self.est_cost_usd, 4),
             "est_total_usd": round(self.est_total_usd, 4),
@@ -745,8 +783,19 @@ async def plan_buckets(
     chat_titles: dict[int, str] | None = None,
     limit: int = BUCKET_MAX,
     mode: str = "deep",
+    summary: BucketSummary | None = None,
 ) -> list[Bucket]:
     """Korpusni chat x ISO-hafta bo'laklariga bo'ladi va savolga yaqinligi bo'yicha tartiblaydi.
+
+    **Qopqoq griddan keyin** qo'yiladi: avval tugun + zaxira grid to'liq
+    quriladi, ball (tugun vektori) va teng ballda xabar soni bo'yicha
+    tartiblanadi, keyin eng yaxshi `limit` tasi qoladi. `summary` berilsa
+    qopqoqdan **oldingi** manzara (`BucketSummary`: jami (chat, davr)
+    juftliklari, chatlar, davrlar, oyna uzunligi, donadorlik) to'ldiriladi —
+    baho "400 / 12 062 bo'lak · 38 hafta" deya olsin.
+
+    Donadorlik oyna uzunligidan: ≤`SHORT_WINDOW_DAYS` — kun,
+    ≤`WEEK_GRID_MAX_DAYS` — ISO-hafta, undan uzun yoki chegarasiz — oy.
 
     Manba — `retrieval_nodes` (kun/hafta tugunlari): ular allaqachon
     embedding bilan, ya'ni "qaysi haftada shu mavzu gapirilgan" degan savolga
@@ -848,8 +897,8 @@ async def plan_buckets(
     # Qisqa oyna → **kunlik** grid: "bugun" degan savol chat boshiga bitta
     # kun bucket'i oladi, butun oy emas.
     span_days = (until - since).total_seconds() / 86400.0 if (since and until) else None
-    grain = "day" if span_days is not None and span_days <= SHORT_WINDOW_DAYS else "month"
-    _label = day_label if grain == "day" else month_label
+    grain = grid_grain(span_days)
+    _label = _LABELS[grain]
     covered: set[tuple[int, str]] = (
         set() if full_grid else {(b.chat_id, _label(b.since)) for b in by_key.values()}
     )
@@ -873,7 +922,28 @@ async def plan_buckets(
             bucket.score += PLAN_CHAT_BONUS
         if not bucket.chat_title:
             bucket.chat_title = titles.get(bucket.chat_id, "")
-    out.sort(key=lambda b: (-b.score, b.chat_id, b.label))
+    # Teng ballda (zaxira grid — hammasi `FALLBACK_SCORE`) ko'p xabarli
+    # bucket oldinda: qopqoq kesganda eng kam narsa yo'qolsin.
+    out.sort(key=lambda b: (-b.score, -b.est_messages, b.chat_id, b.label))
+    kept = out[:limit]
+    if summary is not None:
+        groups, chats_n, periods, first_at, last_at = await _grid_totals(
+            session, account_id, chats=chats, since=since, until=until, grain=grain
+        )
+        summary.grain = grain
+        summary.planned = len(kept)
+        summary.planned_chats = len({b.chat_id for b in kept})
+        summary.total = max(groups, len(out))
+        summary.chats_total = max(chats_n, len({b.chat_id for b in out}))
+        summary.periods = max(periods, len({b.label for b in out}))
+        lo = since or first_at or min((b.since for b in out), default=None)
+        hi = until or last_at or max((b.until for b in out), default=None)
+        summary.days = (
+            max(1, math.ceil((hi - lo).total_seconds() / 86400.0 - 1e-9))
+            if lo is not None and hi is not None and hi > lo
+            else 0
+        )
+        summary.weeks = math.ceil(summary.days / 7) if summary.days else 0
     log.debug(
         "scale.buckets",
         account_id=account_id,
@@ -884,9 +954,77 @@ async def plan_buckets(
         node=sum(1 for b in out if b.source == "node"),
         grid=sum(1 for b in out if b.source != "node"),
         grain=grain,
-        kept=min(len(out), limit),
+        kept=len(kept),
+        total=len(out),
     )
-    return out[:limit]
+    return kept
+
+
+def grid_grain(span_days: float | None) -> str:
+    """Zaxira grid donadorligi oyna uzunligidan (`None` — chegarasiz oyna)."""
+    if span_days is None:
+        return "month"
+    if span_days <= SHORT_WINDOW_DAYS:
+        return "day"
+    if span_days <= WEEK_GRID_MAX_DAYS:
+        return "week"
+    return "month"
+
+
+_LABELS = {"day": day_label, "week": iso_label, "month": month_label}
+
+
+async def _grid_totals(
+    session: AsyncSession,
+    account_id: int,
+    *,
+    chats: list[int] | None,
+    since: datetime | None,
+    until: datetime | None,
+    grain: str,
+) -> tuple[int, int, int, datetime | None, datetime | None]:
+    """Oynadagi `(chat, davr)` juftliklari, chatlar, davrlar, birinchi/oxirgi xabar.
+
+    Qopqoqdan oldingi **haqiqiy** grid kattaligi — baho shuni aytadi. Bitta
+    agregat so'rov; xato bo'lsa `(0, 0, 0, None, None)` va chaqiruvchi grid
+    ro'yxatidan pastki chegara oladi.
+    """
+    conds: list[Any] = [Chat.account_id == account_id, *S._alive()]
+    if chats:
+        conds.append(Message.chat_id.in_(list(chats)))
+    if since is not None:
+        conds.append(Message.published_at >= since)
+    if until is not None:
+        conds.append(Message.published_at < until)
+    period = func.date_trunc(grain, Message.published_at).label("p")
+    grouped = (
+        select(
+            Message.chat_id.label("c"),
+            period,
+            func.min(Message.published_at).label("lo"),
+            func.max(Message.published_at).label("hi"),
+        )
+        .join(Chat, Chat.id == Message.chat_id)
+        .where(*conds)
+        .group_by(Message.chat_id, period)
+        .subquery("grid")
+    )
+    stmt = select(
+        func.count().label("grid_groups"),
+        func.count(func.distinct(grouped.c.c)),
+        func.count(func.distinct(grouped.c.p)),
+        func.min(grouped.c.lo),
+        func.max(grouped.c.hi),
+    )
+    try:
+        row = tuple((await session.execute(stmt)).one())
+        groups, chats_n, periods = (_as_int(row[i]) or 0 for i in range(3))
+        lo = row[3] if isinstance(row[3], datetime) else None
+        hi = row[4] if isinstance(row[4], datetime) else None
+    except Exception as exc:  # baho uchun — yo'q bo'lsa grid ro'yxati pastki chegara
+        log.warning("scale.grid_totals_failed", error=str(exc)[:200])
+        return 0, 0, 0, None, None
+    return groups, chats_n, periods, lo, hi
 
 
 async def _month_buckets(
@@ -907,9 +1045,11 @@ async def _month_buckets(
     degan savolga oylik bucket bermaslik uchun (u butun oyni tortardi va
     reja "1 hafta" bo'lib ko'rinardi).
 
-    Nega oy, hafta emas: tugun yo'q degani odatda chat kichik yoki yangi
-    sinxronlangan. Hafta darajasida bo'lish ularni yuzlab bo'sh bucket'ga
-    aylantirardi va `BUCKET_MAX` ni haqiqiy nomzodsiz to'ldirardi.
+    `grain="week"` — oyna `WEEK_GRID_MAX_DAYS` gacha ("bu yil"): oylik 9
+    bo'lak "0 hafta" bo'lib ko'rinardi. Bo'sh hafta bucket'i tug'ilmaydi
+    (`GROUP BY` faqat xabari bor juftliklarni beradi), qopqoq esa
+    `plan_buckets` da xabar soni bo'yicha qo'yiladi. Chegarasiz / juda uzun
+    oynada — oy: yillar bo'yi hafta gridi minglab mayda bo'lak berardi.
 
     `exclude` — **(chat_id, "YYYY-MM")** juftliklari, ya'ni tugun bucket'i
     bor oy. Chatning bitta oyida tugun bo'lgani qolgan oylarni zaxiradan
@@ -923,7 +1063,8 @@ async def _month_buckets(
     if until is not None:
         conds.append(Message.published_at < until)
 
-    month = func.date_trunc("day" if grain == "day" else "month", Message.published_at).label("m")
+    trunc = grain if grain in ("day", "week") else "month"
+    month = func.date_trunc(trunc, Message.published_at).label("m")
     stmt = (
         select(Message.chat_id, month, func.count().label("n"))
         .join(Chat, Chat.id == Message.chat_id)
@@ -940,7 +1081,7 @@ async def _month_buckets(
 
     out: list[Bucket] = []
     seen_chats: set[int] = set()
-    label_of = day_label if grain == "day" else month_label
+    label_of = _LABELS.get(grain, month_label)
     for chat_id, start, n in rows:
         cid = int(chat_id)
         when = start if start.tzinfo else start.replace(tzinfo=UTC)
@@ -949,7 +1090,12 @@ async def _month_buckets(
         if cid not in seen_chats and len(seen_chats) >= limit:
             continue
         seen_chats.add(cid)
-        end = when + timedelta(days=1) if grain == "day" else _next_month(when)
+        if grain == "day":
+            end = when + timedelta(days=1)
+        elif grain == "week":
+            end = when + timedelta(days=7)
+        else:
+            end = _next_month(when)
         b_since, b_until = _clamp(when, end, since, until)
         out.append(
             Bucket(
@@ -978,10 +1124,18 @@ class PullSpec:
     ru_terms: list[str] = field(default_factory=list)
     qvec: list[float] | None = None
     k: int = PER_BUCKET_K
+    #: `plan.direction == "out"` — faqat mening xabarlarim (`messages.out`).
+    #: Mavzu skanida boshqa yo'nalishlar filtrlanmaydi (`deep_search`).
+    out_only: bool = False
 
 
 def build_pull_spec(
-    account_id: int, *, question: str, subqueries: Sequence[str], qvec: Sequence[float] | None
+    account_id: int,
+    *,
+    question: str,
+    subqueries: Sequence[str],
+    qvec: Sequence[float] | None,
+    direction: str = "",
 ) -> PullSpec:
     """Savol + subquery'lardan leksik atamalar (kanal boshiga bir marta)."""
     terms: list[str] = []
@@ -995,6 +1149,7 @@ def build_pull_spec(
         uz_terms=terms[:16],
         ru_terms=ru[:16],
         qvec=list(qvec) if qvec else None,
+        out_only=direction == "out",
     )
 
 
@@ -1006,6 +1161,8 @@ async def pull_bucket(session: AsyncSession, bucket: Bucket, spec: PullSpec) -> 
     ikki marta sanardi.
     """
     conds = S._scope(spec.account_id, [bucket.chat_id], bucket.since, bucket.until)
+    if spec.out_only:
+        conds.append(Message.out.is_(True))
     wide = spec.k * 2
 
     uz: list[S.Hit] = []
@@ -1939,8 +2096,14 @@ def estimate(
     prices: dict[str, tuple[float, float]] | None = None,
     follow_up: str = "none",
     window_from_question: bool = False,
+    summary: BucketSummary | None = None,
 ) -> Estimate:
     """Skan narxining **oldindan** bahosi: bucket sanog'i x k x narx jadvali.
+
+    `summary` (`plan_buckets` to'ldiradi) bo'lsa baho qopqoqdan oldingi
+    grid kattaligini (`buckets_total`), chatlarni va oyna uzunligini
+    (`weeks`/`days`, donadorlik `grain`) **halol** aytadi. Bo'lmasa (eski
+    chaqiruvchi) — rejadagi bucket'lardan hisoblanadi.
 
     Hech bir LLM chaqirilmaydi — shuning uchun `exhaustive` uchun
     foydalanuvchidan tasdiq so'rash mumkin (`confirm`) va u tasdiq
@@ -2036,6 +2199,24 @@ def estimate(
         "synth": round(cost("synth", synth_in, synth_out), 6),
     }
     scan = breakdown["filter"] + breakdown["map"] + breakdown["reduce"]
+    range_from = min((b.since for b in buckets), default=None)
+    range_to = max((b.until for b in buckets), default=None)
+    planned_chats = len({b.chat_id for b in buckets})
+    if summary is not None and summary.planned and planned:
+        weeks, days, grain = summary.weeks, summary.days, summary.grain
+        total, chats_total = summary.total, summary.chats_total
+    else:
+        # Eski yo'l: yorliqlar soni (hafta tugunlari uchun = haftalar).
+        weeks = len({b.label for b in buckets})
+        days = (
+            max(1, math.ceil((range_to - range_from).total_seconds() / 86400.0 - 1e-9))
+            if range_from is not None and range_to is not None and range_to > range_from
+            else 0
+        )
+        sources = {b.source for b in buckets}
+        grain = "day" if sources == {"day"} else ("month" if sources == {"month"} else "week")
+        grain = grain if planned else ""
+        total, chats_total = planned, planned_chats
     return Estimate(
         mode=mode,
         buckets=planned,
@@ -2043,11 +2224,16 @@ def estimate(
         est_cost_usd=round(scan, 6),
         est_total_usd=round(scan + breakdown["synth"], 6),
         ceiling_usd=COST_CEILING.get(mode, COST_CEILING["deep"]),
-        weeks=len({b.label for b in buckets}),
+        weeks=weeks,
         window_from_question=window_from_question,
-        range_from=min((b.since for b in buckets), default=None),
-        range_to=max((b.until for b in buckets), default=None),
+        range_from=range_from,
+        range_to=range_to,
         breakdown=breakdown,
+        buckets_total=max(total, planned),
+        chats=planned_chats,
+        chats_total=max(chats_total, planned_chats),
+        grain=grain,
+        days=days,
     )
 
 
@@ -2103,6 +2289,7 @@ async def run_scale(
     # oyna va filtr qopqog'i uchalasi ham ko'tariladi (`bucket_max_for`).
     follow_up = getattr(plan, "intent_follow_up", "none")
     vectors = await query_vectors(meter, question=question, subqueries=plan.subqueries)
+    summary = BucketSummary()
     async with session_factory() as session:
         buckets = await plan_buckets(
             session,
@@ -2112,6 +2299,7 @@ async def run_scale(
             chat_titles=chat_titles,
             limit=bucket_max_for(mode, follow_up),
             mode=mode,
+            summary=summary,
         )
     outcome.buckets = buckets
     stats.buckets_planned = len(buckets)
@@ -2121,6 +2309,7 @@ async def run_scale(
         mode=mode,
         follow_up=follow_up,
         window_from_question=plan.window_from_question,
+        summary=summary,
     )
     outcome.estimate = est
     stats.est_cost_usd = est.est_cost_usd
@@ -2135,7 +2324,11 @@ async def run_scale(
         "buckets",
         planned=len(buckets),
         chats=len({b.chat_id for b in buckets}),
-        weeks=len({b.label for b in buckets}),
+        weeks=est.weeks,
+        days=est.days,
+        grain=est.grain,
+        total=est.buckets_total,
+        chats_total=est.chats_total,
         range={
             "from": min(b.since for b in buckets).isoformat(),
             "to": max(b.until for b in buckets).isoformat(),
@@ -2154,6 +2347,7 @@ async def run_scale(
         question=question,
         subqueries=plan.subqueries,
         qvec=vectors[0] if vectors else None,
+        direction=getattr(plan, "direction", ""),
     )
     pull_budget = pull_budget_for(budget.left_s())
     pool, bucket_of, scanned = await pull_candidates(
@@ -2313,7 +2507,9 @@ __all__ = [
     "STOP_RANK",
     "STOP_REASONS",
     "TRUNCATING_STOPS",
+    "WEEK_GRID_MAX_DAYS",
     "Bucket",
+    "BucketSummary",
     "Claim",
     "Estimate",
     "PullSpec",
@@ -2340,6 +2536,7 @@ __all__ = [
     "filter_line",
     "filter_max_for",
     "force_all_chats",
+    "grid_grain",
     "is_truncating",
     "iso_label",
     "map_chunks",

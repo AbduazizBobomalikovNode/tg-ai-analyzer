@@ -1128,8 +1128,17 @@ async def test_scale_run_emits_events_in_order(wired: dict[str, Any]) -> None:
         "retrieval_kind",
         "window_from_question",
         "range",
+        # Qopqoqdan oldingi grid va donadorlik — "400 / 12 062 bo'lak · 38
+        # hafta", "12 062 bo'lak · 0 hafta" emas.
+        "buckets_total",
+        "chats",
+        "chats_total",
+        "grain",
+        "days",
     }
     assert estimate.data["weeks"] >= 1
+    assert estimate.data["buckets_total"] >= estimate.data["buckets"]
+    assert estimate.data["chats"] >= 1
     assert estimate.data["range"]["from"] and estimate.data["range"]["to"]
     coverage = next(e for e in events if e.kind == "coverage")
     for key in ("buckets_scanned", "buckets_planned", "filtered", "kept", "stopped_by"):
@@ -1411,13 +1420,14 @@ async def test_one_node_week_does_not_hide_the_rest_of_the_chat() -> None:
     Chat 3810 da ~174k xabar bor edi, tugun esa faqat 2026-09-16/17 da.
     `covered` chat darajasida hisoblangani uchun zaxira `(chat, oy)` yo'li
     butun chatni chetlab o'tardi va reja bitta bucket / 28 xabar bilan
-    yugurdi. Endi faqat **tugun turgan oy** chiqariladi.
+    yugurdi. Endi faqat **tugun turgan davr** chiqariladi (uch oylik oyna
+    — haftalik grid, `WEEK_GRID_MAX_DAYS`).
     """
-    week = datetime(2026, 9, 14, tzinfo=UTC)  # 2026-09 — tugun shu oyda
-    months = [datetime(2026, m, 1, tzinfo=UTC) for m in (7, 8, 9)]
+    week = datetime(2026, 9, 14, tzinfo=UTC)  # 2026-W38 — tugun shu haftada
+    weeks = [datetime(2026, 7, 6, tzinfo=UTC), datetime(2026, 8, 3, tzinfo=UTC), week]
     handler = _node_month_handler(
         node_rows=[(3810, week, 28, 0.3)],
-        month_rows=[(3810, m, 58_000) for m in months],
+        month_rows=[(3810, w, 13_000) for w in weeks],
     )
     buckets = await SC.plan_buckets(
         FakeSession(handler),  # type: ignore[arg-type]
@@ -1436,10 +1446,10 @@ async def test_one_node_week_does_not_hide_the_rest_of_the_chat() -> None:
     assert len(buckets) >= 3, [b.to_dict() for b in buckets]
     labels = {b.label for b in buckets}
     assert SC.iso_label(week) in labels  # tugun bucket'i saqlandi
-    # Tugun turgan oy ikkinchi marta qo'shilmadi, qolgan ikki oy qo'shildi.
-    assert {"2026-07", "2026-08"} <= labels
-    assert "2026-09" not in labels
-    assert sum(1 for b in buckets if b.source == "month") == 2
+    # Tugun turgan hafta ikkinchi marta qo'shilmadi, qolgan ikki hafta qo'shildi.
+    assert {"2026-W28", "2026-W32"} <= labels
+    assert sum(1 for b in buckets if b.label == SC.iso_label(week)) == 1
+    assert sum(1 for b in buckets if b.source == "week") == 2
 
 
 @pytest.mark.asyncio
@@ -1802,3 +1812,152 @@ async def test_filter_cap_is_wider_for_a_deeper_turn(monkeypatch: pytest.MonkeyP
     assert base.filter_total == 20
     assert wide.filter_total == 30  # 20 x `DEEPER_FILTER_BOOST`
     assert wide.filter_total > base.filter_total
+
+
+# ─── grid: qopqoq griddan keyin, halol hafta/kun/chat sanog'i ────────────────
+
+
+def _grid_handler(rows: list[Any], totals: tuple[int, int, int, Any, Any]) -> Any:
+    def handler(sql: str) -> list[Any]:
+        if "set_config" in sql:
+            return []
+        if "grid_groups" in sql:
+            return [totals]
+        if "date_trunc" in sql:
+            return list(rows)
+        return []  # tugun yo'q (prod'dagi holat)
+
+    return handler
+
+
+class _OneRows(_Rows):
+    def one(self) -> Any:
+        return self._rows[0]
+
+
+class GridSession(FakeSession):
+    async def execute(self, stmt: Any, *a: Any, **kw: Any) -> Any:
+        sql = str(stmt)
+        self.seen.append(sql)
+        return _OneRows(list(self.handler(sql) if self.handler else []))
+
+
+@pytest.mark.asyncio
+async def test_nine_month_window_plans_capped_week_buckets_with_honest_counts() -> None:
+    """Jonli regressiya: "bu yil" → "12 062 bo'lak · 0 hafta · 0 chat".
+
+    268 kunlik oyna **haftalik** grid oladi, qopqoq (`exhaustive` 400) grid
+    qurilgandan keyin qo'yiladi (teng ballda ko'p xabarli bucket oldinda),
+    baho esa qopqoqdan oldingi 12 062 ni, ≈38 haftani va chatlarni aytadi.
+    """
+    since = datetime(2025, 12, 31, 19, tzinfo=UTC)  # 1-yan Toshkent
+    until = datetime(2026, 9, 25, 9, tzinfo=UTC)
+    first_monday = datetime(2025, 12, 29, tzinfo=UTC)
+    rows = [
+        (cid, first_monday + timedelta(days=7 * w), 10 + cid * 3 + w)
+        for cid in range(1, 41)
+        for w in range(39)
+    ]
+    totals = (12_062, 214, 39, since + timedelta(hours=1), until - timedelta(hours=1))
+    summary = SC.BucketSummary()
+    buckets = await SC.plan_buckets(
+        GridSession(_grid_handler(rows, totals)),  # type: ignore[arg-type]
+        1,
+        plan=DS.DeepPlan(subqueries=["a"], since=since, until=until),
+        vectors=[],
+        limit=SC.bucket_max_for("exhaustive"),
+        mode="exhaustive",
+        summary=summary,
+    )
+    assert len(buckets) == SC.BUCKET_MAX == 400
+    assert {b.source for b in buckets} == {"week"}
+    assert all(b.label.startswith(("2025-W", "2026-W")) for b in buckets)
+    # Teng ballda ko'p xabarli bucket'lar qoldi (qopqoq eng kamini kesdi).
+    kept_min = min(b.est_messages for b in buckets)
+    assert kept_min >= sorted((r[2] for r in rows), reverse=True)[399]
+    for b in buckets:
+        assert b.since >= since and b.until <= until
+
+    assert summary.grain == "week"
+    assert summary.total == 12_062
+    assert summary.planned == 400
+    assert summary.chats_total == 214
+    assert summary.planned_chats > 0
+    assert 37 <= summary.weeks <= 39
+    assert summary.days == 268
+
+    est = SC.estimate(buckets, mode="exhaustive", summary=summary, window_from_question=True)
+    data = est.to_dict()
+    assert data["buckets"] == 400 and data["buckets_total"] == 12_062
+    assert 37 <= data["weeks"] <= 39
+    assert data["chats"] > 0 and data["chats_total"] == 214
+    assert data["grain"] == "week"
+
+
+@pytest.mark.asyncio
+async def test_three_day_window_plans_day_buckets_and_respects_the_cap() -> None:
+    until = datetime(2026, 9, 25, 9, tzinfo=UTC)
+    since = until - timedelta(days=3)
+    days = [datetime(2026, 9, d, tzinfo=UTC) for d in (22, 23, 24)]
+    rows = [(cid, d, 5 + cid) for cid in range(1, 6) for d in days]
+    totals = (15, 5, 3, since, until)
+    summary = SC.BucketSummary()
+    buckets = await SC.plan_buckets(
+        GridSession(_grid_handler(rows, totals)),  # type: ignore[arg-type]
+        1,
+        plan=DS.DeepPlan(subqueries=["a"], since=since, until=until),
+        vectors=[],
+        limit=10,
+        mode="exhaustive",
+        summary=summary,
+    )
+    assert len(buckets) == 10
+    assert {b.source for b in buckets} == {"day"}
+    assert summary.grain == "day" and summary.days == 3
+    assert summary.total == 15 and summary.planned == 10
+    est = SC.estimate(buckets, mode="exhaustive", summary=summary)
+    assert est.days == 3 and est.grain == "day"
+    assert est.to_dict()["buckets_total"] == 15
+
+
+def test_grid_grain_follows_the_window_length() -> None:
+    assert SC.grid_grain(1) == "day"
+    assert SC.grid_grain(SC.SHORT_WINDOW_DAYS) == "day"
+    assert SC.grid_grain(268) == "week"
+    assert SC.grid_grain(SC.WEEK_GRID_MAX_DAYS) == "week"
+    assert SC.grid_grain(SC.WEEK_GRID_MAX_DAYS + 1) == "month"
+    assert SC.grid_grain(None) == "month"  # chegarasiz oyna
+
+
+def test_estimate_without_summary_keeps_the_old_contract() -> None:
+    est = SC.estimate(_buckets(12), mode="exhaustive")
+    data = est.to_dict()
+    assert data["weeks"] == 12
+    assert data["buckets_total"] == 12
+    assert data["chats"] >= 1
+    assert data["days"] > 0
+
+
+@pytest.mark.asyncio
+async def test_outbound_topic_pull_filters_to_my_messages() -> None:
+    """ "Bu yil ijara haqida kimga yozganman" — mavzu skani, lekin faqat `out`."""
+    spec = SC.build_pull_spec(1, question="ijara", subqueries=["ijara"], qvec=None, direction="out")
+    assert spec.out_only is True
+    assert SC.build_pull_spec(1, question="ijara", subqueries=[], qvec=None).out_only is False
+    seen: list[str] = []
+
+    def handler(sql: str) -> list[Any]:
+        seen.append(sql)
+        return []
+
+    bucket = SC.Bucket(
+        chat_id=1,
+        chat_title="A",
+        since=datetime(2026, 1, 5, tzinfo=UTC),
+        until=datetime(2026, 1, 12, tzinfo=UTC),
+        label="2026-W02",
+    )
+    await SC.pull_bucket(FakeSession(handler), bucket, spec)  # type: ignore[arg-type]
+    queried = [s for s in seen if "set_config" not in s]
+    assert queried
+    assert all("messages.out IS true" in s for s in queried)

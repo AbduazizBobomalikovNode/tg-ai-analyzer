@@ -294,6 +294,12 @@ qamrov va sitata validatsiyasi — o'sha (`deep_search.py`).
 - **Oynasiz `exhaustive` butun sinxronlangan oraliqni rejalashtiradi**: tugun
   bucket'lari + **hamma** nishon chat uchun `(chat, oy)` gridi. Tugunlar faqat
   oxirgi haftalarda bo'lsa reja 5-7 bucket / 1 hafta bilan chegaralanardi.
+- **`plan_buckets`: grid avval, qopqoq keyin.** Donadorlik oynadan
+  (`grid_grain`): ≤31 kun — kun, ≤`WEEK_GRID_MAX_DAYS` (400) — ISO-hafta,
+  undan uzun/chegarasiz — oy. Teng ballda ko'p xabarli bucket oldinda,
+  `BucketSummary` qopqoqdan oldingi jami (`buckets_total`), chatlar va
+  `weeks`/`days` ni bahoga beradi — UI "400 / 12 062 bo'lak · 38 hafta"
+  deydi, hech qachon "0 hafta" emas.
 - **Kaskadda ikkinchi raund yo'q** (`reflect` chaqirilmaydi): bucket fazosi
   allaqachon aylanib chiqilgan, "boshqa so'z bilan qidir" u yerda qamrov
   emas, faqat narx qo'shadi.
