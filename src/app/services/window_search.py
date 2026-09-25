@@ -30,8 +30,9 @@ Shuning uchun bu yo'l:
   `messages.out = false` **va** (chat shaxsiy **yoki** xabar mening
   xabarimga javob). `@username` eslatmalari saqlanmaydi, shuning uchun ular
   qamrovga kirmaydi — buni UI ham, qamrov ham yashirmaydi.
-* Map bo'laklari **chat bo'yicha to'planadi** (bir bo'lakda bir nechta butun
-  chat, har biri o'z `### chat` sarlavhasi bilan, ≤80 satr): ilgari bo'lak =
+* Map bo'laklari **chat bo'yicha to'planadi** (chatlar ketma-ket tiziladi va
+  80 satrlik bo'laklarga kesiladi, har chat o'z `### chat` sarlavhasi bilan):
+  ilgari bo'lak =
   (chat, yuboruvchi) edi va 16 bo'lak qopqog'i eng katta 16 guruhdan
   tashqarisini map'ga umuman yetkazmasdi. Yuboruvchi har satrda turadi.
 
@@ -1134,7 +1135,12 @@ async def run_window(
     # Sanoqlar kodda: "qaysi chatlar eng faol edi" javobi `count(*)` dan
     # keladi, model ko'rgan satrlardan emas.
     outcome.window_stats = render_window_stats(
-        count, titles=titles, evidence=evidence, taken=len(evidence), sampled=sampled
+        count,
+        titles=titles,
+        evidence=evidence,
+        taken=len(evidence),
+        sampled=sampled,
+        spec=spec,
     )
     if budget.stop_reason():
         stats.note_stop("map", budget.stop_reason())

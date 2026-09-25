@@ -1354,6 +1354,9 @@ async def test_topicless_big_window_is_sampled_not_truncated() -> None:
     assert len({h.chat_id for h in outcome.evidence[:150]}) == 12
     assert "per-chat sample" in outcome.window_stats
     assert "messages in window: 12461" in outcome.window_stats
+    # oyna sanoq blokiga ham tushadi (ilgari spec berilmay "butun davr" chiqardi)
+    assert "period: butun davr" not in outcome.window_stats
+    assert "period: 2026-09-2" in outcome.window_stats
 
 
 def test_sampled_window_coverage_line() -> None:
@@ -1386,3 +1389,31 @@ def test_window_estimate_follows_the_map_and_synth_caps() -> None:
     assert big.est_total_usd == mid.est_total_usd
     # deep rejimda karta shu chegaradan oshganda ko'rinadi (deep.js)
     assert big.est_total_usd > WS.WINDOW_CONFIRM_MIN_USD
+
+
+def test_window_coverage_never_claims_a_ranking_cut() -> None:
+    """Jonli conv 287: namuna "reyting bilan tashlandi (400/12461)" deb izohlandi."""
+    cov = DS.build_coverage(
+        scanned_hits=[],
+        messages_scanned=0,
+        chats_total=221,
+        searched_chats=[],
+        evidence=[],
+        clusters=[],
+        rounds=1,
+        truncated=False,
+        marginal_stop=False,
+        scan={"pulled": 12_461, "elbow": 400, "kept": 400, "stopped_by": "complete"},
+        window={
+            "retrieval_kind": "window",
+            "since": _local(2026, 9, 21),
+            "until": NOW,
+            "tz": TZ,
+            "total": 12_461,
+            "taken": 400,
+            "chats": 80,
+            "sampled": True,
+        },
+    )
+    assert cov.dropped_by_ranking == 0
+    assert DS.coverage_disclosure(cov, DS._COVERAGE_LABELS["uz"]) == ""

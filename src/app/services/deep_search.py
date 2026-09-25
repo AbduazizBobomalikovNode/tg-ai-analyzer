@@ -3148,6 +3148,11 @@ def build_coverage(
         cov.kept = cov.window_taken
         cov.dropped_duplicates = int(window.get("dropped_duplicates") or 0)
         cov.window_sampled = bool(window.get("sampled"))
+        # Oyna yo'lida reyting (tirsak) yo'q: nechtasi o'qilgani oyna qatorida
+        # aytiladi. Aks holda namuna "ahamiyati past nomzodlar reyting bilan
+        # tashlandi (400/12461)" deb yolg'on izohlanardi (jonli conv 287).
+        cov.ranked = 0
+        cov.dropped_by_ranking = 0
     cov.confidence = confidence_of(
         evidence=len(evidence),
         clusters=len(clusters),
