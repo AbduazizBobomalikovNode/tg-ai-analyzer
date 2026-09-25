@@ -69,6 +69,17 @@ faylida shu servis uchun `env_file: !override [boshqa/.env]` bilan yo'lni
 almashtiring va nomlar to'qnashmasin uchun `volumes`/`ports`ni ham alohida
 belgilang (masalan boshqa host port va boshqa named volume).
 
+## Dockerfile qatlamlari
+
+`Dockerfile` bog'liqliklarni (`pip install -e .`, ~170 MB — `lingua` eng
+kattasi) `src` dan **oldin** o'rnatadi: `pyproject.toml` + soxta
+`src/app/__init__.py` bilan (hatchling editable qurilishga paket katalogi
+borligini talab qiladi). Shu tufayli faqat `src` o'zgarganda bu qatlam
+Docker keshidan **CACHED** qaytadi va qayta build ~1 daqiqadan tez bo'ladi;
+bog'liqlik ro'yxati (`pyproject.toml`) o'zgarsa hammasi qayta o'rnatiladi.
+`COPY src ./src` dan keyingi `pip install --no-deps -e .` faqat editable
+yozuvni haqiqiy manbaga yangilaydi — bog'liqlik qayta yechilmaydi.
+
 ## Ma'lum cheklovlar
 `api` va `worker` bir xil session'ni ishlatadi (bir host/egress IP'da muammo yo'q);
 `AuthKeyDuplicatedError` ko'rsangiz api'dagi jonli o'qishni DB'ga ko'chiring.

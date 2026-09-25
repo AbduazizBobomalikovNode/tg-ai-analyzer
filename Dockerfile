@@ -10,9 +10,23 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential libpq5 \
     && rm -rf /var/lib/apt/lists/*
 
+# Dependency layer, cached across `src` changes. `pip install -e .` only
+# needs `pyproject.toml` to resolve/install the ~170 MB of third-party deps
+# (lingua is the big one); hatchling's editable backend still needs the
+# `src/app` package directory to *exist* to build the editable redirect, so
+# a stub `__init__.py` stands in for the real source at this layer. Docker
+# only invalidates a layer when the files it COPYs change, so this RUN stays
+# CACHED for any `src`-only change — see docs/deployment.md.
 COPY pyproject.toml README.md ./
+RUN mkdir -p src/app && touch src/app/__init__.py \
+    && pip install --upgrade pip && pip install -e .
+
+# Real source, its own layer: replaces the stub. The editable install above
+# already points here, but the deps are not re-resolved (`--no-deps`) — this
+# rerun is just cheap bookkeeping (regenerates the editable redirect/metadata
+# for whatever files actually exist now), not a dependency install.
 COPY src ./src
-RUN pip install --upgrade pip && pip install -e .
+RUN pip install --no-deps -e .
 
 COPY alembic.ini ./
 COPY migrations ./migrations
