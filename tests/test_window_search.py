@@ -8,7 +8,7 @@ Qo'riqlanadigan narsalar:
     nima deyishdi" → `topic` (oynasi bir kun bo'lsa ham);
   * **oyna quvuri** — `inbox` filtri SQL'da, ≤1000 xabar to'liq olinadi,
     ko'pi `(chat, kun)` kvotasi bilan kesiladi va bu qamrovda **aytiladi**;
-  * **guruhlash yuboruvchi bo'yicha** (map bo'laklari);
+  * **map bo'laklari** chatlar bo'yicha to'planadi, mavzusiz katta oyna — chat bo'yicha namuna;
   * **`exhaustive`** arzon oynada tasdiqsiz yuguradi;
   * **regressiya** — mavzu savoli o'zgarmaydi.
 
@@ -489,32 +489,54 @@ async def test_expensive_exhaustive_window_still_asks() -> None:
     assert llm.systems == []  # hech bir LLM chaqirilmadi
 
 
-# ─── (6) yuboruvchi bo'yicha guruhlash ───────────────────────────────────────
+# ─── (6) map bo'laklari: chatlar to'planadi ──────────────────────────────────
 
 
-def test_window_chunks_group_by_sender_inside_a_chat() -> None:
-    hits = []
-    for i in range(1, 41):
-        sender = "Nurbek" if i % 2 else "Aziz"
-        hits.append(
-            SimpleNamespace(
-                message_id=i,
-                tg_msg_id=1000 + i,
-                chat_id=1,
-                chat_title="Ish",
-                sender=sender,
-                date=datetime(2026, 9, 24, i % 24, tzinfo=UTC),
-                text="salom",
-                score=1.0,
-            )
-        )
+def _ns_hit(i: int, chat_id: int, sender: str = "Nurbek") -> Any:
+    return SimpleNamespace(
+        message_id=i,
+        tg_msg_id=1000 + i,
+        chat_id=chat_id,
+        chat_title=f"Chat {chat_id}",
+        sender=sender,
+        date=datetime(2026, 9, 24, i % 24, i % 60, tzinfo=UTC),
+        text="salom",
+        score=1.0,
+    )
+
+
+def test_window_chunks_keep_one_chat_together_in_time_order() -> None:
+    hits = [_ns_hit(i, 1, "Nurbek" if i % 2 else "Aziz") for i in range(1, 41)]
     chunks = WS.window_chunks(hits)  # type: ignore[arg-type]
-    assert len(chunks) == 2
-    for chunk in chunks:
-        assert len({h.sender for h in chunk}) == 1
-        # bo'lak ichida vaqt bo'yicha tartib
-        dates = [h.date for h in chunk]
-        assert dates == sorted(dates)
+    # Ilgari (chat, yuboruvchi) = 2 bo'lak; endi bitta chat — bitta bo'lak,
+    # yuboruvchi esa har satrda (build_map_envelope).
+    assert len(chunks) == 1 and len(chunks[0]) == 40
+    dates = [h.date for h in chunks[0]]
+    assert dates == sorted(dates)
+
+
+def test_window_chunks_pack_small_chats_and_cap_the_map_input() -> None:
+    # 60 ta chat x 10 xabar = 600: (chat, yuboruvchi) bo'yicha bu 60 bo'lak
+    # bo'lardi va 16 tasidan keyingisi map'ga umuman yetmasdi.
+    hits = [_ns_hit(c * 100 + i, c) for c in range(1, 61) for i in range(10)]
+    chunks = WS.window_chunks(hits)  # type: ignore[arg-type]
+    total = sum(len(c) for c in chunks)
+    assert total == WS.WINDOW_MAP_MAX_MSGS
+    assert len(chunks) == WS.WINDOW_MAP_MAX_MSGS // WS.WINDOW_CHUNK_MSGS
+    assert all(len(c) <= WS.WINDOW_CHUNK_MSGS for c in chunks)
+    for chunk in chunks:  # chat satrlari bo'lak ichida ketma-ket
+        chats = [h.chat_id for h in chunk]
+        runs = [c for i, c in enumerate(chats) if i == 0 or chats[i - 1] != c]
+        assert len(runs) == len(set(runs))
+    env, allowed = SC.build_map_envelope("q", chunks[0])  # type: ignore[arg-type]
+    assert env.count("\n### Chat ") == len({h.chat_id for h in chunks[0]})
+    assert len(allowed) == len(chunks[0])
+
+
+def test_window_chunks_split_a_big_chat() -> None:
+    hits = [_ns_hit(i, 7) for i in range(1, 201)]
+    chunks = WS.window_chunks(hits)  # type: ignore[arg-type]
+    assert [len(c) for c in chunks] == [80, 80, 40]
 
 
 def test_window_chunks_skip_tiny_evidence() -> None:
@@ -1245,3 +1267,122 @@ async def test_window_run_dedups_before_map_and_reports_it_in_coverage() -> None
     assert cov.dropped_duplicates == 32
     assert cov.to_dict()["window"]["dropped_duplicates"] == 32
     assert cov.window_taken == cov.window_total  # takrorlar ham "ko'rildi"
+
+
+# ─── mavzusiz dayjest: chat bo'yicha namuna (jonli conv 285) ──────────────────
+
+
+def test_stratified_quotas_are_proportional_and_bounded() -> None:
+    # conv 285 ga o'xshash: bitta ulkan chat, bir nechta o'rta, ko'p kichik
+    per_chat = [(1, 6_000), (2, 2_500), (3, 1_200), (4, 900)]
+    per_chat += [(10 + i, 40) for i in range(40)] + [(100, 3)]
+    q = WS.stratified_quotas(per_chat, 400)
+    assert sum(q.values()) == 400
+    assert q[1] == WS.WINDOW_SAMPLE_MAX_PER_CHAT  # gapiradigan chat qopqoqda
+    assert q[100] == 3  # 3 ta xabarli chat — hammasi (min 5 dan kam)
+    assert all(v >= min(5, dict(per_chat)[c]) for c, v in q.items())
+    assert all(v <= WS.WINDOW_SAMPLE_MAX_PER_CHAT for v in q.values())
+    assert q[1] >= q[2] >= q[3] >= q[4] >= q[10]  # hajmga mutanosib
+    assert WS.stratified_quotas(per_chat, 400) == q  # deterministik
+
+
+def test_stratified_quotas_small_window_takes_everything() -> None:
+    assert WS.stratified_quotas([(1, 10), (2, 3)], 400) == {1: 10, 2: 3}
+    assert WS.stratified_quotas([], 400) == {}
+
+
+def test_stratified_quotas_with_too_many_chats_keeps_the_biggest() -> None:
+    per_chat = [(i, 1_000 - i) for i in range(1, 201)]
+    q = WS.stratified_quotas(per_chat, 400)
+    assert sum(q.values()) == 400 and len(q) == 80  # 80 x min 5
+    assert set(q) == set(range(1, 81))
+
+
+def test_stratify_order_round_robins_chats_newest_first() -> None:
+    hits = [_ns_hit(i, 1) for i in range(1, 7)] + [_ns_hit(50 + i, 2) for i in range(1, 3)]
+    out = WS.stratify_order(hits)  # type: ignore[arg-type]
+    assert [h.chat_id for h in out[:4]] == [1, 2, 1, 2]
+    assert out[0].date == max(h.date for h in hits if h.chat_id == 1)
+
+
+@pytest.mark.asyncio
+async def test_sample_pull_applies_per_chat_quotas() -> None:
+    msgs = [_msg(i, chat_id=1 + i % 3, hour=i % 24) for i in range(1, 301)]
+    session = FakeSession(messages=msgs)
+    spec = WS.WindowSpec(account_id=1, chats=None, since=_local(2026, 9, 1), until=NOW)
+    count = WS.WindowCount(
+        total=12_461, chats=3, groups=30, per_chat=[(1, 9_000), (2, 3_000), (3, 461)]
+    )
+    hits = await WS.pull_window_sample(session, spec, count=count, cap=100)
+    sql = session.seen[-1].lower()
+    assert "row_number" in sql and "partition by" in sql and "case" in sql
+    per: dict[int, int] = {}
+    for h in hits:
+        per[h.chat_id] = per.get(h.chat_id, 0) + 1
+    quotas = WS.stratified_quotas(count.per_chat, 100)
+    assert all(per[c] <= quotas[c] for c in per)
+    assert len(hits) <= 100
+
+
+@pytest.mark.asyncio
+async def test_topicless_big_window_is_sampled_not_truncated() -> None:
+    msgs = [
+        _msg(i, chat_id=1 + i % 12, hour=i % 24, text=f"xabar {i} haqida gap {i * 7}")
+        for i in range(1, 1_201)
+    ]
+    session = FakeSession(messages=msgs, count_row=(12_461, 12, 84))
+    llm = FakeLLM()
+    plan = _window_plan("bu hafta nima muhokama qilindi?")
+    assert plan.entities == []
+    outcome = await WS.run_window(
+        session_factory_of(session),
+        account_id=1,
+        plan=plan,
+        question="bu hafta nima muhokama qilindi?",
+        mode="deep",
+        meter=DS._Meter(llm),
+        taint=DS._Taint(),
+        chat_titles={k: f"Chat {k}" for k in range(1, 13)},
+    )
+    assert outcome.window_sampled is True
+    assert len(outcome.evidence) <= WS.WINDOW_MAP_MAX_MSGS
+    assert outcome.stats.truncated is False and outcome.stats.pool_capped is False
+    assert SCALE_FILTER_PROMPT not in llm.systems
+    maps = llm.systems.count(SCALE_MAP_PROMPT)
+    assert 1 <= maps <= WS.WINDOW_MAP_MAX_MSGS // WS.WINDOW_CHUNK_MSGS
+    # birinchi 150 satr (sintez) hamma chatni qamraydi
+    assert len({h.chat_id for h in outcome.evidence[:150]}) == 12
+    assert "per-chat sample" in outcome.window_stats
+    assert "messages in window: 12461" in outcome.window_stats
+
+
+def test_sampled_window_coverage_line() -> None:
+    cov = _coverage(
+        {
+            "retrieval_kind": "window",
+            "since": _local(2026, 9, 21),
+            "until": NOW,
+            "tz": TZ,
+            "total": 12_461,
+            "taken": 400,
+            "chats": 40,
+            "sampled": True,
+        }
+    )
+    assert cov.window_sampled is True and cov.to_dict()["window"]["sampled"] is True
+    text = DS.render_coverage(cov, locale="uz")
+    assert "12,461 xabar oynada · 400 tasi o'qildi (chat bo'yicha namuna) · hisoblar aniq" in text
+    assert "ko'rildi (eng yangisidan)" not in text
+    assert "⚠️" not in DS.coverage_disclosure(cov, DS._COVERAGE_LABELS["uz"])
+    for locale, needle in (("ru", "выборка по чатам"), ("en", "per-chat sample")):
+        assert needle in DS.render_coverage(cov, locale=locale)
+
+
+def test_window_estimate_follows_the_map_and_synth_caps() -> None:
+    big = WS.estimate_window(WS.WindowCount(total=12_461, chats=40, groups=280))
+    mid = WS.estimate_window(WS.WindowCount(total=WS.WINDOW_MAP_MAX_MSGS, chats=40, groups=280))
+    # map va sintez qopqoqda — 12k oyna 400 talik oynadan qimmat emas
+    assert big.breakdown == mid.breakdown
+    assert big.est_total_usd == mid.est_total_usd
+    # deep rejimda karta shu chegaradan oshganda ko'rinadi (deep.js)
+    assert big.est_total_usd > WS.WINDOW_CONFIRM_MIN_USD

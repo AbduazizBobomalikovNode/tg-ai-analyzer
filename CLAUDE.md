@@ -101,7 +101,9 @@ synth → qamrov. Web: `POST /api/conversations/{id}/messages` `mode="deep"`
   bo'lmasa quvur baribir qidiradi.
 - **`stages` hodisasi birinchi keladi** — shu turn'da yuguradigan bosqichlar
   ro'yxati; UI reyki (`static/pages/ask/deep.js`) shundan quriladi, qattiq
-  yozilgan 9 talikdan emas. Baho kartasi faqat `estimate` hodisasi kelganda.
+  yozilgan 9 talikdan emas. Baho kartasi faqat `estimate` hodisasi kelganda,
+  `deep`/`fast` da esa faqat `est_total_usd > $0.05` bo'lsa (`deep.js::estimateCardVisible`,
+  `WINDOW_CONFIRM_MIN_USD` bilan bir); `exhaustive` da doim.
 - **Dual-LLM taint guard.** `plan` va `reflect` prompt'lariga xabar matni
   **hech qachon** tushmaydi — `_Taint.assert_clean()` har chaqiruvdan oldin
   tekshiradi, buzilsa `DeepSearchError("taint")`. Yangi bosqich qo'shsangiz
@@ -115,6 +117,13 @@ synth → qamrov. Web: `POST /api/conversations/{id}/messages` `mode="deep"`
   `tests/test_evidence_format.py`). Byudjet kesimi reyting tartibida, chat
   ichidagi chiqish vaqt tartibida. Sitata tokeni o'zgarmagan — uni
   qisqartirmang: `validate_citations` va havola shunga tayanadi.
+  Map bo'lagi (`build_map_envelope`) ham shu shaklda (`### chat (id N)` →
+  `#### kun` → `[#id] HH:MM kim: matn`), filtr partiyasi — `### chat` →
+  `#i YYYY-MM-DD kim: matn` (indeks o'zgarmagan). Satr shaklini o'zgartirsangiz
+  **prompt'dagi tavsifni ham** (`DEEP_SYNTH_PROMPT` "## Evidence", `SCALE_MAP_PROMPT`,
+  `SCALE_FILTER_PROMPT`) va `DEEP_PROMPT_VERSION` ni yangilang — e7aacff dan
+  keyin sintez prompt'i hali ham eski `[chat | date | sender]` qavsini
+  tasvirlab turgan edi.
 - **Vaqt oynasi savoldan — kodda** (`services/timewin.py`, uz/ru/en, akkaunt
   `tz` sida): bugun/kecha/shu hafta/oxirgi N daqiqa|soat|kun|hafta|oy|yil,
   "…dan beri", aniq sana va oraliq, "butun davr" (`since=None`).
@@ -126,9 +135,20 @@ synth → qamrov. Web: `POST /api/conversations/{id}/messages` `mode="deep"`
 - **`plan.retrieval_kind`** (`topic|window|person`) — quvurning shakli.
   `window` (`services/window_search.py`): "kimlar yozgan", "qaysi chatlar
   faol edi" — bucket rejasi, tirsak va mavzu filtri **yo'q**, oynadagi
-  xabarlar `count(*)` bilan sanaladi, ≤`SOFT_MAX_EVIDENCE` bo'lsa hammasi
-  dalil, ko'pi `(chat, kun)` kvotasi bilan eng yangisidan olinadi va qamrov
-  "M dan N ko'rildi" deydi. Filtr/map'dan oldin `dedup_window` (≥24 belgili
+  xabarlar `count(*)` bilan sanaladi. **Mavzusiz** oynada (`plan.entities`
+  bo'sh) `WINDOW_MAP_MAX_MSGS` (400) dan ko'p xabar bo'lsa — **chat bo'yicha
+  namuna** (`stratified_quotas`: hajmga mutanosib, har chat ≥5 ≤60, chat
+  ichida eng yangisi; `pull_window_sample`), bu reja, kesish emas
+  (`truncated` yo'q), qamrov "N xabar oynada · 400 tasi o'qildi (chat bo'yicha
+  namuna) · hisoblar aniq" deydi, sanoq blokida chat bo'yicha **aniq**
+  sonlar. Mavzuli oynada ≤`SOFT_MAX_EVIDENCE` bo'lsa hammasi, ko'pi
+  `(chat, kun)` kvotasi + filtr ("M dan N ko'rildi"). Map kirishi har doim
+  ≤400 (`window_chunks`: chatlar ketma-ket, 80 lik bo'laklar —
+  (chat, yuboruvchi) bo'yicha bo'lish 16 bo'lak qopqog'i bilan katta qismini
+  map'dan tashqarida qoldirardi); sintezga ketadigan 150 satr chatlar bo'ylab
+  navbat bilan (`stratify_order`, ilgari eng eski 150 tasi edi). Jonli
+  o'lchov (conv 285, 12,461 xabar): 805 o'qilgan, 16 map bo'lagi, 17,949
+  chiqish tokeni, $0.127. Filtr/map'dan oldin `dedup_window` (≥24 belgili
   matnlar, `scale_search.dedup_fast`, O(n)) kross-post takrorlarni vakilga
   yig'adi — `dropped_duplicates` qamrovda, takrorlar "ko'rildi" ga kiradi;
   qisqa "rahmat"lar tegilmaydi. `inbox` = `out=false` **va** (shaxsiy chat yoki
@@ -435,8 +455,26 @@ yugurtiring, bitta yugurish hech narsani isbotlamaydi).
 - **`AGENT_MAX_EXECUTED_CALLS` (6) va `AGENT_MAX_COST_USD` ($0.15)** — yugurish
   bo'yicha qopqoqlar (`conv-20260917-144833`: turnda 6-11 bajarilgan chaqiruv,
   $0.11-$0.40). Yetilganda tool'lar o'chadi va "bor narsa bilan javob ber"
-  turn'i qo'shiladi; `stop_reason` (`answered|call_budget|cost_budget|repeat_guard|iterations`)
+  turn'i qo'shiladi; `stop_reason` (`answered|call_budget|cost_budget|repeat_guard|no_progress|iterations`)
   `context_used` ga yoziladi. Iteratsiya shifti yolg'iz o'zi yetmagan.
+- **`no_progress`** — ikki ketma-ket raundda bajarilgan chaqiruvlar hech narsa
+  bermagan (xato / bo'sh / faqat keshdan, `agent.unproductive`) va model yangi
+  tool nomini sinamayapti → tool'lar o'chadi, bitta "javob ber" turn'i.
+  Qopqoqlar (`call_cap`, `cost_cap`, iteratsiya) o'zgarmagan — bu ulardan
+  **oldin** to'xtaydi.
+- **Chat maslahatlari (`agent.chat_hints`)** — savoldagi nom (uz_fold, o'zbek
+  kelishik qo'shimchalari olib tashlanadi, `difflib` ≥0.8) akkauntning
+  **hamma** sinxronlangan chati sarlavhasi/`@username` bilan kodda
+  solishtiriladi; ≤3 ta `chat_hint: "<title>" [id:N] <tur> msgs= last=`
+  qatori `runtime_note` ga. Nega: indeks faqat 25 ta faol chat — conv 284
+  ("Otabek bilan oxirgi marta nima gaplashganmiz?") da "Otabek" shaxsiy
+  chatlari unda yo'q edi va agent `list_chats → search_global → get_user_info
+  → list_members ×2` bilan 7 iteratsiya ($0.105) aylanib noto'g'ri javob
+  berdi. Prompt: nomlangan odam — o'qiladigan **chat** (`get_recent_messages`
+  / `search_messages` shu `chat` bilan, 1-3 chaqiruv), `search_global` /
+  `get_user_info` / `list_members` emas. `_resolve_chat` indeksdagi
+  `[id:N]` shaklini ham qabul qiladi (conv 284 da `"[id:3836]"` rad etilgan).
+  Umumiy so'zlar (`chat`, `kanal`, `hafta`, `bilan`…) `_HINT_STOPWORDS` da.
 - **Bir xil so'zlarni serverda takrorlash to'siladi**: lokal `search_messages`
   ≥1 topilma bergan so'rov `search_telegram`/`search_global` bilan qayta
   yugurtirilmaydi (lokal 0 bergan bo'lsa — ochiq, bu sinxronlanmagan tarix).
@@ -794,9 +832,15 @@ fayl tizimini LLM'ga ochish. `capabilities()` da TOOLS yo'q — rost.
   `minimal/low/low/low`, `router.thinking_level`): ROUTE flash-lite'ning o'z
   sukuti `minimal` — ilgari hammaga `low` berilib arzon vazifada fikrlash
   oshirilardi. `minimal` ni bilmaydigan model (3.7/3.8-flash, 3.1-pro) `low`
-  oladi. Deep sintez byudjeti `SYNTH_MAX_TOKENS=8000`
-  va `finish_reason` length bo'lsa **bitta** davom ettirish chaqirig'i
-  qilinadi; keyin ham kesilgan bo'lsa `context.truncated_answer=True`.
+  oladi. Deep sintez qattiq qopqog'i `SYNTH_MAX_TOKENS=8000`, lekin
+  `max_tokens` **niyat bo'yicha** (`deep_search.synth_budget`, kodda):
+  oyna/dayjest/sanoq → 3000, mavzu → 6000, `explain`/`deeper`/"batafsil"
+  (`_DETAIL_RE`, uz/ru/en) → 8000; user turn'ida `answer_length: ~N tokens`
+  satri (N = 60%, qolgani fikrlashga), `context.answer_budget` ga yoziladi.
+  `finish_reason` length bo'lsa **bitta** davom ettirish chaqirig'i faqat
+  batafsil so'ralganda qilinadi; qisqa byudjet kesilsa — davom yo'q,
+  `context.truncated_answer=True` (jonli conv 285: oyna dayjesti 17,949
+  chiqish tokeni edi). `SYNTH_MAX_TOKENS` ni pasaytirmang — shu yerdan boshqaring.
   `finish_reason` ikkala yo'lda ham (`agent` va `deep`) kontekstga yoziladi.
 - Claude'da alohida "json mode" yo'q — `json_mode=True` system ko'rsatma +
   fence tozalash orqali. `stop_reason=refusal` xato emas: bo'sh matn +

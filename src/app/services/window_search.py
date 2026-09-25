@@ -15,18 +15,25 @@ Shuning uchun bu yo'l:
   (`timewin.parse_window` savoldan hisoblaydi), nishon chatlar —
   `plan.chats` yoki hamma sinxronlangan chat.
 * **Sanoq aniq va bepul**: `count(*)`. Baho shundan quriladi, taxmindan emas.
-* **Kesish qoidasi bitta**: oynada `SOFT_MAX_EVIDENCE` (1000) yoki undan kam
-  xabar bo'lsa — **hammasi** dalil; ko'p bo'lsa `(chat, kun)` kvotasi bilan
-  eng yangisidan olinadi va qamrovda "M dan N ko'rildi" deb **aytiladi**.
-  Savolda mavzu ham bo'lsa (kesilgan holatda) arzon filtr qo'shimcha
-  tartiblaydi — aks holda filtr umuman chaqirilmaydi.
+* **Mavzusiz dayjest** ("bu hafta nima muhokama qilindi?"): oynada
+  `WINDOW_MAP_MAX_MSGS` (400) dan ko'p xabar bo'lsa **chat bo'yicha
+  namuna** olinadi — har chatga hajmiga mutanosib kvota (≥5, ≤60), chat
+  ichida eng yangisidan (`stratified_quotas`). Aniq sanoqlar (`count(*)`,
+  chat bo'yicha) baribir sanoq blokida — model haqiqiy hajmni biladi,
+  qamrov esa "N xabar oynada · 400 tasi o'qildi (chat bo'yicha namuna) ·
+  hisoblar aniq" deydi. Jonli o'lchov (conv 285): 12,461 xabarli oynada
+  eng yangi 805 tasi o'qilib, map 16 bo'lakka (qopqoq) chiqqan edi, $0.127.
+* **Mavzuli oyna**: `SOFT_MAX_EVIDENCE` (1000) gacha — hammasi, ko'p bo'lsa
+  `(chat, kun)` kvotasi va arzon filtr tartiblaydi; map'ga eng yuqori
+  baholangan ≤400 tasi kiradi.
 * **"Menga yozgan"** (`inbox`) — sxemada bor narsa bilan ta'riflanadi:
   `messages.out = false` **va** (chat shaxsiy **yoki** xabar mening
   xabarimga javob). `@username` eslatmalari saqlanmaydi, shuning uchun ular
   qamrovga kirmaydi — buni UI ham, qamrov ham yashirmaydi.
-* Dalillar map bosqichiga **yuboruvchi bo'yicha** guruhlanadi (bitta chat +
-  bitta yuboruvchi = bitta bo'lak), chunki javob ham shunday o'qiladi:
-  kim, nechta xabar, nima maqsadda.
+* Map bo'laklari **chat bo'yicha to'planadi** (bir bo'lakda bir nechta butun
+  chat, har biri o'z `### chat` sarlavhasi bilan, ≤80 satr): ilgari bo'lak =
+  (chat, yuboruvchi) edi va 16 bo'lak qopqog'i eng katta 16 guruhdan
+  tashqarisini map'ga umuman yetkazmasdi. Yuboruvchi har satrda turadi.
 
 Invariantlar o'zgarmadi: dalillar bitta `<untrusted_data kind="evidence">`
 konvertida (`deep_search.build_evidence_envelope`), `plan`/`reflect` bu
@@ -43,7 +50,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import structlog
-from sqlalchemy import Select, and_, exists, func, or_, select
+from sqlalchemy import Select, and_, case, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -74,12 +81,98 @@ WINDOW_CONFIRM_MIN_USD = 0.05
 #: Sanoq shu chegaradan oshsa `(chat, kun)` kvotasi ishlaydi.
 WINDOW_SOFT_MAX = SC.SOFT_MAX_EVIDENCE
 
-#: Map bo'lagi — bitta chat + bitta yuboruvchi, shundan katta bo'lsa bo'linadi.
+#: Map bo'lagi — ≤80 satr, butun chatlar to'planadi (katta chat bo'linadi).
 WINDOW_CHUNK_MSGS = SC.MAP_CHUNK_MSGS
 WINDOW_MAX_CHUNKS = SC.MAP_MAX_CHUNKS
 
 #: Kvota yo'lida filtr faqat savolda mavzu bo'lganda chaqiriladi.
 WINDOW_FILTER_MIN_TERMS = 1
+
+#: Oyna yo'lida map'ga kiradigan xabarlar qopqog'i (≈5 bo'lak x 80). Jonli
+#: o'lchov (conv 285, "bu hafta nima muhokama qilindi?", 12,461 xabar):
+#: 805 xabar o'qildi, map 16 bo'lak (qopqoq), 17,949 chiqish tokeni, $0.127.
+#: Mavzusiz dayjestda javob chat bo'yicha 1-3 satr — 400 ta namuna
+#: (chat bo'yicha) va aniq sanoqlar yetadi; mavzuli oynada — eng yuqori
+#: baholangan 400 tasi.
+WINDOW_MAP_MAX_MSGS = 400
+#: Chat bo'yicha namunada bitta chat kvotasi chegaralari: jim chat ham
+#: ko'rinsin (≥5), gapiradigan chat namunani yeb qo'ymasin (≤60).
+WINDOW_SAMPLE_MIN_PER_CHAT = 5
+WINDOW_SAMPLE_MAX_PER_CHAT = 60
+#: Baho uchun o'rtacha ixcham satr (`[#c…m…] HH:MM kim: matn`, matn o'rtacha
+#: ~118 belgi, `MAP_LINE_CHARS` da kesiladi) — belgida.
+WINDOW_EST_LINE_CHARS = 180
+#: Baho: sanoq bloki (chat bo'yicha top 20 + yuboruvchilar) — tokenda.
+WINDOW_EST_STATS_TOKENS = 600
+#: Baho: bitta map da'vosi sintez kirishida — tokenda.
+WINDOW_EST_CLAIM_TOKENS = 40
+
+
+def stratified_quotas(
+    per_chat: Sequence[tuple[int, int]],
+    cap: int = WINDOW_MAP_MAX_MSGS,
+    *,
+    lo: int = WINDOW_SAMPLE_MIN_PER_CHAT,
+    hi: int = WINDOW_SAMPLE_MAX_PER_CHAT,
+) -> dict[int, int]:
+    """Chat bo'yicha namuna kvotasi: hajmga mutanosib, har chatga `[lo, hi]`.
+
+    1) hajm tartibida har chatga `min(n, lo)` (qopqoq yetguncha — chat juda
+    ko'p bo'lsa kichiklari tushib qoladi); 2) qolgani hajmga mutanosib
+    "suv to'ldirish" bilan, har chat `min(n, hi)` gacha; butun sonli
+    qoldiq — hajm tartibida bittadan. Deterministik, jami ≤ `cap`.
+    """
+    rows = sorted(((int(c), int(n)) for c, n in per_chat if n > 0), key=lambda p: (-p[1], p[0]))
+    quota: dict[int, int] = {}
+    left = max(0, int(cap))
+    for chat_id, n in rows:
+        take = min(n, lo, left)
+        if take <= 0:
+            break
+        quota[chat_id] = take
+        left -= take
+    while left > 0:
+        room = {c: min(n, hi) - quota[c] for c, n in rows if c in quota and min(n, hi) > quota[c]}
+        if not room:
+            break
+        weight = sum(n for c, n in rows if c in room)
+        given = 0
+        for chat_id, n in rows:
+            if chat_id in room:
+                add = min(room[chat_id], (left * n) // weight)
+                quota[chat_id] += add
+                given += add
+        left -= given
+        if given == 0:
+            for chat_id, _n in rows:
+                if left <= 0:
+                    break
+                if chat_id in room:
+                    quota[chat_id] += 1
+                    left -= 1
+    return quota
+
+
+def stratify_order(hits: Sequence[S.Hit]) -> list[S.Hit]:
+    """Chatlar bo'ylab navbatma-navbat (eng yangisidan) — sintez satrlari tartibi.
+
+    Sintezga `SYNTH_EVIDENCE_LINES` (150) satr ketadi; ilgari bu vaqt
+    bo'yicha **eng eski** 150 tasi edi. Endi har chatdan navbat bilan eng
+    yangisi olinadi (chat hajm tartibida), ya'ni kesim hamma chatni qamraydi.
+    Konvertda chat ichidagi satrlar baribir vaqt tartibida chiqadi.
+    """
+    groups: dict[int, list[S.Hit]] = {}
+    for h in hits:
+        groups.setdefault(h.chat_id, []).append(h)
+    epoch = datetime.min.replace(tzinfo=UTC)
+    queues = [
+        sorted(rows, key=lambda h: h.date or epoch, reverse=True)
+        for rows in sorted(groups.values(), key=lambda r: -len(r))
+    ]
+    out: list[S.Hit] = []
+    for i in range(max((len(q) for q in queues), default=0)):
+        out.extend(q[i] for q in queues if i < len(q))
+    return out
 
 
 @dataclass(slots=True)
@@ -293,6 +386,63 @@ async def pull_window(
     return hits, True
 
 
+async def pull_window_sample(
+    session: AsyncSession,
+    spec: WindowSpec,
+    *,
+    count: WindowCount,
+    cap: int = WINDOW_MAP_MAX_MSGS,
+    titles: dict[int, str] | None = None,
+) -> list[S.Hit]:
+    """Mavzusiz dayjest uchun chat bo'yicha namuna — `stratified_quotas` bilan.
+
+    SQL: chat bo'yicha `row_number()` (eng yangisi birinchi) va har chatning
+    o'z kvotasi (`CASE chat_id WHEN … THEN q`). Kvota Python'da ham qayta
+    qo'llanadi — SQL shakli o'zgarsa ham namuna qopqoqdan oshmasin.
+    """
+    quotas = stratified_quotas(count.per_chat, cap)
+    if not quotas:
+        return []
+    rn = (
+        func.row_number()
+        .over(partition_by=Message.chat_id, order_by=Message.published_at.desc())
+        .label("rn")
+    )
+    inner = (
+        select(Message.id, Message.chat_id.label("chat_id"), rn)
+        .select_from(Message)
+        .join(Chat, Chat.id == Message.chat_id)
+        .where(*_conds(spec), Message.chat_id.in_(list(quotas)))
+        .subquery()
+    )
+    limit_of = case(quotas, value=inner.c.chat_id, else_=0)
+    stmt = (
+        select(Message)
+        .join(inner, inner.c.id == Message.id)
+        .where(inner.c.rn <= limit_of)
+        .order_by(Message.published_at.desc())
+        .limit(cap)
+    )
+    names = dict(titles or {})
+    used: dict[int, int] = {}
+    hits: list[S.Hit] = []
+    for m in (await session.execute(stmt)).scalars():
+        if used.get(m.chat_id, 0) >= quotas.get(m.chat_id, 0):
+            continue
+        used[m.chat_id] = used.get(m.chat_id, 0) + 1
+        hits.append(_hit(m, names.get(m.chat_id, "")))
+        if len(hits) >= cap:
+            break
+    log.info(
+        "window.sample",
+        total=count.total,
+        chats=len(quotas),
+        taken=len(hits),
+        max_quota=max(quotas.values()),
+    )
+    return hits
+
+
 def estimate_window(
     count: WindowCount,
     *,
@@ -306,6 +456,10 @@ def estimate_window(
 
     Skan qismi: kesilgan holatda arzon filtr (aks holda 0) + map. Sintez
     alohida (`est_total_usd`), `scale_search.estimate` bilan bir uslubda.
+    Qopqoqlar **yugurish bilan bir xil**: map kirishi ≤ `WINDOW_MAP_MAX_MSGS`
+    (mavzusiz katta oynada chat bo'yicha namuna), bo'laklar to'planadi
+    (`window_chunks`), sintez satrlari ≤ `SYNTH_EVIDENCE_LINES`, sintez
+    chiqishi dayjest byudjeti bilan (`deep_search.SYNTH_BUDGET_DIGEST`).
     """
     prices = {
         "filter": SC._price_for(Task.ROUTE),
@@ -321,21 +475,28 @@ def estimate_window(
     )
     filter_out = n_batches * 120
 
+    map_msgs = min(taken, WINDOW_MAP_MAX_MSGS)
     chunks = (
         0
-        if taken <= SC.MAP_SKIP_TOTAL
-        else min(WINDOW_MAX_CHUNKS, math.ceil(taken / WINDOW_CHUNK_MSGS))
+        if map_msgs <= SC.MAP_SKIP_TOTAL
+        else min(WINDOW_MAX_CHUNKS, math.ceil(map_msgs / WINDOW_CHUNK_MSGS))
     )
-    map_in = chunks * (
-        int(len(SCALE_MAP_PROMPT) / S.CHARS_PER_TOKEN)
-        + int(WINDOW_CHUNK_MSGS * (SC.MAP_LINE_CHARS + 45) / S.CHARS_PER_TOKEN)
+    map_in = (
+        chunks * int(len(SCALE_MAP_PROMPT) / S.CHARS_PER_TOKEN)
+        + int(map_msgs * WINDOW_EST_LINE_CHARS / S.CHARS_PER_TOKEN)
+        if chunks
+        else 0
     )
     map_out = chunks * SC.EST_MAP_OUT_TOKENS
 
-    synth_lines = min(SC.SYNTH_EVIDENCE_LINES, taken)
-    synth_in = int(len(DEEP_SYNTH_PROMPT) / S.CHARS_PER_TOKEN) + int(
-        synth_lines * (SC.MAP_LINE_CHARS + 45) / S.CHARS_PER_TOKEN
+    synth_lines = min(SC.SYNTH_EVIDENCE_LINES, map_msgs)
+    synth_in = (
+        int(len(DEEP_SYNTH_PROMPT) / S.CHARS_PER_TOKEN)
+        + int(synth_lines * WINDOW_EST_LINE_CHARS / S.CHARS_PER_TOKEN)
+        + chunks * SC.MAP_MAX_CLAIMS * WINDOW_EST_CLAIM_TOKENS
+        + WINDOW_EST_STATS_TOKENS
     )
+    synth_out = min(SC.EST_SYNTH_OUT_TOKENS, DS.SYNTH_BUDGET_DIGEST)
 
     def cost(stage: str, tin: int, tout: int) -> float:
         price_in, price_out = prices[stage]
@@ -344,7 +505,7 @@ def estimate_window(
     breakdown = {
         "filter": round(cost("filter", filter_in, filter_out), 6),
         "map": round(cost("map", map_in, map_out), 6),
-        "synth": round(cost("synth", synth_in, SC.EST_SYNTH_OUT_TOKENS), 6),
+        "synth": round(cost("synth", synth_in, synth_out), 6),
     }
     scan = breakdown["filter"] + breakdown["map"]
     lo = (spec.since if spec else None) or count.first_at
@@ -552,8 +713,12 @@ def render_window_stats(
     taken: int = 0,
     stats: WindowStats | None = None,
     spec: WindowSpec | None = None,
+    sampled: bool = False,
 ) -> str:
     """Sanoqlar **kodda** hisoblanadi — briefing bilan bir qoida.
+
+    `sampled` — dalil chat bo'yicha namuna (`pull_window_sample`): blok buni
+    aytadi, model esa hajmni satrlardan emas, shu sanoqlardan oladi.
 
     `stats` berilsa (sanoq yo'li) — yo'nalish, har chat/qabul qiluvchi
     bo'yicha **to'liq** reyting (ulush %, birinchi/oxirgi xabar), boshqalar
@@ -575,6 +740,12 @@ def render_window_stats(
         f"messages in window: {count.total}; chats: {count.chats}; "
         f"evidence lines shown: {taken or len(evidence)}",
     ]
+    if sampled:
+        lines.append(
+            "evidence is a per-chat sample (share of each chat proportional to its volume, "
+            "newest first within a chat) — the counts here are exact, the lines are not all "
+            "messages; describe volume from these counts"
+        )
     if count.per_chat:
         lines.append("messages per chat (descending):")
         for chat_id, n in count.per_chat[:STATS_TOP_CHATS]:
@@ -729,27 +900,35 @@ def window_chunks(
     chunk_size: int = WINDOW_CHUNK_MSGS,
     max_chunks: int = WINDOW_MAX_CHUNKS,
     skip_below: int = SC.MAP_SKIP_TOTAL,
+    max_msgs: int = WINDOW_MAP_MAX_MSGS,
 ) -> list[list[S.Hit]]:
-    """Bo'laklar **yuboruvchi bo'yicha**: bitta chat + bitta yuboruvchi.
+    """Bo'laklar **chat bo'yicha to'planadi**: chatlar ketma-ket, bo'lak to'liq.
 
-    Nega: javob ham shu shaklda o'qiladi ("Nurbek — 12 xabar, ijara
-    haqida"). `map_chunks` esa `(chat, hafta)` bo'yicha bo'ladi — u mavzu
-    skani uchun, bu yerda esa kim yozgani muhim.
+    Kirish — ustuvorlik tartibida (namuna / filtr reytingi); birinchi
+    `max_msgs` tasi olinadi. Chatlar hajm tartibida, chat ichida vaqt
+    bo'yicha, bitta ketma-ketlikka tiziladi va `chunk_size` lik bo'laklarga
+    kesiladi — bo'lak soni `ceil(n / chunk_size)` (baho ham shunday
+    hisoblaydi). Chat bo'lak chegarasida bo'linishi mumkin: `build_map_envelope`
+    har bo'lakda har chat oldiga `### chat` sarlavhasini qo'yadi, yuboruvchi
+    esa har satrda — "Nurbek — 12 xabar, ijara haqida" shakli uchun yetadi.
+
+    Nega (chat, yuboruvchi) emas: 400 xabarlik namunada bunday guruhlar
+    yuzlab bo'lardi va `max_chunks` (16) eng kattalaridan tashqarisini map'ga
+    umuman yetkazmasdi, har kichik bo'lak esa to'liq map prompt'ini to'lardi.
     """
     if len(evidence) <= max(0, skip_below):
         return []
-    groups: dict[tuple[int, str], list[S.Hit]] = {}
-    order: dict[tuple[int, str], int] = {}
-    for i, hit in enumerate(evidence):
-        key = (hit.chat_id, (hit.sender or "?").strip().lower())
-        groups.setdefault(key, []).append(hit)
-        order.setdefault(key, i)
-    out: list[list[S.Hit]] = []
-    for key in sorted(groups, key=lambda k: -len(groups[k])):
-        rows = sorted(groups[key], key=lambda h: h.date or datetime.min.replace(tzinfo=UTC))
-        for i in range(0, len(rows), chunk_size):
-            out.append(rows[i : i + chunk_size])
-    return out[:max_chunks]
+    epoch = datetime.min.replace(tzinfo=UTC)
+    groups: dict[int, list[S.Hit]] = {}
+    for hit in list(evidence)[: max(0, max_msgs)]:
+        groups.setdefault(hit.chat_id, []).append(hit)
+    ordered = [
+        h
+        for rows in sorted(groups.values(), key=lambda r: -len(r))
+        for h in sorted(rows, key=lambda h: h.date or epoch)
+    ]
+    size = max(1, chunk_size)
+    return [ordered[i : i + size] for i in range(0, len(ordered), size)][:max_chunks]
 
 
 async def run_window(
@@ -854,8 +1033,17 @@ async def run_window(
         return outcome
 
     # ── (b) tortish: oynadagi xabarlar, bucket rejasisiz ────────────────────
+    # Mavzusiz katta oyna — chat bo'yicha namuna (reja shu, kesish emas:
+    # `truncated` yo'q, qamrov "namuna · hisoblar aniq" deydi). Mavzuli oyna
+    # esa avvalgidek: hammasi yoki `(chat, kun)` kvotasi + filtr.
+    sampled = not will_filter and count.total > WINDOW_MAP_MAX_MSGS
     async with session_factory() as session:
-        pool, quota_cut = await pull_window(session, spec, count=count, titles=titles)
+        if sampled:
+            pool = await pull_window_sample(session, spec, count=count, titles=titles)
+            quota_cut = False
+        else:
+            pool, quota_cut = await pull_window(session, spec, count=count, titles=titles)
+    outcome.window_sampled = sampled
     stats.buckets_scanned = stats.buckets_planned
     stats.pulled = count.total
     stats.elbow = len(pool)
@@ -864,6 +1052,8 @@ async def run_window(
     if quota_cut:
         stats.truncated = True
         stats.note_stop("pull", "yield")
+    elif sampled:
+        stats.note_stop("pull", "complete")
     await DS._emit(
         events,
         "pull",
@@ -912,8 +1102,12 @@ async def run_window(
         evidence = list(pool)
         stats.kept = len(evidence)
 
-    # Dalil vaqt bo'yicha o'qiladi: eng eskisidan eng yangisigacha.
-    evidence.sort(key=lambda h: h.date or datetime.min.replace(tzinfo=UTC))
+    # Map kirishi — ustuvorlik tartibida (filtr bali / namuna), ≤400.
+    map_input = evidence[:WINDOW_MAP_MAX_MSGS]
+    # Sintezga ketadigan birinchi `SYNTH_EVIDENCE_LINES` satr chatlar bo'ylab
+    # navbat bilan (eng yangisidan) — ilgari vaqt bo'yicha eng eski 150 tasi
+    # edi. Konvert chat ichida baribir vaqt tartibida chiqaradi.
+    evidence = stratify_order(evidence)
     stats.evidence = len(evidence)
     outcome.evidence = evidence
     await DS._emit(
@@ -925,8 +1119,8 @@ async def run_window(
         quota_trimmed=max(0, count.total - len(evidence)),
     )
 
-    # ── (d) map → da'volar (yuboruvchi bo'yicha) ────────────────────────────
-    chunks = window_chunks(evidence)
+    # ── (d) map → da'volar (chatlar to'plangan bo'laklar) ────────────────────
+    chunks = window_chunks(map_input)
     claims = await SC.map_claims(
         question=question,
         chunks=chunks,
@@ -940,7 +1134,7 @@ async def run_window(
     # Sanoqlar kodda: "qaysi chatlar eng faol edi" javobi `count(*)` dan
     # keladi, model ko'rgan satrlardan emas.
     outcome.window_stats = render_window_stats(
-        count, titles=titles, evidence=evidence, taken=len(evidence)
+        count, titles=titles, evidence=evidence, taken=len(evidence), sampled=sampled
     )
     if budget.stop_reason():
         stats.note_stop("map", budget.stop_reason())
@@ -952,6 +1146,8 @@ async def run_window(
         inbox=spec.inbox,
         total=count.total,
         taken=len(evidence),
+        sampled=sampled,
+        map_msgs=sum(len(c) for c in chunks),
         chats=count.chats,
         groups=count.groups,
         chunks=len(chunks),
@@ -1053,6 +1249,7 @@ __all__ = [
     "STATS_SAMPLE_PER_CHAT",
     "STATS_TOP_N",
     "WINDOW_CONFIRM_MIN_USD",
+    "WINDOW_MAP_MAX_MSGS",
     "WINDOW_SOFT_MAX",
     "ChatStat",
     "WindowCount",
@@ -1061,8 +1258,11 @@ __all__ = [
     "count_window",
     "estimate_window",
     "pull_window",
+    "pull_window_sample",
     "run_window",
     "stats_samples",
     "stats_window",
+    "stratified_quotas",
+    "stratify_order",
     "window_chunks",
 ]

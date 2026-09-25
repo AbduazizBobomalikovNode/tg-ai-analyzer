@@ -1034,3 +1034,19 @@ process.stdout.write(JSON.stringify({
     assert out["winEstimate"]["weeks"] == 39
     assert out["winEstimate"]["grain"] == "week"
     assert out["winFunnel"]["chats"] == 214
+
+
+def test_estimate_card_shows_in_deep_mode_only_when_it_costs_something() -> None:
+    """`deep` da baho kartasi faqat jami > $0.05 bo'lsa; `exhaustive` da doim."""
+    script = """
+const out = INPUT.map(([est, mode]) => M.estimateCardVisible(est, mode));
+process.stdout.write(JSON.stringify(out));
+"""
+    cases = [
+        [{"mode": "deep", "est_total_usd": 0.064}, "deep"],
+        [{"mode": "deep", "est_total_usd": 0.02}, "deep"],
+        [{"mode": "exhaustive", "est_total_usd": 0.01}, "exhaustive"],
+        [{"est_total_usd": 0.2}, "fast"],
+        [None, "deep"],
+    ]
+    assert _ask_module("deep.js", script, cases) == [True, False, True, True, False]

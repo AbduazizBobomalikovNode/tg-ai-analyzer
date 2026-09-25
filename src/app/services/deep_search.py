@@ -130,6 +130,25 @@ LENGTH_FINISH_REASONS = frozenset({"length", "max_tokens", "finishreason.max_tok
 #: Kesilgan javobni **bir marta** davom ettirish turn'i. Ikki marta emas:
 #: ikkinchi kesilish real byudjet muammosi, uni cheksiz cho'zish narx.
 SYNTH_CONTINUE_NUDGE = "Davom eting — oxirgi tugallanmagan jumladan boshlab, takrorlamang."
+#: Niyat bo'yicha **yumshoq** chiqish byudjeti (`max_tokens` sifatida beriladi
+#: va `answer_length:` satrida modelga aytiladi). `SYNTH_MAX_TOKENS` — qattiq
+#: qopqoq, undan oshmaydi. Jonli o'lchov (conv 285, "bu hafta nima muhokama
+#: qilindi?"): oyna dayjesti 17,949 chiqish tokeni — javob 150 satrni esse
+#: qilib qayta aytardi. Dayjest/roll-call qisqa bo'lishi kerak; mavzu javobi
+#: o'rtacha; faqat "batafsil" so'ralganda to'liq 8000.
+SYNTH_BUDGET_DIGEST = 3_000  # window / window_stats — chat bo'yicha 1-3 satr
+SYNTH_BUDGET_TOPIC = 6_000  # mavzu qidiruvi
+SYNTH_BUDGET_DETAIL = SYNTH_MAX_TOKENS  # explain / deeper / "batafsil"
+#: Byudjetning qanchasini ko'rinadigan matnga mo'ljallash: Gemini'da fikrlash
+#: tokenlari ham `max_tokens` dan yeyiladi (`llm/gemini.py`).
+SYNTH_VISIBLE_SHARE = 0.6
+#: "Batafsil / to'liq / подробно / in detail" — foydalanuvchi uzun javob so'ragan.
+_DETAIL_RE = re.compile(
+    r"batafsil|to'liq\s+(?:yoz|ayt|ma'lumot|tushuntir|javob)|to‘liq|mufassal|kengroq"
+    r"|подробн|детальн|развёрнут|развернут"
+    r"|\bin\s+detail\b|\bdetailed\b|\belaborate\b|\bfull\s+(?:details|report|breakdown)\b",
+    re.IGNORECASE,
+)
 PLAN_MAX_TOKENS = 700
 REFLECT_MAX_TOKENS = 300
 HYDE_MAX_TOKENS = 200
@@ -653,6 +672,8 @@ class Coverage:
     window_taken: int = 0  # shundan dalilga kirgani (takrorlari bilan)
     #: Oynada bitta vakilga yig'ilgan takror xabarlar (`window_search.dedup_window`).
     dropped_duplicates: int = 0
+    #: Mavzusiz dayjest: dalil chat bo'yicha namuna, sanoqlar aniq (`window_search`).
+    window_sampled: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -667,6 +688,7 @@ class Coverage:
                 "total": self.window_total,
                 "taken": self.window_taken,
                 "dropped_duplicates": self.dropped_duplicates,
+                "sampled": self.window_sampled,
             },
             "buckets_scanned": self.buckets_scanned,
             "buckets_planned": self.buckets_planned,
@@ -2841,6 +2863,52 @@ def external_claim_note(answer: str, external_hits: int, *, locale: str = "uz") 
     return ""
 
 
+@dataclass(frozen=True, slots=True)
+class SynthBudget:
+    """Sintez chiqishi: `max_tokens`, shakl turi va davom ettirish ruxsati."""
+
+    max_tokens: int
+    kind: str  # digest | topic | detail
+    allow_continue: bool
+
+    @property
+    def visible_tokens(self) -> int:
+        return int(self.max_tokens * SYNTH_VISIBLE_SHARE)
+
+    def note(self) -> str:
+        """User turn'idagi `answer_length:` satri (system'da emas — kesh prefiksi)."""
+        n = self.visible_tokens
+        if self.kind == "digest":
+            return (
+                f"answer_length: ~{n} tokens — a short digest: 1-3 lines per chat "
+                "(uz: qisqa, chat bo'yicha 1–3 satr), no essay, no restating every message"
+            )
+        if self.kind == "detail":
+            return f"answer_length: up to ~{n} tokens — the user asked for detail"
+        return f"answer_length: ~{n} tokens — a focused answer, bullets over long paragraphs"
+
+
+def wants_detail(question: str) -> bool:
+    """Foydalanuvchi aniq "batafsil / подробно / in detail" deganmi."""
+    return bool(_DETAIL_RE.search(question or ""))
+
+
+def synth_budget(question: str, *, follow_up: str = "none", window: bool = False) -> SynthBudget:
+    """Niyat bo'yicha chiqish byudjeti — **kodda**, modeldan so'ralmaydi.
+
+    `explain` / `deeper` yoki savolda "batafsil" → to'liq `SYNTH_MAX_TOKENS` va
+    kesilsa bitta davom ettirish; oyna (dayjest, roll-call, sanoq) → 3000;
+    qolgan mavzu javobi → 6000. Davom ettirish faqat batafsil so'ralganda:
+    qisqa javob kesilsa — bu byudjet ogohlantirishi (`truncated_answer`), yana
+    8000 token to'lash emas.
+    """
+    if follow_up in ("explain", "deeper") or wants_detail(question):
+        return SynthBudget(SYNTH_BUDGET_DETAIL, "detail", True)
+    if window:
+        return SynthBudget(SYNTH_BUDGET_DIGEST, "digest", False)
+    return SynthBudget(SYNTH_BUDGET_TOPIC, "topic", False)
+
+
 async def synthesize(
     meter: _Meter,
     question: str,
@@ -2856,6 +2924,7 @@ async def synthesize(
     mode_note: str = "",
     outside_asked: bool = False,
     task: Task | None = None,
+    budget: SynthBudget | None = None,
 ) -> tuple[str, list[DeepEvidence], ChatResult | None]:
     """Yagona begona matn ko'ruvchi bosqich.
 
@@ -2872,7 +2941,13 @@ async def synthesize(
     yoziladi — sanoq yo'li (`window_stats`) javobi raqamlarni so'zga
     aylantiradi xolos, kalit dalil topish emas, shuning uchun arzonroq
     `Task.SEARCH` yetarli.
+
+    `budget` (`synth_budget`) — niyat bo'yicha `max_tokens` va `answer_length:`
+    satri; davom ettirish faqat `budget.allow_continue` da. Berilmasa — eski
+    xulq: `SYNTH_MAX_TOKENS` va kesilsa bitta davom.
     """
+    max_tokens = min(budget.max_tokens, SYNTH_MAX_TOKENS) if budget else SYNTH_MAX_TOKENS
+    may_continue = budget.allow_continue if budget else True
     envelope, kept = build_evidence_envelope(evidence, clusters, claims_block=claims_block)
     note = f"(locale: {locale}; now: {(now or datetime.now(UTC)).strftime('%Y-%m-%d %H:%M UTC')})"
     hist = render_history(history)
@@ -2882,6 +2957,8 @@ async def synthesize(
     # prompt kesh prefiksi va u har turn'da bir xil qolishi kerak.
     if mode_note:
         tail = f"\n{mode_note}{tail}"
+    if budget is not None:
+        tail = f"\n{budget.note()}{tail}"
     # Fakt satri **kodda** hisoblanadi (qamrov bilan bir mantiq): modelning
     # o'zi tashqi dalil bor-yo'qligini dalil satrlaridan taxmin qilmasin.
     fact = external_fact(kept, outside_asked=outside_asked)
@@ -2889,12 +2966,12 @@ async def synthesize(
     task = task if task is not None else (Task.DEEP if deep else Task.SEARCH)
     messages = [Msg.system(DEEP_SYNTH_PROMPT), Msg.user(user_turn)]
     try:
-        res = await meter.chat(task, messages, max_tokens=SYNTH_MAX_TOKENS)
+        res = await meter.chat(task, messages, max_tokens=max_tokens)
     except LLMError as exc:
         log.warning("deep.synth_failed", error=str(exc)[:200])
         raise DeepSearchError("llm", str(exc)[:200]) from exc
     answer = res.text.strip()
-    if not is_length_finish(res.finish_reason):
+    if not is_length_finish(res.finish_reason) or not may_continue:
         return answer, kept, res
     log.info("deep.synth_continued", tokens_out=res.usage.tokens_out)
     try:
@@ -2905,7 +2982,7 @@ async def synthesize(
                 Msg.assistant(answer, signature=res.signature),
                 Msg.user(SYNTH_CONTINUE_NUDGE),
             ],
-            max_tokens=SYNTH_MAX_TOKENS,
+            max_tokens=max_tokens,
         )
     except LLMError as exc:  # davomi kelmadi — kesilgan javob baribir javob
         log.warning("deep.synth_continue_failed", error=str(exc)[:200])
@@ -3070,6 +3147,7 @@ def build_coverage(
         cov.chats_searched = int(window.get("chats") or cov.chats_searched)
         cov.kept = cov.window_taken
         cov.dropped_duplicates = int(window.get("dropped_duplicates") or 0)
+        cov.window_sampled = bool(window.get("sampled"))
     cov.confidence = confidence_of(
         evidence=len(evidence),
         clusters=len(clusters),
@@ -3113,6 +3191,8 @@ _COVERAGE_LABELS: dict[str, dict[str, str]] = {
         "window_all": "hammasi ko'rildi",
         "window_part": "{taken} / {total} ko'rildi (eng yangisidan)",
         "window_msgs": "xabar",
+        "window_msgs_in": "xabar oynada",
+        "window_sample": "{taken} tasi o'qildi (chat bo'yicha namuna) · hisoblar aniq",
         "window_counted": "hammasi hisoblandi",
         "window_out": "faqat men yuborgan xabarlar",
         "window_both": "men shu oynada yozgan chatlardagi barcha xabarlar (kiruvchi + chiquvchi)",
@@ -3154,6 +3234,8 @@ _COVERAGE_LABELS: dict[str, dict[str, str]] = {
         "window_all": "просмотрено полностью",
         "window_part": "просмотрено {taken} из {total} (с самых новых)",
         "window_msgs": "сообщений",
+        "window_msgs_in": "сообщений в окне",
+        "window_sample": "прочитано {taken} (выборка по чатам) · подсчёты точные",
         "window_counted": "подсчитаны все",
         "window_out": "только отправленные мной сообщения",
         "window_both": "все сообщения (входящие + исходящие) в чатах, где я писал в этом окне",
@@ -3194,6 +3276,8 @@ _COVERAGE_LABELS: dict[str, dict[str, str]] = {
         "window_all": "all of it was read",
         "window_part": "{taken} of {total} read (newest first)",
         "window_msgs": "messages",
+        "window_msgs_in": "messages in the window",
+        "window_sample": "{taken} read (per-chat sample) · counts are exact",
         "window_counted": "all of them counted",
         "window_out": "only messages I sent",
         "window_both": "all messages (in + out) in chats where I wrote in this window",
@@ -3266,16 +3350,21 @@ def render_coverage(cov: Coverage, *, locale: str = "uz") -> str:
             kind="",
             tz=cov.window_tz or TW.DEFAULT_TZ,
         )
+        msgs = f"{cov.window_total} {lab['window_msgs']}"
         if cov.window_stats:
             taken = lab["window_counted"]
+        elif cov.window_sampled:
+            # "12,461 xabar oynada · 400 tasi o'qildi (chat bo'yicha namuna) ·
+            # hisoblar aniq" — namuna reja edi, kesish emas.
+            msgs = f"{cov.window_total:,} {lab['window_msgs_in']}"
+            taken = lab["window_sample"].format(taken=f"{cov.window_taken:,}")
         elif cov.window_taken >= cov.window_total:
             taken = lab["window_all"]
         else:
             taken = lab["window_part"].format(taken=cov.window_taken, total=cov.window_total)
         out += (
             f"\n\n{lab['window']}: {TW.format_window(win)} · "
-            f"{cov.chats_searched} {lab['chats']} · "
-            f"{cov.window_total} {lab['window_msgs']} · {taken}"
+            f"{cov.chats_searched} {lab['chats']} · {msgs} · {taken}"
         )
         if cov.inbox:
             out += f"\n\n{lab['window_inbox']}"
@@ -4011,6 +4100,7 @@ async def _run_pipeline(
                         else len(outcome.evidence) + outcome.stats.dropped_duplicates
                     ),
                     "dropped_duplicates": outcome.stats.dropped_duplicates,
+                    "sampled": outcome.window_sampled,
                     "chats": wcount.chats if wcount else 0,
                 }
                 if outcome.stats.stopped_by == "estimate_only":
@@ -4246,6 +4336,7 @@ async def _run_pipeline(
         external_links=server_out.external_links,
     )
     taint.add(evidence)
+    answer_budget = synth_budget(question, follow_up=plan.intent_follow_up, window=window_used)
     answer, kept, res = await synthesize(
         meter,
         question,
@@ -4263,6 +4354,7 @@ async def _run_pipeline(
         # Sanoq javobi raqamlarni so'zga aylantiradi — arzonroq Task.SEARCH
         # yetarli, `Task.DEEP` bu yo'lda ortiqcha xarajat.
         task=Task.SEARCH if window_stats_used else None,
+        budget=answer_budget,
     )
     state["answer"] = answer  # H2: uzilish javobdan keyin bo'lsa ham matn yo'qolmaydi
     if len(kept) < len(evidence):
@@ -4366,6 +4458,7 @@ async def _run_pipeline(
         # eval ham uni to'liq javob deb sanardi.
         "finish_reason": finish_reason,
         "truncated_answer": truncated_answer,
+        "answer_budget": {"kind": answer_budget.kind, "max_tokens": answer_budget.max_tokens},
         "rounds": rounds_used,
         "candidates": len(candidates),
         "clusters": result.clusters,

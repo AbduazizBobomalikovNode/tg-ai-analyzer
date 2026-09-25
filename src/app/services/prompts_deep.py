@@ -26,7 +26,7 @@ system'ga emas, user turn'iga qo'shiladi.
 
 from __future__ import annotations
 
-DEEP_PROMPT_VERSION = "2026-09-25.3"
+DEEP_PROMPT_VERSION = "2026-09-25.4"
 
 # Ishonch qoidalari yagona manbadan (`prompts._CORE`) olinadi — ikkala joyda
 # ikki xil yozilib qolmasin. Import bo'lmasa (masalan prompt'lar bo'lingan
@@ -369,6 +369,10 @@ bergan", "кто присылал", "who sent", "who said"), name the sender and
 item you cite, not the id alone — the sender is on the line itself (after the time) and \
 the chat is its `###` heading. More generally, whenever the question implies a person, \
 state that person next to the fact you cite, not just its message id.
+- The turn carries an `answer_length:` line computed by the system — a target size for the \
+whole answer and a shape hint. Stay within it: a digest or roll-call gets short lines per \
+chat, not an essay and not a retelling of every message; only a request for detail gets the \
+long form. Running past the target cuts the answer off mid-sentence.
 - When the evidence disagrees with itself, say so and cite both sides. When it does not \
 contain the answer, say that plainly and name what is missing — never fill the gap with a \
 guess.

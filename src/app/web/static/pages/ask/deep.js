@@ -755,6 +755,21 @@ function bar(label, value, ratio) {
 /* ── baho kartasi ─────────────────────────────────────────────────── */
 
 /**
+ * Baho kartasi qachon ko'rinadi: `exhaustive` da har doim (tasdiq shu
+ * kartada); `deep` / `fast` da faqat jami baho (`est_total_usd`)
+ * `DEEP_CARD_MIN_USD` dan oshsa — arzon "bugun kim yozdi" savolida karta
+ * shovqin, qimmat oyna dayjestida esa foydalanuvchi narxni ko'rishi kerak.
+ * Chegara `window_search.WINDOW_CONFIRM_MIN_USD` bilan bir.
+ */
+export const DEEP_CARD_MIN_USD = 0.05;
+
+export function estimateCardVisible(est, mode = "deep") {
+  if (!est) return false;
+  if ((est.mode || mode) === "exhaustive") return true;
+  return Number(est.est_total_usd || 0) > DEEP_CARD_MIN_USD;
+}
+
+/**
  * Baho kartasi shablondan (`#tpl-estimate`) klonlanadi — matnlar serverda
  * tarjima qilinadi, bu yerda faqat `textContent`. Shablon bo'lmasa (eski
  * sahifa keshi) — `el()` bilan zaxira karta.
@@ -1028,8 +1043,9 @@ export function createDeepPanel(answerEl, opts = {}) {
 
   const onEvent = (kind, d) => {
     reduceEvent(model, kind, d, Date.now());
-    if (kind === "estimate") paintEstimate(null);
-    else if (kind === "plan") { renderPlan(plan, d); plan.hidden = false; }
+    if (kind === "estimate") {
+      if (estimateCardVisible(model.estimate, mode)) paintEstimate(null);
+    } else if (kind === "plan") { renderPlan(plan, d); plan.hidden = false; }
     else if (kind === "pull") countTo(model.funnel.candidates);
     else if (kind === "cluster") {
       replace(clusters, clusterChips(model.clusters, answerEl));

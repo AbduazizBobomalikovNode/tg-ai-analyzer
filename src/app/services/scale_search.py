@@ -646,6 +646,8 @@ class ScaleOutcome:
     #: Kodda hisoblangan sanoqlar bloki (`window_search.render_window_stats`) —
     #: dalil konvertining ichiga `claims_block` bilan birga tushadi.
     window_stats: str = ""
+    #: Mavzusiz dayjest: dalil chat bo'yicha namuna (`window_search.pull_window_sample`).
+    window_sampled: bool = False
 
 
 class _Budget:

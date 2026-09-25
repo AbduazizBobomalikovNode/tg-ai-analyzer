@@ -2583,7 +2583,10 @@ def test_deep_prompts_describe_the_follow_up_contract() -> None:
     # yo'naltiradi.
     # 2026-09-25.3 — sintez/map/filtr prompt'lari ixcham dalil formatini
     # tasvirlaydi (`### chat` → `#### kun` → `[#id] HH:MM kim: matn`, e7aacff).
-    assert DEEP_PROMPT_VERSION == "2026-09-25.3"
+    # 2026-09-25.4 — `answer_length:` satri (niyat bo'yicha chiqish byudjeti,
+    # `synth_budget`; jonli conv 285: oyna dayjesti 17,949 chiqish tokeni).
+    assert DEEP_PROMPT_VERSION == "2026-09-25.4"
+    assert "answer_length:" in DEEP_SYNTH_PROMPT
     # Eski `[chat | date | sender]` qavsi hech bir prompt'da qolmasin.
     for prompt in (DEEP_SYNTH_PROMPT, SCALE_MAP_PROMPT, SCALE_FILTER_PROMPT):
         assert "| date |" not in prompt and "[chat title |" not in prompt
@@ -3012,3 +3015,92 @@ def test_direct_router_refunds_the_deep_rate_slot(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(LIM, "refund_deep_rate", lambda uid: seen.append(uid))
     router._refund_unused(7)
     assert seen == [7]
+
+
+# ─── niyat bo'yicha chiqish byudjeti (jonli conv 285: 17,949 chiqish tokeni) ──
+
+
+@pytest.mark.parametrize(
+    ("question", "follow_up", "window", "kind", "max_tokens", "cont"),
+    [
+        ("bu hafta nima muhokama qilindi?", "none", True, "digest", 3_000, False),
+        ("kecha kimlar yozgan?", "none", True, "digest", 3_000, False),
+        ("IT ta'lim haqida nima deyishdi?", "none", False, "topic", 6_000, False),
+        ("bu hafta nima bo'ldi, batafsil yoz", "none", True, "detail", 8_000, True),
+        ("расскажи подробно про оплату", "none", False, "detail", 8_000, True),
+        ("2-bandni tushuntir", "explain", False, "detail", 8_000, True),
+        ("chuqurroq qidir", "deeper", True, "detail", 8_000, True),
+    ],
+)
+def test_synth_budget_by_intent(
+    question: str, follow_up: str, window: bool, kind: str, max_tokens: int, cont: bool
+) -> None:
+    b = DS.synth_budget(question, follow_up=follow_up, window=window)
+    assert (b.kind, b.max_tokens, b.allow_continue) == (kind, max_tokens, cont)
+    assert b.max_tokens <= DS.SYNTH_MAX_TOKENS
+    assert b.note().startswith("answer_length: ")
+    if kind == "digest":
+        assert "qisqa, chat bo'yicha 1" in b.note() and "3 satr" in b.note()
+
+
+class _BudgetLLM:
+    """Har chaqiruvda `max_tokens` ni yozib oladi; birinchi javob kesilgan."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def chat(self, task: Any, messages: list[Any], **kw: Any) -> ChatResult:
+        self.calls.append({"messages": list(messages), "max_tokens": kw.get("max_tokens")})
+        return ChatResult(
+            text="Qisqa dayjest #c1m101",
+            tool_calls=[],
+            model="fake-model",
+            provider="fake",
+            usage=Usage(tokens_in=10, tokens_out=5),
+            finish_reason="MAX_TOKENS" if len(self.calls) == 1 else "STOP",
+        )
+
+
+@pytest.mark.asyncio
+async def test_digest_budget_is_passed_and_is_not_continued() -> None:
+    llm = _BudgetLLM()
+    budget = DS.synth_budget("bu hafta nima muhokama qilindi?", window=True)
+    _answer, _kept, res = await DS.synthesize(
+        DS._Meter(llm),  # type: ignore[arg-type]
+        "bu hafta nima muhokama qilindi?",
+        DS.to_evidence([_hit(1)], []),
+        [],
+        locale="uz",
+        deep=True,
+        budget=budget,
+    )
+    assert len(llm.calls) == 1, "dayjest kesilsa ham davom ettirilmaydi"
+    assert llm.calls[0]["max_tokens"] == DS.SYNTH_BUDGET_DIGEST
+    assert "answer_length: ~1800 tokens" in llm.calls[0]["messages"][-1].content
+    assert res is not None and DS.is_length_finish(res.finish_reason)
+
+
+@pytest.mark.asyncio
+async def test_detail_budget_uses_the_hard_cap_and_continues_once() -> None:
+    llm = _BudgetLLM()
+    budget = DS.synth_budget("batafsil yozib ber", window=True)
+    await DS.synthesize(
+        DS._Meter(llm),  # type: ignore[arg-type]
+        "batafsil yozib ber",
+        DS.to_evidence([_hit(1)], []),
+        [],
+        locale="uz",
+        deep=True,
+        budget=budget,
+    )
+    assert [c["max_tokens"] for c in llm.calls] == [DS.SYNTH_MAX_TOKENS, DS.SYNTH_MAX_TOKENS]
+
+
+@pytest.mark.asyncio
+async def test_run_records_the_answer_budget(
+    monkeypatch: pytest.MonkeyPatch, wired: dict[str, Any]
+) -> None:
+    use_multi(monkeypatch, lambda q: [_hit(1)])
+    await DS.run_deep_search(factory, 1, 10, "to'lov?", locale="uz", llm=FakeLLM())  # type: ignore[arg-type]
+    meta = wired["persisted"]["context_meta"]
+    assert meta["answer_budget"] == {"kind": "topic", "max_tokens": DS.SYNTH_BUDGET_TOPIC}
