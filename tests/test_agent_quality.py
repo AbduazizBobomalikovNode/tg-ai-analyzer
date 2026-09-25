@@ -763,6 +763,37 @@ def test_msg_link_uses_link_prefix_for_private_chats() -> None:
     assert msg_link(_linked_chat(username=None, link_prefix=None), 12) is None
 
 
+def test_msg_link_never_links_a_private_user_chat_even_with_a_username() -> None:
+    """Jonli regressiya: "Otabek Kursdosh" javobida `t.me/JOO571/<msg>` chiqdi —
+
+    `chats.type == 'private'` (shaxsiy DM) uchun `msg_link` har doim `None`,
+    `username`/`link_prefix` bor-yo'qligidan qat'iy nazar: `@username/<id>`
+    shakli faqat ochiq kanal/supergruh postiga ishlaydi, DM tarixiga emas.
+    """
+    from app.services.analytics import msg_link
+
+    with_username = _linked_chat(
+        id=9, type=ChatType.PRIVATE, username="JOO571", link_prefix="https://t.me/JOO571/"
+    )
+    assert msg_link(with_username, 918599) is None
+    without_username = _linked_chat(id=9, type=ChatType.PRIVATE, username=None, link_prefix=None)
+    assert msg_link(without_username, 1) is None
+
+
+def test_msg_link_public_supergroup_and_private_channel() -> None:
+    """Supergruh (username bor) → havola; yopiq kanal → `/c/` havola."""
+    from app.services.analytics import msg_link
+
+    public_supergroup = _linked_chat(
+        type=ChatType.SUPERGROUP, username="uznews", link_prefix="https://t.me/uznews/"
+    )
+    assert msg_link(public_supergroup, 12) == "https://t.me/uznews/12"
+    private_channel = _linked_chat(
+        id=42, type=ChatType.CHANNEL, username=None, link_prefix="https://t.me/c/42/"
+    )
+    assert msg_link(private_channel, 5) == "https://t.me/c/42/5"
+
+
 def test_tool_line_renders_the_private_chat_link() -> None:
     chat = _linked_chat()
     msg = SimpleNamespace(

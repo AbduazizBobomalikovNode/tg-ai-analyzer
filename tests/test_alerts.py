@@ -19,7 +19,7 @@ from typing import Any
 
 import pytest
 
-from app.db.models import AlertKind
+from app.db.models import AlertKind, ChatType
 from app.services import alerts as AL
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
@@ -368,7 +368,27 @@ def _event(i: int, rule_id: int = 1, chat_id: int = 5) -> Any:
 
 
 def _chat(chat_id: int = 5, title: str = "Ish") -> Any:
-    return SimpleNamespace(id=chat_id, title=title, link_prefix="https://t.me/c/123/")
+    return SimpleNamespace(
+        id=chat_id,
+        title=title,
+        type=ChatType.SUPERGROUP,
+        username=None,
+        link_prefix="https://t.me/c/123/",
+    )
+
+
+def test_message_link_delegates_to_the_single_link_builder() -> None:
+    """`alerts.message_link` endi `analytics.msg_link` ni chaqiradi — ikkinchi
+
+    havola quruvchi yo'q. Shaxsiy chat (jonli regressiya: username'li DM
+    `t.me/<username>/<id>` soxta havola berardi) uchun har doim bo'sh satr.
+    """
+    assert AL.message_link(_chat(), 9000) == "https://t.me/c/123/9000"
+    assert AL.message_link(None, 1) == ""
+    private = SimpleNamespace(
+        id=9, title="Otabek Kursdosh", type=ChatType.PRIVATE, username="JOO571", link_prefix=None
+    )
+    assert AL.message_link(private, 918599) == ""
 
 
 def _msg(i: int, text: str = "to'lov qilindi") -> Any:

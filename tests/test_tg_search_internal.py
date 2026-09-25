@@ -654,6 +654,34 @@ def test_peer_kind_is_carried_on_every_hit() -> None:
     assert TS.hit_of(group_msg, {}).peer_kind == "chat"
 
 
+def test_hit_of_never_links_a_private_user_chat_even_with_a_username() -> None:
+    """Jonli regressiya: `messages.SearchGlobal` shaxsiy chatdagi xabarni ham
+
+    qaytaradi — `username`li `User` entity `t.me/<username>/<id>` soxta
+    havola yasamasin (bu shakl faqat ochiq kanal/supergruh postiga ishlaydi).
+    """
+    user_msg = SimpleNamespace(
+        id=5,
+        date=None,
+        message="salom",
+        media=None,
+        from_id=SimpleNamespace(user_id=5),
+        peer_id=SimpleNamespace(user_id=5),
+    )
+    index = {5: _entity(5, username="JOO571")}
+    hit = TS.hit_of(user_msg, index)
+    assert hit.peer_kind == "user"
+    assert hit.link == ""
+
+
+def test_hit_of_links_a_channel_with_a_username() -> None:
+    """Nazorat: kanal/supergruhda `username` havolasi baribir ishlaydi."""
+    msg = _msg(7, channel_id=100)
+    index = {100: _entity(100, title="Chan", username="channelname")}
+    hit = TS.hit_of(msg, index)
+    assert hit.link == "https://t.me/channelname/7"
+
+
 def test_peer_kind_matches_maps_channel_to_supergroup_too() -> None:
     assert TS.peer_kind_matches("channel", "channel")
     assert TS.peer_kind_matches("channel", "supergroup")  # supergruh ham PeerChannel

@@ -139,6 +139,13 @@ SYNTH_CONTINUE_NUDGE = "Davom eting — oxirgi tugallanmagan jumladan boshlab, t
 SYNTH_BUDGET_DIGEST = 3_000  # window / window_stats — chat bo'yicha 1-3 satr
 SYNTH_BUDGET_TOPIC = 6_000  # mavzu qidiruvi
 SYNTH_BUDGET_DETAIL = SYNTH_MAX_TOKENS  # explain / deeper / "batafsil"
+#: Sintezga tushadigan dalil satrlari qopqog'i — **faqat** `synth_budget`
+#: "digest" (window/window_stats, "batafsil" so'ralmagan) deb topgan turn'da.
+#: Chiqish byudjeti (`SYNTH_BUDGET_DIGEST`, 1-3 satr/chat) 150 satrga
+#: hech qachon sig'maydi — ortiqcha satr faqat kirish tokeni to'laydi.
+#: Mavzu yo'li (`topic`/`detail`) `scale_search.SYNTH_EVIDENCE_LINES` (150) da
+#: qoladi — o'sha yerda sitatalar tarqoqroq, kesish qamrovni kamaytiradi.
+DIGEST_SYNTH_LINES = 80
 #: Byudjetning qanchasini ko'rinadigan matnga mo'ljallash (`answer_length:`).
 SYNTH_VISIBLE_SHARE = 0.6
 #: Gemini'da fikrlash tokenlari `max_tokens` dan yeyiladi (`llm/gemini.py`),
@@ -4072,6 +4079,14 @@ async def _run_pipeline(
                 scale_used = True
                 window_used = True
                 window_stats_used = bool(plan.window_stats)
+                # `synth_budget` bilan **bir xil** niyat qoidasi: "batafsil"
+                # so'ralmagan window/stats turn'i — digest, sintez satrlari
+                # DIGEST_SYNTH_LINES (80) ga kesiladi. "Batafsil" so'ralsa
+                # (`kind == "detail"`) topic bilan bir xil 150 da qoladi.
+                digest_lines = (
+                    synth_budget(question, follow_up=plan.intent_follow_up, window=True).kind
+                    == "digest"
+                )
                 outcome = await WS.run_window(
                     session_factory,
                     account_id=account_id,
@@ -4148,7 +4163,8 @@ async def _run_pipeline(
                 candidates = list(outcome.pool)
                 deduped = list(outcome.evidence)
                 clusters = []
-                ranked = list(outcome.evidence[: _SC.SYNTH_EVIDENCE_LINES])
+                synth_cap = DIGEST_SYNTH_LINES if digest_lines else _SC.SYNTH_EVIDENCE_LINES
+                ranked = list(outcome.evidence[:synth_cap])
                 # Sanoq bloki (kodda hisoblangan) + map da'volari — ikkalasi
                 # ham **bitta** dalil konvertining ichiga tushadi.
                 blocks = (outcome.window_stats, _SC.render_claims_block(outcome.claims, [], []))
@@ -4344,10 +4360,15 @@ async def _run_pipeline(
         log.warning("deep.hard_timeout", elapsed_s=round(elapsed(), 1))
 
     # ── sintez (qattiq devordan tashqarida — bor narsa bilan javob beramiz) ──
+    # Shaxsiy (`private`) chat — hech qachon havola, `link_prefix` ustuni
+    # eski/qo'lda kiritilgan bo'lsa ham (`analytics.msg_link` bilan bir xil
+    # mudofaa: username shaxsiy DM'ga ochilmaydigan havola beradi).
     evidence = to_evidence(
         ranked,
         clusters,
-        link_prefixes={c.id: c.link_prefix or "" for c in chat_rows},
+        link_prefixes={
+            c.id: (c.link_prefix or "") for c in chat_rows if c.type != ChatType.PRIVATE
+        },
         server_ids=server_out.server_ids,
         external_links=server_out.external_links,
     )

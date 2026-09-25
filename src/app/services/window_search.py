@@ -452,6 +452,7 @@ def estimate_window(
     window_from_question: bool = True,
     spec: WindowSpec | None = None,
     filtered: bool = False,
+    digest: bool = True,
 ) -> SC.Estimate:
     """Oyna bahosi — **aniq sanoqdan**, bucket taxminidan emas.
 
@@ -459,8 +460,10 @@ def estimate_window(
     alohida (`est_total_usd`), `scale_search.estimate` bilan bir uslubda.
     Qopqoqlar **yugurish bilan bir xil**: map kirishi ≤ `WINDOW_MAP_MAX_MSGS`
     (mavzusiz katta oynada chat bo'yicha namuna), bo'laklar to'planadi
-    (`window_chunks`), sintez satrlari ≤ `SYNTH_EVIDENCE_LINES`, sintez
-    chiqishi dayjest byudjeti bilan (`deep_search.SYNTH_BUDGET_DIGEST`).
+    (`window_chunks`), sintez satrlari ≤ `DS.DIGEST_SYNTH_LINES` (`digest=True`,
+    ya'ni "batafsil" so'ralmagan window/stats turn'i) yoki `SYNTH_EVIDENCE_LINES`
+    (`digest=False` — "batafsil" so'ralgan), sintez chiqishi dayjest byudjeti
+    bilan (`deep_search.SYNTH_BUDGET_DIGEST`).
     """
     prices = {
         "filter": SC._price_for(Task.ROUTE),
@@ -490,7 +493,8 @@ def estimate_window(
     )
     map_out = chunks * SC.EST_MAP_OUT_TOKENS
 
-    synth_lines = min(SC.SYNTH_EVIDENCE_LINES, map_msgs)
+    synth_cap = DS.DIGEST_SYNTH_LINES if digest else SC.SYNTH_EVIDENCE_LINES
+    synth_lines = min(synth_cap, map_msgs)
     synth_in = (
         int(len(DEEP_SYNTH_PROMPT) / S.CHARS_PER_TOKEN)
         + int(synth_lines * WINDOW_EST_LINE_CHARS / S.CHARS_PER_TOKEN)
@@ -1003,12 +1007,16 @@ async def run_window(
         [e for e in plan.entities if e and e.strip()]
     )
 
+    digest = (
+        DS.synth_budget(question, follow_up=plan.intent_follow_up, window=True).kind == "digest"
+    )
     est = estimate_window(
         count,
         mode=mode,
         window_from_question=plan.window_from_question,
         spec=spec,
         filtered=will_filter,
+        digest=digest,
     )
     outcome.estimate = est
     stats.est_cost_usd = est.est_cost_usd

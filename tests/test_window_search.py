@@ -1391,6 +1391,21 @@ def test_window_estimate_follows_the_map_and_synth_caps() -> None:
     assert big.est_total_usd > WS.WINDOW_CONFIRM_MIN_USD
 
 
+def test_window_estimate_digest_is_cheaper_than_detail() -> None:
+    """`digest=True` (default) sintez satrlarini `DIGEST_SYNTH_LINES` (80) ga
+
+    kesadi — `SYNTH_EVIDENCE_LINES` (150) dan arzonroq, chunki dayjest
+    javobi chat bo'yicha 1-3 satr, ortiqcha kirish tokeni behuda.
+    "Batafsil" so'ralganda (`digest=False`) topic bilan bir xil 150 qoladi.
+    """
+    count = WS.WindowCount(total=WS.WINDOW_MAP_MAX_MSGS, chats=40, groups=280)
+    digest = WS.estimate_window(count, digest=True)
+    detail = WS.estimate_window(count, digest=False)
+    assert digest.breakdown["synth"] < detail.breakdown["synth"]
+    assert digest.est_total_usd < detail.est_total_usd
+    assert DS.DIGEST_SYNTH_LINES == 80
+
+
 def test_window_coverage_never_claims_a_ranking_cut() -> None:
     """Jonli conv 287: namuna "reyting bilan tashlandi (400/12461)" deb izohlandi."""
     cov = DS.build_coverage(

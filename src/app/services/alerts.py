@@ -65,6 +65,7 @@ from app.db.models import Account, AlertEvent, AlertKind, AlertRule, Chat, Messa
 from app.llm import EMBED_QUERY, LLM, LLMError
 from app.logging import get_logger
 from app.services import untrusted as U
+from app.services.analytics import msg_link
 from app.services.search import fold_terms
 from app.services.textnorm import uz_fold
 
@@ -245,8 +246,17 @@ def rule_label(rule: Any) -> str:
 
 
 def message_link(chat: Any, tg_msg_id: int) -> str:
-    prefix = getattr(chat, "link_prefix", None)
-    return f"{prefix}{int(tg_msg_id)}" if prefix else ""
+    """`analytics.msg_link` ning ushbu modulga moslashtirilgan qobig'i.
+
+    Ilgari bu yerda `chat.link_prefix` mustaqil o'qilardi — **ikkinchi**
+    havola quruvchi, "yagona manbadan" invariantini buzardi va shaxsiy chat
+    uchun ham username bo'lsa havola chiqarardi. Endi bitta yagona
+    `analytics.msg_link` chaqiriladi (u shaxsiy chatga har doim `None`
+    qaytaradi).
+    """
+    if chat is None:
+        return ""
+    return msg_link(chat, int(tg_msg_id)) or ""
 
 
 # ─── skaner ──────────────────────────────────────────────────────────────────

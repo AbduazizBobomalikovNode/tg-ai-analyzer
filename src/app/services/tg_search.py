@@ -269,7 +269,21 @@ def chat_of(m: Any, index: dict[int, Any]) -> tuple[str, Any, int | None]:
     return (entity_name(ent) or (f"chat:{pid}" if pid else "—")), ent, pid
 
 
-def tg_link(entity: Any, chat_id: int | None, msg_id: Any) -> str:
+def tg_link(entity: Any, chat_id: int | None, msg_id: Any, *, peer_kind: str | None = None) -> str:
+    """Server topilmasi havolasi — `analytics.msg_link` bilan bir xil qoida.
+
+    Shaxsiy chat (`peer_kind == "user"`, yoki `peer_kind` berilmasa Telethon
+    `User*` entity) — havola yo'q, `username` bo'lsa ham: `@username/<id>`
+    shakli faqat ochiq kanal/supergruh postiga ishlaydi, foydalanuvchining DM
+    tarixiga emas (jonli regressiya: `messages.SearchGlobal` shaxsiy chatdagi
+    xabarni ham qaytaradi, o'sha yerdagi `username`li `User` entity
+    `t.me/<username>/<id>` soxta havola yasardi).
+    """
+    is_user = (
+        peer_kind == "user" if peer_kind is not None else type(entity).__name__.startswith("User")
+    )
+    if is_user:
+        return ""
     uname = getattr(entity, "username", None)
     if uname:
         return f"https://t.me/{uname}/{msg_id}"
@@ -289,15 +303,16 @@ def hit_of(
 ) -> ServerHit:
     """Xom TL xabari → `ServerHit`. Nom/chat faqat javobdagi entity'lardan."""
     title, ent, pid = chat_of(m, index)
+    kind = peer_kind_of(getattr(m, "peer_id", None))
     return ServerHit(
         tg_msg_id=int(getattr(m, "id", 0) or 0),
         tg_peer_id=pid,
-        peer_kind=peer_kind_of(getattr(m, "peer_id", None)),
+        peer_kind=kind,
         date=getattr(m, "date", None),
         sender=who_of(m, index),
         text=_body_of(m, snippet),
         chat_title=chat_title or title,
-        link=tg_link(ent, pid, getattr(m, "id", 0)),
+        link=tg_link(ent, pid, getattr(m, "id", 0), peer_kind=kind),
         raw=m,
     )
 

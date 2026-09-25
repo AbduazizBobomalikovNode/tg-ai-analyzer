@@ -2168,6 +2168,76 @@ async def test_run_window_inbox_question_never_asks_about_outside_channels(
 
 
 @pytest.mark.asyncio
+async def test_window_digest_synth_lines_cap_at_80_not_150(
+    monkeypatch: pytest.MonkeyPatch, wired: dict[str, Any]
+) -> None:
+    """Dayjest (window, "batafsil" so'ralmagan) sintezga ≤80 dalil satri beradi.
+
+    `DIGEST_SYNTH_LINES` (80) < `scale_search.SYNTH_EVIDENCE_LINES` (150):
+    ortiqcha satr chat bo'yicha 1-3 qatorlik javobga hech narsa qo'shmaydi,
+    faqat kirish tokeni to'laydi. "Batafsil" so'ralganda (`detail`) topic
+    bilan bir xil 150 da qoladi — bu yerda 100 dalilning hammasi o'tadi.
+    """
+    hits = [_hit(i, chat_id=1) for i in range(1, 101)]  # 100 ta — 80 dan ko'p, 150 dan kam
+
+    async def fake_run_window(
+        _session_factory: Any,
+        *,
+        account_id: int,
+        plan: DS.DeepPlan,
+        question: str,
+        mode: str,
+        meter: Any,
+        taint: Any,
+        events: Any = None,
+        chat_titles: Any = None,
+        all_chats: Any = None,
+        deadline: Any = None,
+        confirm: bool = True,
+        locale: str = "uz",
+    ) -> SCS.ScaleOutcome:
+        return SCS.ScaleOutcome(
+            evidence=list(hits),
+            pool=list(hits),
+            stats=SCS.ScanStats(pulled=100, candidates=100, kept=100, evidence=100),
+            window=WIN.WindowSpec(account_id=account_id, chats=None, since=None, until=NOW),
+            window_count=WIN.WindowCount(total=100, chats=1, groups=1),
+        )
+
+    monkeypatch.setattr(WIN, "run_window", fake_run_window)
+
+    window_plan = (
+        '{"intent":"lookup","retrieval_kind":"window","window":null,"chats":[1],'
+        '"subqueries":[],"entities":[],"levels":[0,1],"use_hyde":false}'
+    )
+    llm = FakeLLM(plan=window_plan, synth="Bu hafta ko'p narsa muhokama qilindi #c1m101.")
+    digest_result = await DS.run_deep_search(
+        factory,  # type: ignore[arg-type]
+        1,
+        10,
+        "bu hafta nima muhokama qilindi?",
+        locale="uz",
+        llm=llm,
+    )
+    assert digest_result.plan["retrieval_kind"] == "window"
+    digest_turn = llm.user_turn(DEEP_SYNTH_PROMPT)
+    assert digest_turn.count("#c1m") == DS.DIGEST_SYNTH_LINES
+
+    llm2 = FakeLLM(plan=window_plan, synth="Batafsil hisobot #c1m101.")
+    detail_result = await DS.run_deep_search(
+        factory,  # type: ignore[arg-type]
+        1,
+        11,
+        "bu hafta nima muhokama qilindi, batafsil yoz",
+        locale="uz",
+        llm=llm2,
+    )
+    assert detail_result.plan["retrieval_kind"] == "window"
+    detail_turn = llm2.user_turn(DEEP_SYNTH_PROMPT)
+    assert detail_turn.count("#c1m") == 100  # 150 qopqog'iga sig'adi — kesilmaydi
+
+
+@pytest.mark.asyncio
 async def test_stats_synthesis_uses_cheap_task_and_few_samples(
     monkeypatch: pytest.MonkeyPatch, wired: dict[str, Any]
 ) -> None:

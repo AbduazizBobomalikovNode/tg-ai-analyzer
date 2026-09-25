@@ -112,9 +112,13 @@ def link_prefix_for(chat_type: str, tg_peer_id: int, username: str | None) -> st
     Sync vaqtida bir marta hisoblanadi (`chats.link_prefix`) — aks holda har
     sitata uchun runtime'da peer turini qayta tekshirish kerak bo'ladi.
 
-    * public (username bor) → ``https://t.me/<username>/``
+    * public (username bor), **shaxsiy emas** → ``https://t.me/<username>/``
     * kanal/supergruh        → ``https://t.me/c/<id>/`` (``-100`` prefiksisiz)
-    * private / oddiy guruh  → ``None`` (bunday chatga ommaviy havola yo'q)
+    * shaxsiy (`private`) / oddiy guruh → ``None`` — bunday chatga ommaviy
+      havola yo'q. **Shaxsiy chat username bilan ham** (jonli regressiya:
+      "Otabek Kursdosh" javobida `t.me/JOO571/<msg>` chiqdi) — `@username/<id>`
+      shakli faqat ochiq kanal/supergruh postiga ishlaydi, foydalanuvchining
+      DM tarixiga emas: bunday havola ochilmaydi.
 
     `chats.tg_peer_id` odatda **xom** Telethon id (``ent.id``, musbat) bo'ladi,
     lekin bot API uslubidagi ``-100…`` ko'rinish ham kelishi mumkin. ``-100``
@@ -122,6 +126,8 @@ def link_prefix_for(chat_type: str, tg_peer_id: int, username: str | None) -> st
     boshlanuvchi haqiqiy kanallar bor (masalan ``1001234567``) va ularni
     qirqish noto'g'ri havola beradi.
     """
+    if chat_type == ChatType.PRIVATE:
+        return None
     if username:
         return f"https://t.me/{username}/"
     if chat_type in (ChatType.CHANNEL, ChatType.SUPERGROUP):

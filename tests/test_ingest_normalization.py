@@ -159,6 +159,15 @@ def test_link_prefix_none_for_private_and_basic_group() -> None:
     assert ing.link_prefix_for(ChatType.GROUP, 777, None) is None
 
 
+def test_link_prefix_none_for_private_even_with_a_username() -> None:
+    """Jonli regressiya: shaxsiy chat egasining `@username`si bo'lsa ham
+
+    `t.me/<username>/<id>` havolasi ochilmaydi — faqat ochiq kanal/supergruh
+    postiga ishlaydi. `link_prefix_for` bunday qatorga umuman yozmaydi.
+    """
+    assert ing.link_prefix_for(ChatType.PRIVATE, 777, "JOO571") is None
+
+
 def test_link_prefix_fits_column() -> None:
     prefix = ing.link_prefix_for(ChatType.CHANNEL, -1001234567890, "a" * 64)
     assert prefix is not None and len(prefix) <= 128
