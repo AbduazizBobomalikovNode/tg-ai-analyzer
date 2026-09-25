@@ -3075,7 +3075,10 @@ async def test_digest_budget_is_passed_and_is_not_continued() -> None:
         budget=budget,
     )
     assert len(llm.calls) == 1, "dayjest kesilsa ham davom ettirilmaydi"
-    assert llm.calls[0]["max_tokens"] == DS.SYNTH_BUDGET_DIGEST
+    # byudjet + fikrlash zaxirasi (jonli conv 288: 3000 da thinking 2,488 ni yeb,
+    # javob 508 tokenda kesilgan edi); uzunlikni `answer_length:` boshqaradi
+    assert llm.calls[0]["max_tokens"] == DS.SYNTH_BUDGET_DIGEST + DS.SYNTH_THINKING_RESERVE
+    assert budget.call_max_tokens <= DS.SYNTH_MAX_TOKENS
     assert "answer_length: ~1800 tokens" in llm.calls[0]["messages"][-1].content
     assert res is not None and DS.is_length_finish(res.finish_reason)
 
@@ -3103,4 +3106,8 @@ async def test_run_records_the_answer_budget(
     use_multi(monkeypatch, lambda q: [_hit(1)])
     await DS.run_deep_search(factory, 1, 10, "to'lov?", locale="uz", llm=FakeLLM())  # type: ignore[arg-type]
     meta = wired["persisted"]["context_meta"]
-    assert meta["answer_budget"] == {"kind": "topic", "max_tokens": DS.SYNTH_BUDGET_TOPIC}
+    assert meta["answer_budget"] == {
+        "kind": "topic",
+        "max_tokens": DS.SYNTH_BUDGET_TOPIC,
+        "call_max_tokens": DS.SYNTH_MAX_TOKENS,
+    }

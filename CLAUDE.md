@@ -836,7 +836,11 @@ fayl tizimini LLM'ga ochish. `capabilities()` da TOOLS yo'q — rost.
   `max_tokens` **niyat bo'yicha** (`deep_search.synth_budget`, kodda):
   oyna/dayjest/sanoq → 3000, mavzu → 6000, `explain`/`deeper`/"batafsil"
   (`_DETAIL_RE`, uz/ru/en) → 8000; user turn'ida `answer_length: ~N tokens`
-  satri (N = 60%, qolgani fikrlashga), `context.answer_budget` ga yoziladi.
+  satri (N = byudjetning 60%), `context.answer_budget` ga yoziladi.
+  Provayderga ketadigan `max_tokens` = byudjet + `SYNTH_THINKING_RESERVE`
+  (2500, ≤8000): Gemini fikrlashi `max_tokens` dan yeydi — jonli conv 288 da
+  3000 lik dayjestda `low` fikrlash 2,488 token olib, javob 508 tokenda
+  `MAX_TOKENS` bilan kesildi. Uzunlikni `answer_length:` boshqaradi.
   `finish_reason` length bo'lsa **bitta** davom ettirish chaqirig'i faqat
   batafsil so'ralganda qilinadi; qisqa byudjet kesilsa — davom yo'q,
   `context.truncated_answer=True` (jonli conv 285: oyna dayjesti 17,949

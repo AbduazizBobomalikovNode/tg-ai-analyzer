@@ -139,9 +139,15 @@ SYNTH_CONTINUE_NUDGE = "Davom eting — oxirgi tugallanmagan jumladan boshlab, t
 SYNTH_BUDGET_DIGEST = 3_000  # window / window_stats — chat bo'yicha 1-3 satr
 SYNTH_BUDGET_TOPIC = 6_000  # mavzu qidiruvi
 SYNTH_BUDGET_DETAIL = SYNTH_MAX_TOKENS  # explain / deeper / "batafsil"
-#: Byudjetning qanchasini ko'rinadigan matnga mo'ljallash: Gemini'da fikrlash
-#: tokenlari ham `max_tokens` dan yeyiladi (`llm/gemini.py`).
+#: Byudjetning qanchasini ko'rinadigan matnga mo'ljallash (`answer_length:`).
 SYNTH_VISIBLE_SHARE = 0.6
+#: Gemini'da fikrlash tokenlari `max_tokens` dan yeyiladi (`llm/gemini.py`),
+#: shuning uchun chaqiruvning `max_tokens` i = byudjet + shu zaxira (qopqoq
+#: `SYNTH_MAX_TOKENS`). Jonli o'lchov (conv 288): dayjest `max_tokens=3000`
+#: bilan `thinking_level=low` 2,488 fikrlash tokenini yedi, ko'rinadigan
+#: javob 508 tokenda `MAX_TOKENS` bilan kesildi. Javob uzunligini
+#: `answer_length:` satri boshqaradi, `max_tokens` esa faqat qopqoq.
+SYNTH_THINKING_RESERVE = 2_500
 #: "Batafsil / to'liq / подробно / in detail" — foydalanuvchi uzun javob so'ragan.
 _DETAIL_RE = re.compile(
     r"batafsil|to'liq\s+(?:yoz|ayt|ma'lumot|tushuntir|javob)|to‘liq|mufassal|kengroq"
@@ -2875,6 +2881,11 @@ class SynthBudget:
     def visible_tokens(self) -> int:
         return int(self.max_tokens * SYNTH_VISIBLE_SHARE)
 
+    @property
+    def call_max_tokens(self) -> int:
+        """Provayderga ketadigan `max_tokens`: byudjet + fikrlash zaxirasi, ≤ qopqoq."""
+        return min(SYNTH_MAX_TOKENS, self.max_tokens + SYNTH_THINKING_RESERVE)
+
     def note(self) -> str:
         """User turn'idagi `answer_length:` satri (system'da emas — kesh prefiksi)."""
         n = self.visible_tokens
@@ -2946,7 +2957,7 @@ async def synthesize(
     satri; davom ettirish faqat `budget.allow_continue` da. Berilmasa — eski
     xulq: `SYNTH_MAX_TOKENS` va kesilsa bitta davom.
     """
-    max_tokens = min(budget.max_tokens, SYNTH_MAX_TOKENS) if budget else SYNTH_MAX_TOKENS
+    max_tokens = budget.call_max_tokens if budget else SYNTH_MAX_TOKENS
     may_continue = budget.allow_continue if budget else True
     envelope, kept = build_evidence_envelope(evidence, clusters, claims_block=claims_block)
     note = f"(locale: {locale}; now: {(now or datetime.now(UTC)).strftime('%Y-%m-%d %H:%M UTC')})"
@@ -4463,7 +4474,11 @@ async def _run_pipeline(
         # eval ham uni to'liq javob deb sanardi.
         "finish_reason": finish_reason,
         "truncated_answer": truncated_answer,
-        "answer_budget": {"kind": answer_budget.kind, "max_tokens": answer_budget.max_tokens},
+        "answer_budget": {
+            "kind": answer_budget.kind,
+            "max_tokens": answer_budget.max_tokens,
+            "call_max_tokens": answer_budget.call_max_tokens,
+        },
         "rounds": rounds_used,
         "candidates": len(candidates),
         "clusters": result.clusters,
