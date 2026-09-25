@@ -973,3 +973,39 @@ async def test_repeat_turn_steps_aside_for_an_explicit_deeper_request(
     assert A.REPEAT_TURN_NOTE not in llm.calls[0]["messages"][-1].content
     assert out.repeat_guard is False
     assert len(fake_tool) == 1  # "chuqurroq qidir" — server qidiruv to'silmaydi
+
+
+async def test_repeat_guard_block_ends_the_tool_loop_immediately(
+    fake_tool: list[dict[str, Any]],
+) -> None:
+    """Qo'riqchi to'sgach model tool'larni qayta-qayta so'rasa ham — bitta
+    to'silgan chaqiruv, keyin darhol tool'siz "javob ber" turn'i
+    (`stop_reason="repeat_guard"`), iteratsiya shiftigacha aylanish yo'q."""
+
+    class _Stubborn(_LLM):
+        async def chat(self, task: Task, messages: list[Msg], **kw: Any) -> ChatResult:
+            self.calls.append({"task": task, "messages": list(messages), "tools": kw.get("tools")})
+            if kw.get("tools") is None:
+                return _res("javob")
+            n = len(self.calls)
+            return _res(calls=[ToolCall(f"s{n}", "search_telegram", {"query": f"ijara {n}"})])
+
+    llm = _Stubborn([])
+    out = await A.run_agent(
+        _Session(),  # type: ignore[arg-type]
+        user_id=1,
+        account_id=5,
+        question=_PRIOR_Q,
+        history=[Msg.user(_PRIOR_Q), Msg.assistant("avvalgi javob")],
+        pinned_chat=None,
+        locale="uz",
+        llm=llm,  # type: ignore[arg-type]
+        max_iterations=6,
+    )
+    blocked = [c for c in out.tool_calls if c.get("blocked") == "repeat_guard"]
+    assert len(blocked) == 1 and len(out.tool_calls) == 1
+    assert fake_tool == []
+    assert out.stop_reason == "repeat_guard"
+    assert out.text == "javob"
+    assert len(llm.calls) == 2 and llm.calls[1]["tools"] is None
+    assert llm.calls[1]["messages"][-1].content == A.FINAL_NUDGE

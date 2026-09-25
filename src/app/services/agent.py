@@ -5,6 +5,8 @@ Xarajat nazorati:
   * **yugurish bo'yicha** bajarilgan chaqiruvlar qopqog'i `AGENT_MAX_EXECUTED_CALLS`
     va narx qopqog'i `AGENT_MAX_COST_USD` — yetilganda tool'lar o'chiriladi va
     "bor narsa bilan javob ber" turn'i qo'shiladi (`stop_reason`);
+  * takror-qo'riqchisi (`repeat_guard`) raunddagi yagona chaqiruvni to'ssa — xuddi
+    shunday darhol "javob ber" turn'i (`stop_reason="repeat_guard"`);
   * tool natijalari umumiy byudjeti `AGENT_TOOL_RESULT_TOKENS` — oshsa keskin kesiladi;
   * tarix qisqartirilgan (`chat_service.build_history`), system prompt barqaror (kesh);
   * oxirgi iteratsiyada tool'siz "javob ber" chaqiruvi — sikl hech qachon javobsiz tugamaydi.
@@ -81,7 +83,7 @@ class AgentOutcome:
     action_ids: list[int] = field(default_factory=list)  # taklif/bajarilgan yozish amallari
     calls_executed: int = 0  # to'silmagan (haqiqatan bajarilgan) chaqiruvlar
     cache_hits: int = 0  # suhbat keshidan olingan tool natijalari (`tool_cache`)
-    # `answered` | `call_budget` | `cost_budget` | `iterations`
+    # `answered` | `call_budget` | `cost_budget` | `repeat_guard` | `iterations`
     stop_reason: str = ""
     #: Takror-qo'riqchisi ishladimi: keshdan kelgan qidiruvdan keyin kamida
     #: bitta server qidiruvi to'sildi (eval `econ-01`).
@@ -425,6 +427,8 @@ async def run_agent(
         # yerdan keyingi so'rovga o'tadi — aks holda ikkinchi iteratsiya
         # `400 INVALID_ARGUMENT … missing a thought_signature` bilan yiqiladi.
         messages.append(Msg.assistant(res.text, res.tool_calls, signature=res.signature))
+        executed_before = calls_executed
+        guard_hit = False
         for call in res.tool_calls[:MAX_CALLS_PER_TURN]:
             t0 = time.monotonic()
             cached_text: str | None = None
@@ -450,6 +454,7 @@ async def run_agent(
                 # Boshqa so'z bilan serverga chiqish yangi ma'lumot bermaydi —
                 # faqat MTProto kvotasi va pul. Lokal `search_messages` ochiq.
                 guard_blocked = True
+                guard_hit = True
                 repeat_guard = True
                 result = T.ToolResult(REPEAT_GUARD_NOTE, ok=False)
             elif (blocked := _blocked_reresearch(call, local_queries)) is not None:
@@ -561,6 +566,16 @@ async def run_agent(
                     "Tool result budget is exhausted. Answer now with the data you already have."
                 )
             )
+        # ── takror-qo'riqchisi: to'silgan chaqiruv = darhol javob ────────────
+        # Shu raundda qo'riqchi chaqiruvni to'sgan va **hech narsa bajarilmagan**
+        # bo'lsa, model yangi ma'lumot olmaydi — keyingi iteratsiyalar faqat
+        # to'silgan chaqiruvlarni qayta yozib, shiftgacha yeyardi (o'lchov: 7 iter,
+        # $0.10+ bitta takroriy savolga). Byudjet tugagandagi bilan bir xil yo'l:
+        # tool'lar o'chadi va bitta "javob ber" turn'i.
+        if not tools_off and guard_hit and calls_executed == executed_before:
+            tools_off, stop_reason = True, "repeat_guard"
+            log.info("agent.repeat_guard_stop", run_id=run.id, iteration=it)
+            messages.append(Msg.user(FINAL_NUDGE))
         # ── yugurish byudjetlari: chaqiruvlar soni va taxminiy narx ──────────
         if not tools_off and calls_executed >= call_cap:
             tools_off, stop_reason = True, "call_budget"
