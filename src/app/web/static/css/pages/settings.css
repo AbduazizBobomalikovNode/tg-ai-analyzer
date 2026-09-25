@@ -48,6 +48,8 @@
 
 /* ── Byudjet ─────────────────────────────────────────────────────────── */
 .bud-usage { display: grid; gap: var(--s-3); }
+/* `.field-note` global uslubi faqat `.field` ichida — karta izohlari ham shunday ko'rinsin. */
+#sec-budget .field-note { font-size: var(--fs-xs); color: var(--faint); line-height: var(--lh-body); margin: 0; }
 .bud-meter { display: grid; gap: var(--s-1); }
 .bud-meter-top { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s-3); flex-wrap: wrap; }
 .bud-meter-top span { font-size: var(--fs-sm); color: var(--muted); }
