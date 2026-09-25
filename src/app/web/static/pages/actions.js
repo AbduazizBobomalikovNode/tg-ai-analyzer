@@ -61,13 +61,27 @@ function badgeCount(n) {
 
 /* ── Karta ───────────────────────────────────────────────────────────── */
 
+/** Tool → ikonka. Avtomatlashtirish takliflari (`services/automation.py`)
+ * Telegram'ga yozmaydi — kartada `preview.text` (server muzlatgan "nima
+ * yaratiladi" matni) faqat o'qish uchun ko'rinadi, tasdiq tugmalari o'sha. */
+const TOOL_ICON = {
+  send_message: "send",
+  edit_message: "edit-3",
+  forward_message: "share-2",
+  pin_message: "pin",
+  create_alert: "bell-ring",
+  set_briefing: "sun",
+  remind: "clock",
+  cancel_reminder: "clock",
+};
+
 function actionCard(a, { actionable }) {
   const p = a.preview || {};
   const kids = [];
   const blocked = isBlockedNote(a);
 
   kids.push(el("div.action-head", null, [
-    icon(a.tool === "forward_message" ? "share-2" : a.tool === "pin_message" ? "pin" : a.tool === "edit_message" ? "edit-3" : "send"),
+    icon(TOOL_ICON[a.tool] || "send"),
     el("span.action-tool", null, toolLabel(a.tool)),
     el("span.action-chat", null, p.chat || (p.chat_id != null ? `#${p.chat_id}` : "")),
     el("span.spacer", { style: { flex: "1 1 auto" } }),

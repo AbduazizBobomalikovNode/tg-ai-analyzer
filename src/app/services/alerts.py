@@ -823,3 +823,58 @@ async def accounts_with_rules(session: AsyncSession) -> list[int]:
 def fold_preview(pattern: str) -> list[str]:
     """UI uchun: naqsh qanday fold bo'lishini ko'rsatadi (debug/tushuntirish)."""
     return [uz_fold(p) for p in split_pattern(pattern)]
+
+
+# ─── qoida yaratish (skills_ext: `create_alert` tasdiqdan keyin) ─────────────
+
+
+async def create_rule(
+    session: AsyncSession,
+    *,
+    account_id: int,
+    kind: str,
+    pattern: str,
+    chat_id: int | None = None,
+    label: str = "",
+    threshold: float = 0.80,
+    cooldown_minutes: int = 30,
+    max_rules: int | None = None,
+) -> AlertRule:
+    """Router `POST /api/alerts` bilan **bir xil** tekshiruvlar, keyin INSERT.
+
+    Egalikni chaqiruvchi (akkaunt → foydalanuvchi) tekshiradi; bu yerda chat
+    akkauntga tegishliligi, mazmuniy validatsiya (`validate`) va qoidalar
+    qopqog'i (`alerts_max_rules_per_account`).
+    """
+    from sqlalchemy import func
+
+    from app.config import get_settings
+
+    validate(kind, pattern, threshold, cooldown_minutes)
+    if chat_id is not None:
+        chat = await session.get(Chat, int(chat_id))
+        if chat is None or int(chat.account_id) != int(account_id):
+            raise AlertError("not_found")
+    cap = max_rules if max_rules is not None else get_settings().alerts_max_rules_per_account
+    n = (
+        await session.execute(
+            select(func.count()).select_from(AlertRule).where(AlertRule.account_id == account_id)
+        )
+    ).scalar() or 0
+    if int(n) >= int(cap):
+        raise AlertError("too_many")
+    rule = AlertRule(
+        account_id=int(account_id),
+        chat_id=int(chat_id) if chat_id is not None else None,
+        kind=kind,
+        label=(label or "").strip()[:64],
+        pattern=pattern.strip(),
+        threshold=float(threshold),
+        enabled=True,
+        cooldown_minutes=int(cooldown_minutes),
+        last_checked_msg_id=0,
+    )
+    session.add(rule)
+    await session.flush()
+    log.info("alerts.rule_created", rule_id=rule.id, account_id=account_id, kind=kind)
+    return rule

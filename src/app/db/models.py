@@ -647,6 +647,14 @@ class ScheduledJob(Base):
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now())
 
+    # ── migratsiya 0025: eslatmalar (`type="reminder"`, `services/scheduled.py`) ──
+    # Yetkazish briefing/alert bilan bir xil: push'dan **oldin** shartli UPDATE
+    # (`status pending → sending`, `delivered_at`, `attempts + 1`) bilan band
+    # qilinadi; xato bo'lsa `pending` ga qaytadi yoki `failed` bo'lib yopiladi.
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error: Mapped[str | None] = mapped_column(String(500))
+
 
 class Briefing(Base):
     """Kunlik shaxsiy briefing (L3, 3-bosqich/B — arxitektura v2, 9-bo'lim).

@@ -352,3 +352,43 @@ async def writable_chats_exist(session: AsyncSession, account_id: int) -> bool:
 
 def default_write_mode() -> str:
     return str(get_settings().default_write_mode)
+
+
+# ─── avtomatlashtirish takliflari (skills_ext: alert / briefing / eslatma) ───
+#
+# Bular Telegram'ga **yozmaydi** (MTProto yo'q) — lekin akkaunt holatini
+# o'zgartiradi (qoida, jadval, eslatma), shuning uchun o'sha tasdiq oqimidan
+# o'tadi: `agent_actions(proposed)` → `actions.confirm_action` →
+# `automation.execute`. `autonomous` rejim bularga **tegishli emas**: taklif
+# hech qachon shu yerda bajarilmaydi. `WRITE_TOOL_NAMES` ga qo'shilmaydi —
+# u Telegram yozish tool'lari ro'yxati (testlar qo'riqlaydi).
+
+AUTOMATION_TOOL_NAMES = frozenset({"create_alert", "set_briefing", "remind", "cancel_reminder"})
+
+
+async def propose_automation(
+    session: AsyncSession, *, run_id: int, tool: str, args: dict[str, Any]
+) -> ToolResult:
+    """Avtomatlashtirish taklifi — **faqat** `proposed` yozuv, bajarish yo'q.
+
+    `args` chaqiruvchi (`automation` / `scheduled`) tomonidan allaqachon
+    tekshirilgan va normallashtirilgan; bajarishda (`automation.execute`)
+    egalik va qiymatlar **qayta** tekshiriladi.
+    """
+    if tool not in AUTOMATION_TOOL_NAMES:
+        raise ProposalError("unknown_tool", tool)
+    action = AgentAction(
+        run_id=run_id,
+        tool=tool,
+        args=args,
+        status=ActionStatus.PROPOSED,
+        target_peer_id=None,
+    )
+    session.add(action)
+    await session.flush()
+    WRITE_ACTIONS.labels(tool, "proposed").inc()
+    log.info("automation.proposed", action_id=action.id, tool=tool)
+    return ToolResult(
+        f"proposed action #{action.id} ({tool}) is waiting for the user's confirmation.",
+        meta={"action_id": action.id, "proposed": True},
+    )

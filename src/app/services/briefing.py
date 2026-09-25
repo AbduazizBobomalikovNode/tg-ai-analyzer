@@ -934,3 +934,59 @@ __all__ = [
     "z_score",
     "zone",
 ]
+
+
+# ─── sozlama (skills_ext: `set_briefing` tasdiqdan keyin) ────────────────────
+
+
+class BriefingSettingsError(ValueError):
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
+
+
+async def apply_settings(
+    session: AsyncSession,
+    account: Account,
+    *,
+    enabled: bool,
+    hour: int | None = None,
+    chats: list[int] | None = None,
+    set_chats: bool = False,
+) -> Account:
+    """`PUT /api/settings/briefing` ning briefing qismi: yoqish, soat, chatlar.
+
+    `hour is None` — o'zgarmaydi; `set_chats=False` — chat tanlovi o'zgarmaydi
+    (`chats=None` bilan `set_chats=True` = barcha chatlar). Chatlar akkauntga
+    tegishli bo'lishi shart. Jim soatlar / tz bu yerda o'zgarmaydi.
+    """
+    if hour is not None and not (0 <= int(hour) <= 23):
+        raise BriefingSettingsError("bad_hour")
+    if set_chats and chats is not None:
+        wanted = sorted({int(c) for c in chats})
+        owned = set(
+            int(x)
+            for x in (
+                await session.execute(
+                    select(Chat.id).where(Chat.account_id == account.id, Chat.id.in_(wanted))
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if set(wanted) - owned:
+            raise BriefingSettingsError("unknown_chat")
+        chats = wanted
+    account.briefing_enabled = bool(enabled)
+    if hour is not None:
+        account.briefing_hour = int(hour)
+    if set_chats:
+        account.briefing_chats = chats
+    await session.flush()
+    log.info(
+        "briefing.settings_applied",
+        account_id=account.id,
+        enabled=bool(enabled),
+        hour=account.briefing_hour,
+    )
+    return account

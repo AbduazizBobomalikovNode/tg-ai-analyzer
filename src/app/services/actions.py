@@ -63,8 +63,31 @@ class ActionView:
         }
 
 
+#: Avtomatlashtirish takliflari (`write_tools.AUTOMATION_TOOL_NAMES`) — MTProto yo'q.
+AUTOMATION_TOOLS = frozenset({"create_alert", "set_briefing", "remind", "cancel_reminder"})
+#: Karta chiziladigan (tasdiq so'raydigan) amallar.
+CARD_TOOLS = frozenset(
+    {"send_message", "edit_message", "forward_message", "pin_message"} | AUTOMATION_TOOLS
+)
+
+
 def _preview(a: AgentAction) -> dict[str, Any]:
     args = a.args or {}
+    if a.tool in AUTOMATION_TOOLS:
+        # Nima yaratilishi/o'zgarishi — taklif paytida muzlatilgan matn (faqat o'qish).
+        return {
+            "chat": args.get("chat_title"),
+            "chat_id": args.get("chat_id"),
+            "text": args.get("summary"),
+            "automation": a.tool,
+            "kind": args.get("kind"),
+            "pattern": args.get("pattern"),
+            "due_local": args.get("due_local"),
+            "tz": args.get("tz"),
+            "enabled": args.get("enabled"),
+            "hour": args.get("hour"),
+            "job_ids": args.get("job_ids"),
+        }
     return {
         "chat": args.get("chat_title"),
         "chat_id": args.get("chat_id"),
@@ -146,7 +169,7 @@ async def actions_for_runs(
     )
     out: dict[int, list[dict[str, Any]]] = {}
     for a in rows.scalars().all():
-        if a.tool in ("send_message", "edit_message", "forward_message", "pin_message"):
+        if a.tool in CARD_TOOLS:
             out.setdefault(a.run_id, []).append(_view(a).to_dict())
     return out
 
@@ -229,6 +252,8 @@ async def execute_action(
     run = await session.get(AgentRun, a.run_id)
     if run is None or run.account_id is None:
         raise ActionError("not_found")
+    if a.tool in AUTOMATION_TOOLS:
+        return await _execute_automation(session, a, run, actor=actor, confirmed=confirmed)
     account_id = run.account_id
     args = a.args or {}
     peer_id = int(args.get("peer_id") or a.target_peer_id or 0)
@@ -270,6 +295,38 @@ async def execute_action(
     log.info(
         "write.executed", action_id=a.id, tool=a.tool, peer=peer_id, result=result_id, actor=actor
     )
+    return result_id
+
+
+async def _execute_automation(
+    session: AsyncSession, a: AgentAction, run: AgentRun, *, actor: str, confirmed: bool
+) -> int | None:
+    """Alert / briefing / eslatma — **faqat** foydalanuvchi tasdig'idan keyin.
+
+    `autonomous` yo'li (`confirmed=False`) bu amallarga ruxsat bermaydi:
+    `write_tools.propose_automation` ularni hech qachon bajarmaydi, bu yerda
+    esa ikkinchi qatlam. MTProto, peer guard va yozish rate limit'i yo'q —
+    Telegram'ga hech narsa yozilmaydi; egalik `automation.execute` da.
+    """
+    from app.services import automation as AU
+
+    if not confirmed:
+        a.status = ActionStatus.FAILED
+        a.error = "needs_confirm"
+        await session.flush()
+        raise ActionError("needs_confirm")
+    try:
+        result_id = await AU.execute(session, a, run)
+    except AU.AutomationError as exc:
+        a.status = ActionStatus.FAILED
+        a.error = exc.code[:500]
+        await session.flush()
+        raise ActionError(exc.code, exc.detail) from exc
+    a.status = ActionStatus.EXECUTED
+    a.result_msg_id = result_id
+    await session.flush()
+    WRITE_ACTIONS.labels(a.tool, "executed").inc()
+    log.info("automation.executed", action_id=a.id, tool=a.tool, result=result_id, actor=actor)
     return result_id
 
 
