@@ -47,7 +47,7 @@ from sqlalchemy import Select, and_, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from app.db.models import Chat, Message
+from app.db.models import Chat, Message, Sender
 from app.llm import Task
 from app.services import deep_search as DS
 from app.services import scale_search as SC
@@ -91,12 +91,21 @@ class WindowSpec:
     until: datetime
     inbox: bool = False
     tz: str = TW.DEFAULT_TZ
+    #: `in | out | both | ""` — `deep_search.DIRECTIONS`. `inbox=True` eski
+    #: yozuv (moslik taxallusi) va `direction="in"` bilan bir xil.
+    direction: str = ""
+
+    def __post_init__(self) -> None:
+        if self.inbox and not self.direction:
+            self.direction = "in"
+        self.inbox = self.direction == "in"
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "since": self.since.isoformat() if self.since else None,
             "until": self.until.isoformat(),
             "inbox": self.inbox,
+            "direction": self.direction,
             "chats": len(self.chats) if self.chats else 0,
             "tz": self.tz,
         }
@@ -123,7 +132,20 @@ def _conds(spec: WindowSpec) -> list[Any]:
     if spec.since is not None:
         conds.append(Message.published_at >= spec.since)
     conds.append(Message.published_at < spec.until)
-    if spec.inbox:
+    if spec.direction == "out":
+        # "Men kimga yozdim" — faqat mening xabarlarim.
+        conds.append(Message.out.is_(True))
+    elif spec.direction == "both":
+        # "Kim bilan gaplashdim" — men **shu oynada** kamida bitta xabar
+        # yozgan chatlardagi hamma xabar. Aks holda men hech yozmagan katta
+        # kanal/guruh "suhbatdosh" bo'lib reytingni egallardi.
+        mine = aliased(Message)
+        window = [mine.chat_id == Message.chat_id, mine.out.is_(True)]
+        if spec.since is not None:
+            window.append(mine.published_at >= spec.since)
+        window.append(mine.published_at < spec.until)
+        conds.append(exists().where(and_(*window)))
+    elif spec.inbox:
         # "Menga yozgan" = meniki emas **va** (shaxsiy chat **yoki** mening
         # xabarimga javob). Eslatmalar (`@username`) sxemada saqlanmaydi —
         # ular bu ta'rifga kirmaydi va qamrovda shunday deyiladi.
@@ -312,25 +334,180 @@ def estimate_window(
         "synth": round(cost("synth", synth_in, SC.EST_SYNTH_OUT_TOKENS), 6),
     }
     scan = breakdown["filter"] + breakdown["map"]
+    lo = (spec.since if spec else None) or count.first_at
+    hi = (spec.until if spec else None) or count.last_at
+    days = span_days(lo, hi) if count.total else 0
     return SC.Estimate(
         mode=mode,
         buckets=max(count.groups, 0),
+        buckets_total=max(count.groups, 0),
         est_messages=count.total,
         est_cost_usd=round(scan, 6),
         est_total_usd=round(scan + breakdown["synth"], 6),
         ceiling_usd=SC.COST_CEILING.get(mode, SC.COST_CEILING["deep"]),
-        weeks=0,
-        range_from=(spec.since if spec else None) or count.first_at,
-        range_to=(spec.until if spec else None) or count.last_at,
+        # Oyna yo'lida bo'lak = `(chat, kun)` juftligi; oyna uzunligi esa
+        # hafta (yoki qisqa oynada kun) bilan aytiladi — "0 hafta" emas.
+        weeks=math.ceil(days / 7) if days else 0,
+        days=days,
+        grain="day" if days and days <= SC.SHORT_WINDOW_DAYS else "week",
+        chats=count.chats,
+        chats_total=count.chats,
+        range_from=lo,
+        range_to=hi,
         breakdown=breakdown,
         retrieval_kind="window",
         window_from_question=window_from_question,
     )
 
 
+def span_days(lo: datetime | None, hi: datetime | None) -> int:
+    """Oyna uzunligi butun kunlarda (yuqoriga yaxlitlangan, kamida 1)."""
+    if lo is None or hi is None or hi <= lo:
+        return 0
+    return max(1, math.ceil((hi - lo).total_seconds() / 86400.0 - 1e-9))
+
+
+# ─── sanoq yo'li (`plan.window_stats`) ───────────────────────────────────────
+# "Kimga eng ko'p yozganman", "bu oyda nechta xabar yozdim", "kim bilan eng
+# ko'p gaplashganman" — javob **raqam**. 667k xabarni tortib, filtrlab, map
+# qilish o'rniga DB `count(*)` agregatlari bilan javob beriladi: aniq,
+# to'liq va deyarli bepul. Model faqat tayyor jadvalni so'zga aylantiradi.
+
 #: Sanoq blokida ko'rsatiladigan chat/yuboruvchi soni.
 STATS_TOP_CHATS = 20
 STATS_TOP_SENDERS = 20
+
+#: Reytingda ko'rsatiladigan chat soni (namunalar ham shulardan olinadi).
+STATS_TOP_N = 10
+#: Har top chatdan illyustratsiya uchun eng yangi xabarlar soni.
+STATS_SAMPLE_PER_CHAT = 3
+
+
+@dataclass(slots=True)
+class ChatStat:
+    """Bitta chat bo'yicha aniq sanoq (tanlangan yo'nalishda)."""
+
+    chat_id: int
+    n: int
+    mine: int = 0  # shundan men yozganlarim (`messages.out`)
+    chat_type: str = ""
+    first_at: datetime | None = None
+    last_at: datetime | None = None
+
+
+@dataclass(slots=True)
+class WindowStats:
+    """Sanoq yo'lining natijasi — hammasi `count(*)` dan."""
+
+    direction: str = ""
+    per_chat: list[ChatStat] = field(default_factory=list)
+    #: `(ko'rinadigan nom, son)` — faqat boshqalar yozgani (`out = false`).
+    per_sender: list[tuple[str, int]] = field(default_factory=list)
+    mine_total: int = 0
+
+
+async def stats_window(
+    session: AsyncSession, spec: WindowSpec, *, top: int = STATS_TOP_CHATS
+) -> WindowStats:
+    """Chat va yuboruvchi bo'yicha agregatlar — **xabar tortilmaydi**."""
+    out = WindowStats(direction=spec.direction)
+    mine = func.count().filter(Message.out.is_(True))
+    per = (
+        select(
+            Message.chat_id,
+            func.count().label("n"),
+            mine.label("mine"),
+            Chat.type,
+            func.min(Message.published_at),
+            func.max(Message.published_at),
+        )
+        .select_from(Message)
+        .join(Chat, Chat.id == Message.chat_id)
+        .where(*_conds(spec))
+        .group_by(Message.chat_id, Chat.type)
+        .order_by(func.count().desc(), Message.chat_id)
+        .limit(top)
+    )
+    for row in (await session.execute(per)).all():
+        out.per_chat.append(
+            ChatStat(
+                chat_id=int(row[0]),
+                n=int(row[1] or 0),
+                mine=int(row[2] or 0),
+                chat_type=str(row[3] or ""),
+                first_at=row[4],
+                last_at=row[5],
+            )
+        )
+    if spec.direction != "out":
+        # Kim yozgani — faqat **boshqalar** (mening xabarlarim shaxsiy chatda
+        # `sender_id` siz keladi va "?" bo'lib reytingni buzardi). Ism
+        # `senders` jadvalidan; telefon raqami u yerda yo'q.
+        name = func.max(func.coalesce(func.nullif(Sender.display_name, ""), Sender.username))
+        per_sender = (
+            select(Message.sender_id, name, func.count().label("n"))
+            .select_from(Message)
+            .join(Chat, Chat.id == Message.chat_id)
+            .outerjoin(
+                Sender,
+                and_(
+                    Sender.account_id == spec.account_id,
+                    Sender.tg_user_id == Message.sender_id,
+                ),
+            )
+            .where(*_conds(spec), Message.out.is_(False), Message.sender_id.is_not(None))
+            .group_by(Message.sender_id)
+            .order_by(func.count().desc(), Message.sender_id)
+            .limit(STATS_TOP_SENDERS)
+        )
+        for sender_id, display, n in (await session.execute(per_sender)).all():
+            label = (str(display).strip() if display else "") or f"user:{int(sender_id)}"
+            out.per_sender.append((label, int(n or 0)))
+    if spec.direction != "out":
+        total_mine = (
+            select(func.count())
+            .select_from(Message)
+            .join(Chat, Chat.id == Message.chat_id)
+            .where(*_conds(spec), Message.out.is_(True))
+        )
+        out.mine_total = int((await session.execute(total_mine)).scalar() or 0)
+    return out
+
+
+async def stats_samples(
+    session: AsyncSession,
+    spec: WindowSpec,
+    chat_ids: Sequence[int],
+    *,
+    per_chat: int = STATS_SAMPLE_PER_CHAT,
+    titles: dict[int, str] | None = None,
+) -> list[S.Hit]:
+    """Top chatlardan eng yangi `per_chat` ta xabar — faqat **namuna** (sitata uchun)."""
+    ids = [int(c) for c in chat_ids if c]
+    if not ids or per_chat <= 0:
+        return []
+    rn = (
+        func.row_number()
+        .over(partition_by=Message.chat_id, order_by=Message.published_at.desc())
+        .label("rn")
+    )
+    inner = (
+        select(Message.id, rn)
+        .select_from(Message)
+        .join(Chat, Chat.id == Message.chat_id)
+        .where(*_conds(spec), Message.chat_id.in_(ids))
+        .subquery()
+    )
+    stmt = (
+        select(Message)
+        .join(inner, inner.c.id == Message.id)
+        .where(inner.c.rn <= per_chat)
+        .order_by(Message.published_at.desc())
+        .limit(per_chat * len(ids))
+    )
+    names = dict(titles or {})
+    rows = (await session.execute(stmt)).scalars()
+    return [_hit(m, names.get(m.chat_id, "")) for m in rows]
 
 
 def render_window_stats(
@@ -339,8 +516,14 @@ def render_window_stats(
     titles: dict[int, str] | None = None,
     evidence: Sequence[S.Hit] = (),
     taken: int = 0,
+    stats: WindowStats | None = None,
+    spec: WindowSpec | None = None,
 ) -> str:
     """Sanoqlar **kodda** hisoblanadi — briefing bilan bir qoida.
+
+    `stats` berilsa (sanoq yo'li) — yo'nalish, har chat/qabul qiluvchi
+    bo'yicha **to'liq** reyting (ulush %, birinchi/oxirgi xabar), boshqalar
+    bo'yicha yuboruvchi reytingi; dalil satrlari u holda faqat namuna.
 
     "Qaysi chatlar eng faol edi" degan savolning javobi `count(*)` dan
     keladi, dalil satrlaridan emas: model ko'rgan ≤1000 satr oynaning
@@ -350,6 +533,8 @@ def render_window_stats(
     chat sarlavhalari `untrusted.attr` dan o'tgan.
     """
     names = dict(titles or {})
+    if stats is not None:
+        return _render_stats(count, stats, names=names, spec=spec, samples=len(evidence))
     lines = [
         "## window totals (counted in code, exact — trust these over the lines below)",
         f"messages in window: {count.total}; chats: {count.chats}; "
@@ -370,6 +555,79 @@ def render_window_stats(
         lines.append("messages per sender (within the evidence shown):")
         for name, n in sorted(senders.items(), key=lambda p: -p[1])[:STATS_TOP_SENDERS]:
             lines.append(f"- {U.attr(name)}: {n}")
+    return "\n".join(lines)
+
+
+_DIRECTION_TEXT = {
+    "out": "messages the owner SENT (messages.out = true); per chat = per recipient",
+    "in": (
+        "messages written TO the owner (not the owner's; private chat or a reply to "
+        "the owner's message)"
+    ),
+    "both": (
+        "all messages (sent and received) in chats where the owner wrote at least once "
+        "in this window"
+    ),
+    "": "all messages in the window (no direction filter)",
+}
+
+
+def _day(dt: datetime | None) -> str:
+    return dt.strftime("%Y-%m-%d") if dt else "—"
+
+
+def _render_stats(
+    count: WindowCount,
+    stats: WindowStats,
+    *,
+    names: dict[int, str],
+    spec: WindowSpec | None,
+    samples: int,
+) -> str:
+    """Sanoq yo'lining bloki — reyting jadvali tayyor, model faqat o'qiydi."""
+    total = max(count.total, 0)
+    window = ""
+    if spec is not None:
+        window = f"{_day(spec.since) if spec.since else '…'} → {_day(spec.until)}"
+    lines = [
+        "## window stats (counted in code with count(*) over EVERY message in the window "
+        "— exact and complete; use these numbers verbatim, do not recount)",
+        f"direction: {_DIRECTION_TEXT.get(stats.direction, _DIRECTION_TEXT[''])}",
+        f"window: {window or '—'}; first message: {_day(count.first_at)}; "
+        f"last message: {_day(count.last_at)}",
+        f"total messages: {total}; chats: {count.chats}",
+    ]
+    if stats.direction != "out" and stats.mine_total:
+        lines.append(f"of these sent by the owner: {stats.mine_total}")
+    label = "recipient chat" if stats.direction == "out" else "chat"
+    if stats.per_chat:
+        lines.append(f"rank by {label} (descending, top {len(stats.per_chat)}):")
+        for i, row in enumerate(stats.per_chat, 1):
+            title = U.attr(names.get(row.chat_id, "")) or f"chat {row.chat_id}"
+            share = (100.0 * row.n / total) if total else 0.0
+            kind = f" [{U.attr(row.chat_type)}]" if row.chat_type else ""
+            mine = (
+                f"; sent by owner: {row.mine}"
+                if stats.direction not in ("out", "in") and row.mine
+                else ""
+            )
+            lines.append(
+                f"{i}. {title}{kind}: {row.n} ({share:.1f}%){mine}; "
+                f"{_day(row.first_at)} … {_day(row.last_at)}"
+            )
+        rest = count.chats - len(stats.per_chat)
+        if rest > 0:
+            shown = sum(r.n for r in stats.per_chat)
+            lines.append(f"(+{rest} more chats with {max(0, total - shown)} messages)")
+    if stats.per_sender:
+        lines.append("rank by sender (messages from others, descending):")
+        for i, (name, n) in enumerate(stats.per_sender, 1):
+            share = (100.0 * n / total) if total else 0.0
+            lines.append(f"{i}. {U.attr(name)}: {n} ({share:.1f}%)")
+    lines.append(
+        f"sample lines below: {samples} (newest ≤{STATS_SAMPLE_PER_CHAT} per top chat, "
+        "illustration only — not a basis for counting)"
+    )
     return "\n".join(lines)
 
 
@@ -439,12 +697,27 @@ async def run_window(
         until=plan.until or datetime.now(UTC),
         inbox=plan.inbox,
         tz=plan.window_tz or TW.DEFAULT_TZ,
+        direction=getattr(plan, "direction", "") or ("in" if plan.inbox else ""),
     )
     outcome.window = spec
 
     async with session_factory() as session:
         count = await count_window(session, spec)
     outcome.window_count = count
+    if getattr(plan, "window_stats", False):
+        return await _run_stats(
+            session_factory,
+            spec=spec,
+            count=count,
+            outcome=outcome,
+            mode=mode,
+            plan=plan,
+            taint=taint,
+            events=events,
+            titles=titles,
+            account_id=account_id,
+            started=started,
+        )
     stats.buckets_planned = max(count.groups, 0)
 
     # Savolda mavzu bormi: kesilgan holatda **faqat shunda** arzon filtr
@@ -591,14 +864,106 @@ async def run_window(
     return outcome
 
 
+async def _run_stats(
+    session_factory: DS.SessionFactory,
+    *,
+    spec: WindowSpec,
+    count: WindowCount,
+    outcome: SC.ScaleOutcome,
+    mode: str,
+    plan: DS.DeepPlan,
+    taint: DS._Taint,
+    events: DS.EventSink | None,
+    titles: dict[int, str],
+    account_id: int,
+    started: float,
+) -> SC.ScaleOutcome:
+    """Sanoq yo'li: `count(*)` agregatlari + top chatlardan bir nechta namuna.
+
+    Tortish, filtr, map/reduce **yo'q** — skan tokeni 0. Shuning uchun
+    `exhaustive` da ham tasdiq so'ralmaydi (skan narxi `WINDOW_CONFIRM_MIN_USD`
+    dan har doim past); `estimate` hodisasi ham chiqmaydi — baho kartasi
+    faqat tasdiq kerak bo'lganda ma'noli.
+    """
+    stats = outcome.stats
+    est = estimate_window(
+        count,
+        mode=mode,
+        window_from_question=plan.window_from_question,
+        spec=spec,
+        filtered=False,
+    )
+    # Skan yo'q: faqat sintez to'lanadi, u ham qisqa (≤30 namuna satri).
+    synth = SC._price_for(Task.DEEP)
+    synth_usd = (4_000 * synth[0] + SC.EST_SYNTH_OUT_TOKENS * synth[1]) / 1_000_000
+    est.breakdown = {"filter": 0.0, "map": 0.0, "synth": round(synth_usd, 6)}
+    est.est_cost_usd = 0.0
+    est.est_total_usd = round(synth_usd, 6)
+    outcome.estimate = est
+    stats.est_cost_usd = 0.0
+    stats.est_total_usd = est.est_total_usd
+
+    agg = WindowStats(direction=spec.direction)
+    samples: list[S.Hit] = []
+    if count.total:
+        async with session_factory() as session:
+            agg = await stats_window(session, spec)
+        top_ids = [row.chat_id for row in agg.per_chat[:STATS_TOP_N]]
+        async with session_factory() as session:
+            samples = await stats_samples(session, spec, top_ids, titles=titles)
+        if samples:
+            async with session_factory() as session:
+                samples = await DS._hydrate(session, samples, account_id=account_id)
+            taint.add_hits(samples)
+    samples.sort(key=lambda h: h.date or datetime.min.replace(tzinfo=UTC))
+    outcome.pool = list(samples)
+    outcome.evidence = list(samples)
+    stats.pulled = count.total
+    stats.candidates = len(samples)
+    stats.kept = len(samples)
+    stats.evidence = len(samples)
+    stats.note_stop("filter", "complete")
+    outcome.window_stats = render_window_stats(
+        count, titles=titles, evidence=samples, stats=agg, spec=spec
+    )
+    await DS._emit(
+        events,
+        "stats",
+        total=count.total,
+        chats=count.chats,
+        direction=spec.direction,
+        top=len(agg.per_chat),
+        senders=len(agg.per_sender),
+        samples=len(samples),
+    )
+    log.info(
+        "window.stats",
+        mode=mode,
+        direction=spec.direction,
+        total=count.total,
+        chats=count.chats,
+        top=len(agg.per_chat),
+        senders=len(agg.per_sender),
+        samples=len(samples),
+        elapsed_s=round(time.monotonic() - started, 2),
+    )
+    return outcome
+
+
 __all__ = [
+    "STATS_SAMPLE_PER_CHAT",
+    "STATS_TOP_N",
     "WINDOW_CONFIRM_MIN_USD",
     "WINDOW_SOFT_MAX",
+    "ChatStat",
     "WindowCount",
     "WindowSpec",
+    "WindowStats",
     "count_window",
     "estimate_window",
     "pull_window",
     "run_window",
+    "stats_samples",
+    "stats_window",
     "window_chunks",
 ]

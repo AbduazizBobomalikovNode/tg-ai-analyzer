@@ -84,6 +84,7 @@ from app.services.prompts_deep import (
     DEEP_PLAN_PROMPT,
     DEEP_REFLECT_PROMPT,
     DEEP_SYNTH_PROMPT,
+    STATS_SYNTH_NOTE,
     WINDOW_SYNTH_NOTE,
     capabilities_text,
 )
@@ -193,6 +194,9 @@ STAGES_SCALE = (
 #: Oyna yo'li (`retrieval_kind="window"`): bucket rejasi, tirsak va mavzu
 #: filtri **yo'q** — oynadagi xabarlar vaqt bo'yicha olinadi.
 STAGES_WINDOW = ("plan", "estimate", "pull", "select", "map", "write")
+#: Oyna sanog'i (`plan.window_stats`): reyting/sanoq savoli — javob DB
+#: agregatlaridan, xabar tortish, filtr va map **yo'q**.
+STAGES_STATS = ("plan", "stats", "write")
 #: `deeper` / `repeat` da oldingi subquery'lar ham qo'shiladi — qopqoq kengroq.
 MAX_SUBQUERIES_WIDENED = 12
 
@@ -207,21 +211,88 @@ MAX_SUBQUERIES_WIDENED = 12
 RETRIEVAL_KINDS = ("topic", "window", "person")
 DEFAULT_RETRIEVAL_KIND = "topic"
 
-#: "Menga kim yozdi" — `inbox` bayrog'ini **ham** yoqadigan naqshlar.
+#: "Menga kim yozdi" — `direction="in"` (`inbox`) ni yoqadigan naqshlar.
 INBOX_RE = re.compile(
     r"kimlar\s+yoz\w*"
     r"|kim\s+yoz\w*"
+    r"|kim\s+menga\b"
     r"|menga\s+(?:kim|kimlar|nima|nimalar)\w*\s+yoz\w*"
-    r"|menga\s+yoz\w*"
+    r"|menga\s+(?:[\w']+\s+){0,3}?yoz\w*"
     r"|men\s*ga\s+kel\w*\s+xabar"
     r"|кто\s+(?:мне\s+)?(?:писал|написал|пишет|пишут)\w*"
     r"|кто\s+мне\b"
     r"|who\s+(?:wrote|messaged|texted|has\s+written|pinged)\b",
     re.I,
 )
+#: "Men kimga yozdim" — **chiquvchi** xabarlar (`direction="out"`,
+#: `messages.out = true`). Birinchi shaxs o'tgan zamon fe'li ("yozdim",
+#: "yuborganman") o'zi yetadi: "bu oyda nechta xabar yozdim?".
+OUTBOUND_RE = re.compile(
+    r"\bkimga\b[^?.!]{0,40}?\b(?:yoz|yubor|jo'nat)\w*"
+    r"|\b(?:yozdim|yozganman|yozibman|yozgandim|yuborganman|yubordim|yuboribman"
+    r"|jo'natganman|jo'natdim)\b"
+    r"|\bmen\s+yozgan\b"
+    r"|eng\s+ko'p\s+yozgan\s+chat\w*"
+    r"|кому\s+(?:я\s+)?(?:[\w']+\s+){0,3}?(?:писал|написал|отправ|пишу)\w*"
+    r"|\bя\s+(?:[\w']+\s+){0,3}?(?:писал|написал|отправил|отправлял)\w*"
+    r"|who\s+(?:did|do|have)\s+i\s+(?:\w+\s+){0,1}?(?:message|write|wrote|text|send|sent|dm)\w*"
+    r"|how\s+many\s+(?:messages\s+)?(?:did|have)\s+i\s+(?:send|sent|write|written)\b"
+    r"|which\s+chats?\s+did\s+i\s+(?:write|post|send|message)\w*"
+    r"|(?:messages|texts)\s+i\s+(?:sent|wrote)\b",
+    re.I,
+)
+#: "Kim bilan eng ko'p gaplashganman" — ikki tomonlama (`direction="both"`):
+#: men qatnashgan chatlardagi **hamma** xabar (kiruvchi + chiquvchi).
+BOTH_RE = re.compile(
+    r"\bkim\s*(?:lar)?\s+bilan\b[^?.!]{0,30}?\b(?:gaplash|yozish|suhbatlash|muloqot|chatlash)\w*"
+    r"|с\s+кем\s+(?:[\w']+\s+){0,3}?(?:общал|переписыва|переписк|говорил|болтал)\w*"
+    r"|who\s+(?:did|do|have)\s+i\s+(?:\w+\s+){0,2}?(?:talk|chat|speak|spoke|communicat)\w*",
+    re.I,
+)
+#: Reyting/sanoq savoli (mavzusiz) → `window_stats`: javob `count(*)` dan.
+AGGREGATE_RE = re.compile(
+    r"\beng\s+ko'p\b|\beng\s+faol\b|\bnechta\b|\bqancha\b|\bqaysi\s+chat\w*|\breyting\w*"
+    r"|\btop\b|больше\s+всего|чаще\s+всего|\bсколько\b|сам\w+\s+активн\w*|\bтоп\b"
+    r"|\bhow\s+many\b|\bhow\s+much\b|\bthe\s+most\b|\bmost\b",
+    re.I,
+)
+#: Sanoq savolini oynaga olib keladigan qo'shimcha iboralar ("nechta xabar").
+_COUNT_LIST_RE = re.compile(
+    r"\b(?:nechta|qancha)\s+xabar\w*|\beng\s+ko'p\s+xabar\w*"
+    r"|сколько\s+(?:[\w']+\s+){0,1}?сообщени\w*|how\s+many\s+messages\b",
+    re.I,
+)
+#: `plan.direction` qiymatlari: `""` — yo'nalish filtrisiz (hamma xabar).
+DIRECTIONS = ("", "in", "out", "both")
+
+
+def detect_direction(text: str) -> str:
+    """Savoldan yo'nalish — deterministik, uz/ru/en (`TW.fold` qilingan matn).
+
+    `both` ustun (kiruvchi **va** chiquvchi naqsh bir savolda bo'lsa ham
+    `both`), keyin `out`, keyin `in`. Topilmasa `""`.
+    """
+    inbound = bool(INBOX_RE.search(text))
+    outbound = bool(OUTBOUND_RE.search(text))
+    if BOTH_RE.search(text) or (inbound and outbound):
+        return "both"
+    if outbound:
+        return "out"
+    if inbound:
+        return "in"
+    return ""
+
+
 #: Oyna ro'yxati: `inbox` naqshlari + "qaysi chatlar faol", "nima bo'ldi".
 WINDOW_LIST_RE = re.compile(
-    INBOX_RE.pattern + r"|qaysi\s+chat\w*"
+    INBOX_RE.pattern
+    + "|"
+    + OUTBOUND_RE.pattern
+    + "|"
+    + BOTH_RE.pattern
+    + "|"
+    + _COUNT_LIST_RE.pattern
+    + r"|qaysi\s+chat\w*"
     r"|qanaqa\s+chat\w*"
     r"|eng\s+faol\b"
     r"|faol\s+chat\w*"
@@ -447,7 +518,15 @@ class DeepPlan:
     #: `topic | window | person` — quvurning **shakli** (`RETRIEVAL_KINDS`).
     retrieval_kind: str = DEFAULT_RETRIEVAL_KIND
     #: `window` turida: savol egasiga **yozilgan** xabarlar haqida.
+    #: Moslik uchun qoldirilgan taxallus: har doim `direction == "in"`.
     inbox: bool = False
+    #: Yo'nalish (`DIRECTIONS`): `in` — menga yozilgan, `out` — men yozgan
+    #: (`messages.out`), `both` — men qatnashgan chatlardagi hamma xabar,
+    #: `""` — filtrsiz. `topic` turida faqat `out` qo'llanadi (kaskad pull).
+    direction: str = ""
+    #: Reyting/sanoq savoli ("kimga eng ko'p", "nechta xabar") — javob DB
+    #: agregatlaridan (`window_search.stats_window`), xabar tortilmaydi.
+    window_stats: bool = False
     #: Oyna savolning o'zidan olindi (`timewin.parse_window`) — UI "vaqt
     #: oralig'ini ko'rsating" ogohlantirishini aynan shunga qarab yashiradi.
     window_from_question: bool = False
@@ -461,6 +540,8 @@ class DeepPlan:
             "intent": self.intent,
             "retrieval_kind": self.retrieval_kind,
             "inbox": self.inbox,
+            "direction": self.direction,
+            "window_stats": self.window_stats,
             "window_from_question": self.window_from_question,
             "window_kind": self.window_kind,
             "window_tz": self.window_tz,
@@ -562,6 +643,9 @@ class Coverage:
     # taxmin emas.
     retrieval_kind: str = DEFAULT_RETRIEVAL_KIND
     inbox: bool = False
+    direction: str = ""
+    #: Sanoq yo'li: oynadagi **hamma** xabar `count(*)` bilan hisoblandi.
+    window_stats: bool = False
     window_from: datetime | None = None
     window_to: datetime | None = None
     window_tz: str = ""
@@ -572,6 +656,8 @@ class Coverage:
         return {
             "retrieval_kind": self.retrieval_kind,
             "inbox": self.inbox,
+            "direction": self.direction,
+            "window_stats": self.window_stats,
             "window": {
                 "from": self.window_from.isoformat() if self.window_from else None,
                 "to": self.window_to.isoformat() if self.window_to else None,
@@ -1276,20 +1362,45 @@ def apply_retrieval_kind(plan: DeepPlan, value: Any, *, question: str) -> str:
       bo'lardi.
     """
     kind = value if isinstance(value, str) and value in RETRIEVAL_KINDS else DEFAULT_RETRIEVAL_KIND
+    # Ikkala matn ham tekshiriladi: planner `standalone_question` ni qayta
+    # yozganda "yuborganman" → "sent" kabi fe'l yo'qolishi mumkin.
+    raw = TW.fold(question)
     text = TW.fold(plan.standalone_question or question)
+    joined = f"{raw}\n{text}" if raw != text else text
     has_window = plan.window_from_question or plan.since is not None
-    if (
-        WINDOW_LIST_RE.search(text)
-        and has_window
-        and not TOPIC_MARK_RE.search(text)
-        and kind != "person"
-    ):
+    direction = detect_direction(joined)
+    topical = bool(TOPIC_MARK_RE.search(joined))
+    listing = bool(WINDOW_LIST_RE.search(joined))
+    aggregate = bool(AGGREGATE_RE.search(joined))
+    # Oynasiz sanoq: faqat yo'nalish yoki "nechta xabar" iborasi bilan —
+    # "Nurbek qaysi chatda yozgan" kabi qidiruv savoli bu yerga tushmasin.
+    open_stats = (
+        listing and aggregate and not topical and bool(direction or _COUNT_LIST_RE.search(joined))
+    )
+    if listing and not topical and kind != "person" and (has_window or open_stats):
+        # Sanoq savoli oynasiz ham `window` bo'ladi ("butun davr"): u xabar
+        # o'qimaydi, faqat `count(*)` — chegarasiz oyna bu yerda arzon.
         kind = "window"
-    if kind == "window" and not has_window:
+    if kind == "window" and not has_window and not open_stats:
         kind = DEFAULT_RETRIEVAL_KIND
-    plan.inbox = kind == "window" and bool(INBOX_RE.search(text))
-    if kind != DEFAULT_RETRIEVAL_KIND:
-        log.info("deep.retrieval_kind", kind=kind, inbox=plan.inbox, model=value)
+    if kind == "window":
+        plan.direction = direction
+        plan.window_stats = aggregate and not topical
+    else:
+        # Mavzu skanida faqat `out` filtri qo'llanadi (kaskad pull SQL'ida):
+        # "bu yil ijara haqida kimga yozganman" — mening xabarlarim ichida.
+        plan.direction = "out" if direction == "out" else ""
+        plan.window_stats = False
+    plan.inbox = kind == "window" and plan.direction == "in"
+    if kind != DEFAULT_RETRIEVAL_KIND or plan.direction:
+        log.info(
+            "deep.retrieval_kind",
+            kind=kind,
+            inbox=plan.inbox,
+            direction=plan.direction,
+            window_stats=plan.window_stats,
+            model=value,
+        )
     return kind
 
 
@@ -2819,6 +2930,8 @@ def build_coverage(
         # nechtasi ko'rildi". Sanoq `count(*)` dan, ya'ni **aniq**.
         cov.retrieval_kind = str(window.get("retrieval_kind") or "window")
         cov.inbox = bool(window.get("inbox"))
+        cov.direction = str(window.get("direction") or ("in" if cov.inbox else ""))
+        cov.window_stats = bool(window.get("stats"))
         cov.window_from = window.get("since")
         cov.window_to = window.get("until")
         cov.window_tz = str(window.get("tz") or "")
@@ -2870,6 +2983,9 @@ _COVERAGE_LABELS: dict[str, dict[str, str]] = {
         "window_all": "hammasi ko'rildi",
         "window_part": "{taken} / {total} ko'rildi (eng yangisidan)",
         "window_msgs": "xabar",
+        "window_counted": "hammasi hisoblandi",
+        "window_out": "faqat men yuborgan xabarlar",
+        "window_both": "men shu oynada yozgan chatlardagi barcha xabarlar (kiruvchi + chiquvchi)",
         "window_inbox": (
             "faqat menga yozilganlar (shaxsiy chat yoki mening xabarimga javob; "
             "@eslatmalar saqlanmaydi)"
@@ -2908,6 +3024,9 @@ _COVERAGE_LABELS: dict[str, dict[str, str]] = {
         "window_all": "просмотрено полностью",
         "window_part": "просмотрено {taken} из {total} (с самых новых)",
         "window_msgs": "сообщений",
+        "window_counted": "подсчитаны все",
+        "window_out": "только отправленные мной сообщения",
+        "window_both": "все сообщения (входящие + исходящие) в чатах, где я писал в этом окне",
         "window_inbox": (
             "только написанное мне (личный чат или ответ на моё сообщение; @упоминания не хранятся)"
         ),
@@ -2945,6 +3064,9 @@ _COVERAGE_LABELS: dict[str, dict[str, str]] = {
         "window_all": "all of it was read",
         "window_part": "{taken} of {total} read (newest first)",
         "window_msgs": "messages",
+        "window_counted": "all of them counted",
+        "window_out": "only messages I sent",
+        "window_both": "all messages (in + out) in chats where I wrote in this window",
         "window_inbox": (
             "only what was written to me (private chat or a reply to my message; "
             "@mentions are not stored)"
@@ -3014,11 +3136,12 @@ def render_coverage(cov: Coverage, *, locale: str = "uz") -> str:
             kind="",
             tz=cov.window_tz or TW.DEFAULT_TZ,
         )
-        taken = (
-            lab["window_all"]
-            if cov.window_taken >= cov.window_total
-            else lab["window_part"].format(taken=cov.window_taken, total=cov.window_total)
-        )
+        if cov.window_stats:
+            taken = lab["window_counted"]
+        elif cov.window_taken >= cov.window_total:
+            taken = lab["window_all"]
+        else:
+            taken = lab["window_part"].format(taken=cov.window_taken, total=cov.window_total)
         out += (
             f"\n\n{lab['window']}: {TW.format_window(win)} · "
             f"{cov.chats_searched} {lab['chats']} · "
@@ -3026,6 +3149,8 @@ def render_coverage(cov: Coverage, *, locale: str = "uz") -> str:
         )
         if cov.inbox:
             out += f"\n\n{lab['window_inbox']}"
+        elif cov.direction in ("out", "both"):
+            out += f"\n\n{lab['window_' + cov.direction]}"
     if cov.buckets_planned and cov.retrieval_kind != "window":
         # Skan bo'lgan bo'lsa qamrov "nechta chat" emas, "nechta bo'lak"
         # bilan o'lchanadi — va **nega to'xtaganini** ham aytadi.
@@ -3460,6 +3585,7 @@ async def _run_pipeline(
     estimate_meta: dict[str, Any] = {}
     window_meta: dict[str, Any] = {}
     window_used = False
+    window_stats_used = False
     search_question = question
     server_out = ServerOutcome()
     server_calls_max = int(s.deep_server_max_calls or 0) if s.deep_server_rungs_enabled else 0
@@ -3688,9 +3814,11 @@ async def _run_pipeline(
                 from app.services import scale_search as _SC
                 from app.services import window_search as WS
 
-                await _emit(events, "stages", stages=list(STAGES_WINDOW), mode=mode)
+                window_stages = STAGES_STATS if plan.window_stats else STAGES_WINDOW
+                await _emit(events, "stages", stages=list(window_stages), mode=mode)
                 scale_used = True
                 window_used = True
+                window_stats_used = bool(plan.window_stats)
                 outcome = await WS.run_window(
                     session_factory,
                     account_id=account_id,
@@ -3718,11 +3846,19 @@ async def _run_pipeline(
                 window_meta = {
                     "retrieval_kind": "window",
                     "inbox": bool(spec.inbox) if spec else plan.inbox,
+                    "direction": (spec.direction if spec else plan.direction) or "",
+                    "stats": bool(plan.window_stats),
                     "since": spec.since if spec else plan.since,
                     "until": spec.until if spec else plan.until,
                     "tz": (spec.tz if spec else plan.window_tz) or TW.DEFAULT_TZ,
                     "total": wcount.total if wcount else 0,
-                    "taken": len(outcome.evidence),
+                    # Sanoq yo'lida **hamma** xabar hisoblandi (`count(*)`);
+                    # dalil satrlari faqat namuna.
+                    "taken": (
+                        (wcount.total if wcount else 0)
+                        if plan.window_stats
+                        else len(outcome.evidence)
+                    ),
                     "chats": wcount.chats if wcount else 0,
                 }
                 if outcome.stats.stopped_by == "estimate_only":
@@ -3964,7 +4100,9 @@ async def _run_pipeline(
         history=history,
         follow_up=plan.intent_follow_up,
         claims_block=claims_block,
-        mode_note=WINDOW_SYNTH_NOTE if window_used else "",
+        mode_note=(
+            (STATS_SYNTH_NOTE if window_stats_used else WINDOW_SYNTH_NOTE) if window_used else ""
+        ),
         outside_asked=question_asks_outside(plan),
     )
     state["answer"] = answer  # H2: uzilish javobdan keyin bo'lsa ham matn yo'qolmaydi
@@ -4056,6 +4194,8 @@ async def _run_pipeline(
         "estimate": estimate_meta,
         "retrieval_kind": plan.retrieval_kind,
         "inbox": plan.inbox,
+        "direction": plan.direction,
+        "window_stats": plan.window_stats,
         "strategy": "deep",
         "source": "deep",
         "account_id": account_id,
@@ -4184,9 +4324,12 @@ async def stream_deep_search(
 
 
 __all__ = [
+    "AGGREGATE_RE",
+    "BOTH_RE",
     "DEEP_HISTORY_TURNS",
     "DEEP_RESULT_TOKENS",
     "DEFAULT_RETRIEVAL_KIND",
+    "DIRECTIONS",
     "DIRECT_FOLLOW_UPS",
     "DIRECT_INTENTS",
     "DISCOVER_RE",
@@ -4197,6 +4340,7 @@ __all__ = [
     "MAX_CANDIDATES",
     "MAX_ROUNDS",
     "MODES",
+    "OUTBOUND_RE",
     "QUARANTINED_STAGES",
     "RERANK_KEEP",
     "RETRIEVAL_KINDS",
@@ -4210,6 +4354,7 @@ __all__ = [
     "STAGES_FAST",
     "STAGES_REUSE",
     "STAGES_SCALE",
+    "STAGES_STATS",
     "STAGES_WINDOW",
     "TOPIC_MARK_RE",
     "WINDOW_LIST_RE",
@@ -4231,6 +4376,7 @@ __all__ = [
     "build_reflect_prompt",
     "confidence_of",
     "coverage_disclosure",
+    "detect_direction",
     "direct_intent",
     "earliest_synced_at",
     "escalate",

@@ -237,7 +237,7 @@ function citeChip(part, index, seq) {
  * yuborishi mumkin (rejadan keyin klaster ham keladi).
  */
 export const STAGE_ORDER = [
-  "plan", "estimate", "buckets", "pull", "filter", "select",
+  "plan", "estimate", "stats", "buckets", "pull", "filter", "select",
   "search", "map", "reduce", "cluster", "rerank", "write",
 ];
 
@@ -266,13 +266,13 @@ function nextStage(model, key) {
 }
 
 const STAGE_ICON = {
-  plan: "brain", estimate: "activity", buckets: "layers", pull: "database",
+  plan: "brain", estimate: "activity", stats: "bar-chart-3", buckets: "layers", pull: "database",
   filter: "filter", select: "check-check", search: "search", map: "bolt",
   reduce: "layers", cluster: "layers", rerank: "filter", write: "edit-3",
 };
 
 const STAGE_LABEL = {
-  plan: "web.deep.step_plan", estimate: "web.ask.stage_estimate",
+  plan: "web.deep.step_plan", estimate: "web.ask.stage_estimate", stats: "web.ask.stage_stats",
   buckets: "web.ask.stage_buckets", pull: "web.ask.stage_pull",
   filter: "web.ask.stage_filter", select: "web.ask.stage_select",
   search: "web.ask.stage_search", map: "web.ask.stage_map",
@@ -304,7 +304,8 @@ export function emptyModel(mode = "deep") {
       bucketsPlanned: 0, bucketsDone: 0, candidates: 0,
       filtered: 0, filterTotal: 0, kept: 0, keepRate: null,
       scanCost: 0, cached: false,
-      selected: 0, chats: 0, weeks: 0, trimmed: 0,
+      selected: 0, chats: 0, weeks: 0, days: 0, grain: "", bucketsTotal: 0, trimmed: 0,
+      statsTotal: 0, statsDirection: "",
       chunk: 0, chunks: 0, claims: 0, claimsIn: 0, contradictions: 0,
       searched: 0, served: 0, planned: 0,
     },
@@ -377,18 +378,41 @@ export function reduceEvent(model, kind, d = {}, at = 0) {
         est_total_usd: d.est_total_usd == null ? null : Number(d.est_total_usd),
         ceiling_usd: d.ceiling_usd == null ? null : Number(d.ceiling_usd),
         weeks: numOr(d.weeks),
+        days: numOr(d.days),
+        grain: String(d.grain || ""),
+        buckets_total: numOr(d.buckets_total),
+        chats: numOr(d.chats),
+        chats_total: numOr(d.chats_total),
+        retrieval_kind: String(d.retrieval_kind || ""),
+        window_from_question: Boolean(d.window_from_question),
         range: d.range || null,
       };
       f.bucketsPlanned = model.estimate.buckets || f.bucketsPlanned;
+      f.bucketsTotal = model.estimate.buckets_total || f.bucketsTotal;
       f.weeks = model.estimate.weeks || f.weeks;
+      f.days = model.estimate.days || f.days;
+      f.grain = model.estimate.grain || f.grain;
+      f.chats = model.estimate.chats || f.chats;
       model.range = d.range || model.range || null;
-      advance("estimate", "buckets");
+      // Keyingi bosqich **rejadan** (`stages`): oyna yo'lida `buckets` yo'q
+      // va u "12 062 bucket · 0 chat · 0 hafta" bo'lib yonib qolardi.
+      advance("estimate", nextStage(model, "estimate"));
+      break;
+
+    case "stats":
+      f.statsTotal = numOr(d.total, f.statsTotal);
+      f.chats = numOr(d.chats, f.chats);
+      f.statsDirection = String(d.direction || "");
+      advance("stats", nextStage(model, "stats"));
       break;
 
     case "buckets":
       f.bucketsPlanned = numOr(d.planned, f.bucketsPlanned);
+      f.bucketsTotal = numOr(d.total, f.bucketsTotal);
       f.chats = numOr(d.chats, f.chats);
       f.weeks = numOr(d.weeks, f.weeks);
+      f.days = numOr(d.days, f.days);
+      if (d.grain) f.grain = String(d.grain);
       model.range = d.range || model.range || null;
       advance("buckets", "pull");
       break;
@@ -756,11 +780,36 @@ function estimateCard() {
  * Baho satri: `≈ 14 200 xabar · 186 bo'lak · 4 hafta (1 yan → 1 sen) ·
  * skan ≈ $0.07, jami ≈ $0.30 (shift $0.50)`.
  */
+/**
+ * Oyna uzunligi donadorlik bo'yicha: kunlik gridda "3 kun", aks holda
+ * "38 hafta". Noma'lum (0) bo'lsa bo'sh — hech qachon "0 hafta" emas.
+ */
+export function spanText(est) {
+  const days = Number(est?.days || 0);
+  const weeks = Number(est?.weeks || 0);
+  if (est?.grain === "day" && days > 0) return t("web.ask.est_span_days", { n: num(days) });
+  if (weeks > 0) return t("web.ask.est_span_weeks", { n: num(weeks) });
+  if (days > 0) return t("web.ask.est_span_days", { n: num(days) });
+  return "";
+}
+
+/** "400 / 12 062" — qopqoq rejani qisqartirgan bo'lsa ikkalasi ham ko'rinadi. */
+export function bucketsText(est) {
+  const planned = Number(est?.buckets || 0);
+  const total = Number(est?.buckets_total || 0);
+  return total > planned
+    ? t("web.ask.est_buckets_of", { n: num(planned), total: num(total) })
+    : num(planned);
+}
+
 function estimateLine(est) {
   const r = est.range || {};
+  const span = spanText(est);
   return t("web.ask.est_line", {
     msgs: num(est.est_messages),
-    buckets: num(est.buckets),
+    buckets: bucketsText(est),
+    chats: num(est.chats || 0),
+    span: span || "—",
     weeks: num(est.weeks),
     from: r.from ? fmtDate(r.from) : "—",
     to: r.to ? fmtDate(r.to) : "—",
@@ -801,12 +850,16 @@ function stageDetail(key, model, shownCandidates) {
     case "estimate":
       return model.estimate
         ? t("web.ask.step_estimate", {
-          msgs: num(model.estimate.est_messages), buckets: num(model.estimate.buckets),
+          msgs: num(model.estimate.est_messages), buckets: bucketsText(model.estimate),
         })
         : "";
+    case "stats":
+      return t("web.ask.step_stats", { n: num(f.statsTotal), chats: num(f.chats) });
     case "buckets":
       return t("web.ask.step_buckets", {
-        n: num(f.bucketsPlanned), chats: num(f.chats), weeks: num(f.weeks),
+        n: bucketsText({ buckets: f.bucketsPlanned, buckets_total: f.bucketsTotal }),
+        chats: num(f.chats),
+        span: spanText({ weeks: f.weeks, days: f.days, grain: f.grain }) || "—",
       });
     case "pull":
       return t("web.ask.step_pull", {

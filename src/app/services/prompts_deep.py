@@ -610,6 +610,17 @@ messages they sent, what they wanted (the purpose), and whether anything needs a
 an action from the owner. Keep the citation token on every line. End with the items that \
 need an answer, if there are any. If the window is empty, say so plainly."""
 
+#: Sanoq yo'li (`plan.window_stats`) — reyting/son savoli, javob `count(*)` dan.
+STATS_SYNTH_NOTE = """retrieval: window stats — the "window stats" block inside the evidence \
+envelope was computed by code with count(*) over EVERY message in the asked time window \
+(direction as stated there). Its numbers are exact and complete: never recount, never \
+estimate, never round them differently, never invent a name or a number that is not in the \
+block. Answer with a short ranked table taken from the block (rank, chat or person, \
+messages, share %), then the total for the window and the direction (messages the owner \
+sent / received / both). The message lines after the block are only a few newest samples \
+per top chat — use them at most as an illustration with their citation token, never as \
+the basis of a count. If the window is empty, say so plainly."""
+
 __all__ = [
     "CAPABILITIES_EN",
     "CAPABILITIES_RU",
@@ -623,6 +634,7 @@ __all__ = [
     "SCALE_FILTER_PROMPT",
     "SCALE_MAP_PROMPT",
     "SCALE_REDUCE_PROMPT",
+    "STATS_SYNTH_NOTE",
     "TRUST_RULES",
     "WINDOW_SYNTH_NOTE",
     "capabilities_text",

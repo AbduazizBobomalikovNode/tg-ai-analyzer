@@ -963,3 +963,74 @@ process.stdout.write(JSON.stringify({
     assert out["lateStates"]["plan"] == "done"
     assert out["lateStates"]["estimate"] == "active"
     assert len(out["lateVisible"]) == 9
+
+
+def test_stage_model_stats_and_window_estimate_follow_the_planned_stages() -> None:
+    """Sanoq yo'li (`plan → stats → write`) va oyna bahosi reja ro'yxatiga ergashadi.
+
+    Jonli regressiya: oyna yo'lida `estimate` hodisasi qattiq yozilgan
+    `buckets` bosqichini yoqardi va reykda "Rejalashtirish 12 062 bucket ·
+    0 chat · 0 hafta" chiqardi — bu yo'lda bucket rejasi umuman yo'q.
+    """
+    script = """
+const stats = M.stageModel(INPUT.stats, { mode: "exhaustive" });
+const win = M.stageModel(INPUT.window, { mode: "exhaustive" });
+const pick = (m) => {
+  const s = {};
+  for (const [k, v] of Object.entries(m.stages)) s[k] = v.state;
+  return s;
+};
+process.stdout.write(JSON.stringify({
+  statsStates: pick(stats), statsFunnel: stats.funnel,
+  winStates: pick(win), winEstimate: win.estimate, winFunnel: win.funnel,
+}));
+"""
+    payload = {
+        "stats": [
+            {"kind": "stages", "t": 0, "data": {"stages": ["plan", "stats", "write"]}},
+            {"kind": "plan", "t": 5, "data": {"subqueries": []}},
+            {
+                "kind": "stats",
+                "t": 9,
+                "data": {"total": 4210, "chats": 87, "direction": "out", "top": 20},
+            },
+            {"kind": "token", "t": 20, "data": {"text": "1. Nurbek — 600"}},
+            {"kind": "done", "t": 30, "data": {}},
+        ],
+        "window": [
+            {
+                "kind": "stages",
+                "t": 0,
+                "data": {"stages": ["plan", "estimate", "pull", "select", "map", "write"]},
+            },
+            {"kind": "plan", "t": 5, "data": {"subqueries": []}},
+            {
+                "kind": "estimate",
+                "t": 8,
+                "data": {
+                    "mode": "exhaustive",
+                    "buckets": 12062,
+                    "buckets_total": 12062,
+                    "chats": 214,
+                    "weeks": 39,
+                    "days": 268,
+                    "grain": "week",
+                    "est_messages": 667360,
+                    "retrieval_kind": "window",
+                },
+            },
+        ],
+    }
+    out = _ask_module("deep.js", script, payload)
+
+    assert out["statsStates"] == {"plan": "done", "stats": "done", "write": "done"}
+    assert out["statsFunnel"]["statsTotal"] == 4210
+    assert out["statsFunnel"]["chats"] == 87
+    assert out["statsFunnel"]["statsDirection"] == "out"
+
+    assert "buckets" not in out["winStates"], out["winStates"]
+    assert out["winStates"]["estimate"] == "done"
+    assert out["winStates"]["pull"] == "active"
+    assert out["winEstimate"]["weeks"] == 39
+    assert out["winEstimate"]["grain"] == "week"
+    assert out["winFunnel"]["chats"] == 214

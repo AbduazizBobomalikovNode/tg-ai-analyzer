@@ -127,6 +127,13 @@ synth → qamrov. Web: `POST /api/conversations/{id}/messages` `mode="deep"`
   Darvoza kodda (`WINDOW_LIST_RE` + oyna, `TOPIC_MARK_RE` bo'lsa `topic`):
   "bugun IT ta'lim **haqida** nima deyishdi" — mavzu skani, oyna bir kun
   bo'lsa ham.
+  **Yo'nalish** `plan.direction` (`detect_direction`, uz/ru/en): `in` (=
+  `inbox`, moslik taxallusi), `out` ("kimga yozdim" → `messages.out`), `both`
+  ("kim bilan gaplashdim" → men shu oynada yozgan chatlar). Reyting/sanoq
+  savoli (`AGGREGATE_RE`, mavzusiz) → `window_stats`: `plan → stats → write`,
+  javob **DB agregatlaridan** (`stats_window`, chat/yuboruvchi, ulush %) +
+  top 10 chatdan ≤3 namuna; pull/filtr/map yo'q, tasdiq so'ralmaydi.
+  Mavzuli savolda `out` kaskad pull'iga filtr bo'lib o'tadi (`PullSpec.out_only`).
 - **Qamrov (`Coverage`) kodda hisoblanadi**, modelga yozdirilmaydi. `gaps` =
   `synced_min_id != 1` chatlar; `server_rungs_used` / `server_calls` /
   `server_hits` / `server_skipped` / `external_hits` — server pog'onalarining

@@ -19,7 +19,7 @@ Nima qo'riqlanadi:
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import text
@@ -1449,3 +1449,119 @@ async def test_scan_runs_defaults_and_survives_conversation_delete(
             )
         ).one()
     assert tuple(after) == (None, 180)
+
+
+async def test_window_stats_and_week_grid_sql_run_on_postgres(pg_engine: AsyncEngine) -> None:
+    """Sanoq yo'li va haftalik grid SQL'i haqiqiy Postgres'da (FILTER, date_trunc).
+
+    Chat A (shaxsiy): men 5 ta, u 2 ta; chat B (guruh): men 1 ta, boshqalar 4 ta;
+    chat C (kanal): men 0 ta, 7 ta post. `out` → A=5, B=1; `both` → C chiqmaydi.
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.services import deep_search as DS
+    from app.services import scale_search as SC
+    from app.services import window_search as WS
+
+    aid, chat_a = await _fixture_chat(pg_engine)
+    base = datetime(2026, 3, 2, 10, tzinfo=UTC)  # dushanba
+    async with pg_engine.begin() as conn:
+        chat_ids = [chat_a]
+        for kind, title in (("supergroup", "B guruh"), ("channel", "C kanal")):
+            chat_ids.append(
+                int(
+                    (
+                        await conn.execute(
+                            text(
+                                "INSERT INTO chats (account_id, tg_peer_id, type, title, "
+                                "write_mode, sync_state, synced_total) VALUES (:aid, "
+                                "floor(random() * 1e12)::bigint, :k, :t, 'read_only', "
+                                "'idle', 0) RETURNING id"
+                            ),
+                            {"aid": aid, "k": kind, "t": title},
+                        )
+                    ).scalar_one()
+                )
+            )
+        await conn.execute(
+            text("UPDATE chats SET type = 'private', title = 'Nurbek' WHERE id = :c"),
+            {"c": chat_a},
+        )
+        plan_rows = [(chat_ids[0], True, None)] * 5 + [(chat_ids[0], False, 77)] * 2
+        plan_rows += [(chat_ids[1], True, None)] + [(chat_ids[1], False, 88)] * 4
+        plan_rows += [(chat_ids[2], False, None)] * 7
+        for i, (cid, out, sender) in enumerate(plan_rows):
+            await conn.execute(
+                text(
+                    "INSERT INTO messages (chat_id, tg_msg_id, published_at, text, out, "
+                    "sender_id) VALUES (:c, :m, :d, :t, :o, :s)"
+                ),
+                {
+                    "c": cid,
+                    "m": 100 + i,
+                    "d": base + timedelta(days=i * 3),
+                    "t": f"xabar {i}",
+                    "o": out,
+                    "s": sender,
+                },
+            )
+        await conn.execute(
+            text(
+                "INSERT INTO senders (account_id, tg_user_id, display_name) "
+                "VALUES (:a, 88, 'Aziz') ON CONFLICT DO NOTHING"
+            ),
+            {"a": aid},
+        )
+
+    maker = async_sessionmaker(pg_engine, expire_on_commit=False)
+    since = datetime(2026, 1, 1, tzinfo=UTC)
+    until = datetime(2026, 9, 25, tzinfo=UTC)
+    titles = {chat_ids[0]: "Nurbek", chat_ids[1]: "B guruh", chat_ids[2]: "C kanal"}
+    async with maker() as session:
+        out_spec = WS.WindowSpec(
+            account_id=aid, chats=None, since=since, until=until, direction="out"
+        )
+        count = await WS.count_window(session, out_spec)
+        assert (count.total, count.chats) == (6, 2)
+        agg = await WS.stats_window(session, out_spec)
+        assert [(r.chat_id, r.n, r.mine) for r in agg.per_chat] == [
+            (chat_ids[0], 5, 5),
+            (chat_ids[1], 1, 1),
+        ]
+        assert agg.per_chat[0].chat_type == "private"
+        assert agg.per_sender == []  # chiquvchi savolda yuboruvchi reytingi yo'q
+        samples = await WS.stats_samples(
+            session, out_spec, [r.chat_id for r in agg.per_chat], titles=titles
+        )
+        assert len([h for h in samples if h.chat_id == chat_ids[0]]) == 3
+        assert len([h for h in samples if h.chat_id == chat_ids[1]]) == 1
+
+        both_spec = WS.WindowSpec(
+            account_id=aid, chats=None, since=since, until=until, direction="both"
+        )
+        both = await WS.stats_window(session, both_spec)
+        assert {r.chat_id: r.n for r in both.per_chat} == {chat_ids[0]: 7, chat_ids[1]: 5}
+        assert both.mine_total == 6
+        assert both.per_sender[0] == ("Aziz", 4)
+        assert ("user:77", 2) in both.per_sender
+
+        in_spec = WS.WindowSpec(account_id=aid, chats=None, since=since, until=until, inbox=True)
+        inbound = await WS.count_window(session, in_spec)
+        assert inbound.total == 2  # faqat shaxsiy chatdagi kiruvchi (javob yo'q)
+
+        summary = SC.BucketSummary()
+        plan = DS.DeepPlan(subqueries=["x"], since=since, until=until, chats=chat_ids)
+        buckets = await SC.plan_buckets(
+            session, aid, plan=plan, vectors=[], limit=5, mode="exhaustive", summary=summary
+        )
+    assert len(buckets) == 5
+    assert {b.source for b in buckets} == {"week"}
+    assert summary.grain == "week"
+    pairs = {
+        (cid, (base + timedelta(days=i * 3)).isocalendar()[:2])
+        for i, (cid, _o, _s) in enumerate(plan_rows)
+    }
+    assert summary.total == len(pairs)
+    assert summary.chats_total == 3
+    assert summary.planned == 5
+    assert summary.days == 267 and summary.weeks == 39
