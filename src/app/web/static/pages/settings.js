@@ -1,6 +1,6 @@
 /* pages/settings.js — `/settings`.
  *
- * Yetti bo'lim, bitta sahifa. Har bo'lim **mustaqil** yuklanadi va o'z
+ * Sakkiz bo'lim, bitta sahifa. Har bo'lim **mustaqil** yuklanadi va o'z
  * endpoint'iga yozadi: ko'rinish sozlamalari `PUT /api/settings/prefs`,
  * yozish rejimi `PATCH .../write_mode`, auto-reply va briefing o'z
  * formalarida. Bittasi yiqilsa qolgani ishlayveradi.
@@ -13,7 +13,7 @@ import { $, $$, el, replace, clear, ready, trapFocus, debounce } from "/static/l
 import { t, has } from "/static/lib/i18n.js";
 import { get, put, patch, post, del } from "/static/lib/api.js";
 import { icon } from "/static/lib/icons.js";
-import { compact, usd } from "/static/lib/fmt.js";
+import { compact, usd, dateTime } from "/static/lib/fmt.js";
 import { peerClass, initials } from "/static/lib/palette.js";
 import { toast, toastError } from "/static/lib/toast.js";
 import * as themeMod from "/static/lib/theme.js";
@@ -326,6 +326,172 @@ async function loadSystem() {
   replace(box, rows.map(([k, v]) => el("div", null, [el("span", null, k), el("b", null, v)])));
 }
 
+/* ── 3b. Kunlik byudjet ──────────────────────────────────────────────── */
+/*
+ * Limit **foydalanuvchi** bo'yicha (barcha akkauntlar uchun umumiy) — karta
+ * har akkaunt sozlamalarida turadi, `account_id` faqat vaqt zonasi uchun
+ * (boost standart muddati — shu zonadagi keyingi yarim tun).
+ */
+
+const bud = { data: null };
+
+const budQuery = () => (state.account ? `?account_id=${state.account.id}` : "");
+const budNote = (msg) => { const n = $("#bud-note"); if (n) n.textContent = msg || ""; };
+
+function budMeter(label, used, limit, fmtVal, key) {
+  const pctVal = limit ? Math.min(100, (100 * used) / limit) : 0;
+  const bar = el("i", { style: { inlineSize: `${pctVal.toFixed(1)}%` } });
+  if (limit && pctVal >= 100) bar.classList.add("is-hot");
+  else if (limit && pctVal >= 80) bar.classList.add("is-warn");
+  const text = t(key, { used: fmtVal(used), limit: limit ? fmtVal(limit) : t("web.budget.unlimited") });
+  return el("div.bud-meter", null, [
+    el("div.bud-meter-top", null, [el("span", null, label), el("b", null, text)]),
+    el("div.progress", {
+      role: "progressbar",
+      "aria-label": text,
+      "aria-valuemin": "0",
+      "aria-valuemax": "100",
+      "aria-valuenow": String(Math.round(pctVal)),
+    }, bar),
+  ]);
+}
+
+function paintBudget(d) {
+  bud.data = d;
+  const box = $("#bud-usage");
+  if (!box) return;
+  const u = d.usage_24h || {};
+  const lim = d.limits || {};
+  const kids = [
+    budMeter(`${t("web.budget.usage")} · ${t("web.budget.requests", { n: u.requests || 0 })}`,
+      Number(u.tokens || 0), lim.tokens, compact, "web.budget.tokens_of"),
+    budMeter("", Number(u.usd || 0), lim.usd, usd, "web.budget.usd_of"),
+  ];
+  const status = [el(`span.pill.${lim.source === "custom" ? "accent" : "ok"}`, null,
+    t(lim.source === "custom" ? "web.budget.source_custom" : "web.budget.source_global"))];
+  if (d.boost) status.push(el("span.pill.ok", null, t("web.budget.boost_pill")));
+  if (d.last_hit && d.last_hit.at) {
+    status.push(el("span.field-note", null, t("web.budget.last_hit", { time: dateTime(d.last_hit.at) })));
+  }
+  kids.push(el("div.bud-status", null, status));
+  if (d.blocked) {
+    const msg = [t(`web.budget.blocked_${d.blocked === "cost" ? "cost" : "tokens"}`)];
+    const at = d.resets_hint && d.resets_hint.at;
+    if (at) msg.push(t("web.budget.resets_at", { time: dateTime(at) }));
+    kids.push(el("div.bud-alert", { role: "status" }, [icon("alert-triangle"), el("span", null, msg.join(" "))]));
+  }
+  replace(box, kids);
+
+  // Forma: joriy override (bo'sh = standart); placeholder — global qiymat.
+  const g = lim.global || {};
+  const c = lim.custom || {};
+  const tokIn = $("#bud-tokens"), usdIn = $("#bud-usd");
+  if (tokIn) { tokIn.value = c.tokens != null ? String(c.tokens) : ""; tokIn.placeholder = g.tokens ? String(g.tokens) : "0"; }
+  if (usdIn) { usdIn.value = c.usd != null ? String(c.usd) : ""; usdIn.placeholder = g.usd ? String(g.usd) : "0"; }
+  const defs = [t("web.budget.defaults", {
+    tokens: g.tokens ? compact(g.tokens) : t("web.budget.unlimited"),
+    usd: g.usd ? usd(g.usd) : t("web.budget.unlimited"),
+  })];
+  if (lim.ceiling) {
+    defs.push(t("web.budget.ceiling", {
+      tokens: lim.ceiling.tokens ? compact(lim.ceiling.tokens) : t("web.budget.unlimited"),
+      usd: lim.ceiling.usd ? usd(lim.ceiling.usd) : t("web.budget.unlimited"),
+    }));
+  }
+  const defBox = $("#bud-defaults");
+  if (defBox) defBox.textContent = defs.join(" ");
+  const reset = $("#bud-reset");
+  if (reset) reset.disabled = lim.source !== "custom";
+
+  const win = $("#bud-boost-window");
+  if (win) win.textContent = t("web.budget.boost_note", { tz: d.tz || "Asia/Tashkent" });
+  const act = $("#bud-boost-active");
+  if (act) {
+    if (d.boost) {
+      replace(act, el("div.bud-boost-active", null, [
+        icon("zap"),
+        el("span", null, t("web.budget.boost_active", {
+          tokens: compact(d.boost.tokens || 0),
+          usd: usd(d.boost.usd || 0),
+          time: dateTime(d.boost.until),
+        })),
+        el("button.btn.ghost.small", { type: "button", onclick: cancelBoost }, t("web.budget.boost_cancel")),
+      ]));
+      act.hidden = false;
+    } else {
+      clear(act);
+      act.hidden = true;
+    }
+  }
+}
+
+async function loadBudget() {
+  try { paintBudget(await get(`/api/settings/budget${budQuery()}`)); } catch (err) {
+    const box = $("#bud-usage");
+    if (box) replace(box, el("p.set-note", null, err.message || t("error.generic")));
+  }
+}
+
+/** Bo'sh input — `null` (standart); aks holda manfiy bo'lmagan son yoki `NaN`. */
+function numOrNull(id) {
+  const raw = String($(id)?.value ?? "").trim();
+  if (raw === "") return null;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : NaN;
+}
+
+async function saveBudget(e) {
+  e.preventDefault();
+  const tokens = numOrNull("#bud-tokens");
+  const cost = numOrNull("#bud-usd");
+  if (Number.isNaN(tokens) || Number.isNaN(cost)) { budNote(t("web.budget.err_invalid")); return; }
+  try {
+    paintBudget(await put(`/api/settings/budget${budQuery()}`, {
+      token_budget: tokens == null ? null : Math.round(tokens),
+      cost_budget_usd: cost,
+    }));
+    budNote(t("web.budget.saved"));
+  } catch (err) { budNote(err.message || t("error.generic")); }
+}
+
+async function resetBudget() {
+  try {
+    paintBudget(await put(`/api/settings/budget${budQuery()}`, { token_budget: null, cost_budget_usd: null }));
+    budNote(t("web.budget.reset_done"));
+  } catch (err) { budNote(err.message || t("error.generic")); }
+}
+
+async function addBoost(tokens, cost) {
+  try {
+    paintBudget(await post("/api/settings/budget/boost", {
+      tokens: tokens || 0,
+      usd: cost || 0,
+      account_id: state.account ? state.account.id : null,
+    }));
+    toast(t("web.budget.boost_added"), { kind: "ok" });
+    return true;
+  } catch (err) { toastError(err); return false; }
+}
+
+async function cancelBoost() {
+  try {
+    paintBudget(await del(`/api/settings/budget/boost${budQuery()}`));
+    toast(t("web.budget.boost_cleared"), { kind: "ok" });
+  } catch (err) { toastError(err); }
+}
+
+async function submitBoost(e) {
+  e.preventDefault();
+  const tokens = numOrNull("#bud-boost-tokens");
+  const cost = numOrNull("#bud-boost-usd");
+  if (Number.isNaN(tokens) || Number.isNaN(cost)) { toast(t("web.budget.err_invalid"), { kind: "err" }); return; }
+  if (!tokens && !cost) { toast(t("web.budget.err_boost_empty"), { kind: "err" }); return; }
+  if (await addBoost(tokens ? Math.round(tokens) : 0, cost || 0)) {
+    $("#bud-boost-tokens").value = "";
+    $("#bud-boost-usd").value = "";
+  }
+}
+
 /* ── Kirish nuqtasi ──────────────────────────────────────────────────── */
 
 async function main() {
@@ -365,12 +531,18 @@ async function main() {
   }
   paintWriteModes();
   fillArSelect();
-  await Promise.allSettled([loadBriefing(), loadSystem()]);
+  await Promise.allSettled([loadBriefing(), loadSystem(), loadBudget()]);
 }
 
 ready(() => {
   $("#ar-form")?.addEventListener("submit", saveAutoReply);
   $("#brief-form")?.addEventListener("submit", saveBriefing);
+  $("#bud-form")?.addEventListener("submit", saveBudget);
+  $("#bud-reset")?.addEventListener("click", resetBudget);
+  $("#bud-boost-form")?.addEventListener("submit", submitBoost);
+  for (const chip of $("#bud-chips [data-tokens], #bud-chips [data-usd]")) {
+    chip.addEventListener("click", () => addBoost(Number(chip.dataset.tokens || 0), Number(chip.dataset.usd || 0)));
+  }
   $("#unlink-yes")?.addEventListener("click", doUnlink);
   for (const b of $$("[data-sheet-cancel]")) b.addEventListener("click", closeUnlink);
   $("#unlink-sheet")?.addEventListener("mousedown", (e) => { if (e.target.id === "unlink-sheet") closeUnlink(); });

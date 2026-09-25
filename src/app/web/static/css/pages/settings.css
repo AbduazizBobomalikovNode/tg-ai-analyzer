@@ -46,6 +46,38 @@
 
 .tz-list { max-block-size: 0; overflow: hidden; }
 
+/* ── Byudjet ─────────────────────────────────────────────────────────── */
+.bud-usage { display: grid; gap: var(--s-3); }
+.bud-meter { display: grid; gap: var(--s-1); }
+.bud-meter-top { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s-3); flex-wrap: wrap; }
+.bud-meter-top span { font-size: var(--fs-sm); color: var(--muted); }
+.bud-meter-top b { font-variant-numeric: tabular-nums; font-size: var(--fs-md); }
+.bud-meter .progress { block-size: 8px; }
+.bud-meter .progress > i.is-warn { background: var(--warn-text); }
+.bud-meter .progress > i.is-hot { background: var(--danger); }
+.bud-status { display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap; font-size: var(--fs-sm); }
+.bud-alert {
+  display: flex; align-items: flex-start; gap: var(--s-2);
+  padding: var(--s-2) var(--s-3); border-radius: var(--r-md, 12px);
+  background: var(--danger-soft); color: var(--danger-ink);
+  font-size: var(--fs-sm); line-height: var(--lh-body);
+}
+.bud-alert .icon { flex: none; margin-block-start: 2px; }
+.bud-boost {
+  display: grid; gap: var(--s-2);
+  border-block-start: 1px solid var(--border-soft); padding-block-start: var(--s-3);
+}
+.bud-boost-head { display: flex; align-items: baseline; gap: var(--s-2); flex-wrap: wrap; }
+.bud-boost-active {
+  display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap;
+  padding: var(--s-2) var(--s-3); border-radius: var(--r-md, 12px);
+  background: var(--ok-soft); font-size: var(--fs-sm);
+}
+.bud-boost-active span { flex: 1 1 200px; min-inline-size: 0; }
+.bud-boost-custom { display: flex; gap: var(--s-2); flex-wrap: wrap; align-items: stretch; }
+.bud-boost-custom input { flex: 1 1 120px; min-inline-size: 0; inline-size: auto; }
+.bud-boost-custom .btn { flex: none; }
+
 @media (min-width: 861px) {
   .set-layout { grid-template-columns: 220px minmax(0, 1fr); }
   .set-nav {

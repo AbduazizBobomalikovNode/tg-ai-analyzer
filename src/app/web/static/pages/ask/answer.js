@@ -142,7 +142,10 @@ function showError(err, shell) {
   // Bosqich chizig'i "o'ylayapti" da qotib qolmasin — oqim tugadi.
   if (shell) { shell.stage.hidden = true; clear(shell.stage); }
   const code = err?.code || "error.generic";
-  if (BANNER_CODES.has(code)) banner("err", err.message);
+  if (code === "chat.err.budget") {
+    // Byudjet tugadi — foydalanuvchi qayerda oshirishini bilsin.
+    banner("err", err.message, { link: { href: "/settings#sec-budget", label: t("web.budget.goto") } });
+  } else if (BANNER_CODES.has(code)) banner("err", err.message);
   else if (shell) replace(shell.foot, el("div.answer-error", null, [icon("alert-triangle"), el("span", null, err.message)]));
   else toastError(err);
 }

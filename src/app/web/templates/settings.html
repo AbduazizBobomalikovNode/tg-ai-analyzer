@@ -35,6 +35,7 @@
       <a href="#sec-profile">{{ m.icon("user") }}{{ t('web.settings.sec_profile') }}</a>
       <a href="#sec-appearance">{{ m.icon("sun") }}{{ t('web.settings.sec_appearance') }}</a>
       <a href="#sec-ai">{{ m.icon("sparkles") }}{{ t('web.settings.sec_ai') }}</a>
+      <a href="#sec-budget">{{ m.icon("activity") }}{{ t('web.budget.title') }}</a>
       <a href="#sec-write">{{ m.icon("send") }}{{ t('web.settings.sec_write') }}</a>
       <a href="#sec-autoreply">{{ m.icon("message-circle") }}{{ t('web.ar.title') }}</a>
       <a href="#sec-briefing">{{ m.icon("inbox") }}{{ t('web.settings.sec_briefing') }}</a>
@@ -118,6 +119,47 @@
           </div>
         </div>
         <div class="readonly-kv" id="set-system"></div>
+      {% endcall %}
+
+      {# Kunlik byudjet — foydalanuvchi bo'yicha (barcha akkauntlar uchun umumiy).
+         API: GET/PUT /api/settings/budget, POST/DELETE /api/settings/budget/boost. #}
+      {% call m.set_section("sec-budget", "activity", t('web.budget.title')) %}
+        <p class="set-note">{{ t('web.budget.shared_note') }}</p>
+        <div class="bud-usage" id="bud-usage" aria-live="polite">{{ m.skeleton_rows(2) }}</div>
+        <form class="fields two" id="bud-form" autocomplete="off" novalidate>
+          <label class="field">
+            <span>{{ t('web.budget.tokens') }}</span>
+            <input type="number" id="bud-tokens" min="0" max="1000000000" step="1" inputmode="numeric">
+          </label>
+          <label class="field">
+            <span>{{ t('web.budget.usd') }}</span>
+            <input type="number" id="bud-usd" min="0" max="1000" step="0.01" inputmode="decimal">
+          </label>
+          <p class="field-note field wide" id="bud-defaults"></p>
+          <div class="form-actions field wide">
+            <button type="submit" class="btn primary">{{ t('web.budget.save') }}</button>
+            <button type="button" class="btn ghost" id="bud-reset">{{ t('web.budget.reset') }}</button>
+            <span class="field-note" id="bud-note" aria-live="polite"></span>
+          </div>
+        </form>
+        <div class="bud-boost">
+          <div class="bud-boost-head">
+            <b>{{ t('web.budget.boost_title') }}</b>
+            <span class="field-note" id="bud-boost-window"></span>
+          </div>
+          <div id="bud-boost-active" hidden></div>
+          <div class="chips" id="bud-chips">
+            <button type="button" class="chip-btn" data-tokens="1000000">+1M token</button>
+            <button type="button" class="chip-btn" data-usd="5">+$5</button>
+          </div>
+          <form class="bud-boost-custom" id="bud-boost-form" autocomplete="off" novalidate>
+            <input type="number" id="bud-boost-tokens" min="0" max="1000000000" step="1" inputmode="numeric"
+                   placeholder="{{ t('web.budget.boost_tokens_ph') }}" aria-label="{{ t('web.budget.boost_tokens_ph') }}">
+            <input type="number" id="bud-boost-usd" min="0" max="1000" step="0.01" inputmode="decimal"
+                   placeholder="{{ t('web.budget.boost_usd_ph') }}" aria-label="{{ t('web.budget.boost_usd_ph') }}">
+            <button type="submit" class="btn">{{ m.icon("plus") }} {{ t('web.budget.boost_add') }}</button>
+          </form>
+        </div>
       {% endcall %}
 
       {% call m.set_section("sec-write", "send", t('web.settings.sec_write')) %}

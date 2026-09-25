@@ -126,6 +126,10 @@ export function banner(kind, message, opts = {}) {
     icon(kind === "err" ? "alert-triangle" : "info"),
     el("span.ask-banner-text", null, message),
   ]);
+  if (opts.link) {
+    // Ichki havola (masalan "Sozlamalar → Byudjet") — faqat nisbiy yo'l.
+    node.appendChild(el("a.btn.ghost.small", { href: opts.link.href }, opts.link.label));
+  }
   if (opts.action) {
     node.appendChild(el("button.btn.ghost.small", {
       type: "button",
