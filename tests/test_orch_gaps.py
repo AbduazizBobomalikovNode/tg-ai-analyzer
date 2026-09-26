@@ -575,3 +575,29 @@ def test_stats_header_and_coverage_range_use_the_account_tz() -> None:
     assert "period: 2026-09-14 → 2026-09-20" in WS.render_window_stats(
         WS.WindowCount(total=1), spec=week
     )
+
+
+def test_planner_sees_a_collision_line_only_when_code_finds_one() -> None:
+    """Jonli daily-45: aniq "Otabek" chati bor edi, planner 14-qoidani o'zicha
+    qo'llab `clarify` qildi. Endi to'qnashuvni **kod** aytadi, yo'q bo'lsa jim."""
+    q = "Otabek nima dedi?"
+    line = OR.name_collision_line(AG.chat_hints(q, OTABEKS), q, None)
+    assert line.startswith("name_collision: 'Otabek' matches 3 private chats")
+    exact = [_private(3893, "Otabek"), _private(3853, "Otabek Kursdosh")]
+    q45 = "Otabekka 'ertaga 10 da' deb yoz."
+    assert OR.name_collision_line(AG.chat_hints(q45, exact), q45, None) == ""
+    resolved = CS.ConvState(
+        resolved_entities={"Otabek": {"chat_id": 110, "title": "", "kind": "private"}}
+    )
+    assert OR.name_collision_line(AG.chat_hints(q, OTABEKS), q, resolved) == ""
+    prompt = OR.build_orch_prompt(
+        q,
+        [],
+        now=datetime.now(UTC),
+        history=[],
+        selected=[],
+        mode="fast",
+        tz=TZ,
+        collision_line=line,
+    )
+    assert "name_collision:" in prompt

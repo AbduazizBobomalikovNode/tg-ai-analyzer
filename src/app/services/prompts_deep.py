@@ -807,10 +807,10 @@ the user asks for ("menga" = incoming, "men yuborgan" = outgoing); with a subjec
 `search_local` with the same `media` arg. The archive keeps only the media TYPE, never the \
 file: video, voice and files are all stored as "document", and nobody can say what a \
 picture shows.
-14. When <chat_hints> lists two or more chats matching the SAME name equally well (three \
-private chats "Otabek …") and <conversation_state> has no resolved entity for that name, \
-plan one `clarify` step whose options are those chat titles — unless the user clearly \
-means all of them ("hamma Otabeklar", "ikkalasi", "all of them", "всех").
+14. Name collisions are decided by CODE: only when the turn carries a `name_collision:` \
+line, plan one `clarify` step whose options are the chat titles listed there. Without that \
+line never clarify a person's name that <chat_hints> matches — a hint with match=1 is the \
+person meant (target it), even when other chats share part of the name.
 
 ## Examples
 selected chat "Honadoshlar" / latest: "bu chatda nima bor edi!"

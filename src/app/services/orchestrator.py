@@ -189,6 +189,7 @@ def build_orch_prompt(
     tz: str,
     state_block: str = "",
     hint_lines: list[str] | None = None,
+    collision_line: str = "",
 ) -> str:
     """Eski planner kirishi + tanlangan chatlar, vaqt oynasi fakti va rejim qopqog'i.
 
@@ -217,6 +218,8 @@ def build_orch_prompt(
         )
     if state_block:
         parts.append(state_block)
+    if collision_line:
+        parts.append(collision_line)
     parts.append(window_fact(question, tz=tz, now=now))
     allowed = ", ".join(SK.allowed_skills(mode))
     parts.append(f"mode_ceiling: {mode} — allowed skills: {allowed}")
@@ -648,6 +651,29 @@ _CLARIFY_NAME = {
 TARGETED_SKILLS = frozenset({"write_propose", "send_result", "agent_tools", "chat_digest"})
 
 
+def name_collision_line(hints: list[Any], question: str, conv: CS.ConvState | None) -> str:
+    """Planner uchun `name_collision:` fakti — **faqat** kod to'qnashuv topganda.
+
+    Holatda yechim bo'lsa yoki "hamma Otabeklar" deyilgan bo'lsa — bo'sh:
+    planner o'zi "bir nechta Otabek bor" deb `clarify` qilmasin (jonli
+    daily-45: aniq "Otabek" chati bor edi, planner baribir so'radi).
+    Sarlavhalar begona matn — `neutralize` dan o'tadi.
+    """
+    collision = CS.name_collision(hints, question) if hints else None
+    if collision is None:
+        return ""
+    key, tied = collision
+    if CS.resolve_name(conv, key) is not None or means_all_names(question, key):
+        return ""
+    titles = ", ".join(
+        f'"{U.neutralize(str(h.title))[:80]}" [id:{int(h.chat_id)}]' for h in tied[:3]
+    )
+    return (
+        f"name_collision: {U.neutralize(key)[:40]!r} matches {len(tied)} private chats equally "
+        f"({titles}) — computed by code; ask which one (rule 14)"
+    )
+
+
 def means_all_names(question: str, key: str) -> bool:
     """Savol shu nomdagi **hamma** chatni nazarda tutadimi ("hamma Otabeklar")."""
     folded = TW.fold(question)
@@ -737,6 +763,7 @@ async def plan_orchestrated(
     sel_lines = selected_lines(selected)
     sel_ids = [c.id for c in selected]
     state_block = CS.render_block(conv) if conv is not None else ""
+    collision_line = name_collision_line(hints or [], question, conv)
     if state_block:
         taint.assert_state("plan", state_block)
 
@@ -751,6 +778,7 @@ async def plan_orchestrated(
             tz=tz,
             state_block=state_block,
             hint_lines=hint_lines,
+            collision_line=collision_line,
         )
 
     prompt = prompt_for(history)
