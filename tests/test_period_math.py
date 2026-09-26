@@ -207,6 +207,20 @@ async def test_weekday_distribution_gives_the_top_day_as_a_fact(
     assert wired["persisted"]["context_meta"]["unbacked_numbers"] == []
 
 
+async def test_question_window_beats_planner_period_for_a_single_stats(
+    monkeypatch: pytest.MonkeyPatch, wired: dict[str, Any]
+) -> None:
+    # Jonli uni-12: "oxirgi 7 kunda" + planner `period=last_week` — oyna o'tgan
+    # kalendar haftasiga siljirdi. Savolning o'z oynasi (kodda) ustun bo'lsin.
+    seen = fake_counts(monkeypatch, {"": 154, "last_n": 154})
+    llm = FakeLLM(
+        plan=_plan(steps=[{"skill": "stats", "args": {"period": "last_week"}}]),
+        synth="Oxirgi 7 kunda 154 ta xabar yozgansiz.",
+    )
+    await run("oxirgi 7 kunda nechta xabar yozdim?", llm, mode="fast")
+    assert seen and seen[0]["plan"].window_kind == "last_n"
+
+
 # ─── haqiqiy Postgres: taqsimot SQL'i ────────────────────────────────────────
 
 

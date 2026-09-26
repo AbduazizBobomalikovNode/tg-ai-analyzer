@@ -932,3 +932,18 @@ def test_universal_suite_is_well_formed() -> None:
     assert by_id["uni-20"].turns[0].expect["must_propose_action"] is False
     assert by_id["uni-12"].turns[0].expect["has_table"] is True
     assert by_id["uni-13"].turns[0].expect["has_chart"] is True
+
+
+def test_no_fabricated_citations_accepts_real_tokens_and_flags_unknown_ones() -> None:
+    # uni-16/18: orkestrator (auto) haqiqiy `#c..m..` sitatalarini beradi.
+    ctx = {"citations": [{"token": "c3923m211766"}, "c3853m211638"], "messages": 20}
+    ok = _steps_checks(
+        {"no_fabricated_citations": True}, ctx, "Rasm: #c3923m211766 va #c3853m211638, #1234"
+    )
+    assert ok == {"no_fabricated_citations": True}
+    bad = _steps_checks({"no_fabricated_citations": True}, ctx, "Rasm: #c307m211671")
+    assert bad == {"no_fabricated_citations": False}
+    # Dalilsiz javobda yalang'och id ham to'qima.
+    assert _steps_checks({"no_fabricated_citations": True}, {}, "xabar #4567") == {
+        "no_fabricated_citations": False
+    }

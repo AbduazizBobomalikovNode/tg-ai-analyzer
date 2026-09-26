@@ -70,7 +70,8 @@ _CHART_RE = re.compile(
 _LIST_RE = re.compile(r"\b(ro'yxat\w*|sanab\w*|списк\w*|список|numbered\s+list|list)\b")
 #: Vaqt bo'yicha seriya: kunlik dinamika, trend.
 _TIME_SERIES_RE = re.compile(
-    r"\b(kunlik|kun\s+bo'yicha|kunlar\s+bo'yicha|dinamika\w*|trend\w*|haftalik|"
+    r"\b(kunlik|kun\s+bo'yicha|kunlar\s+bo'yicha|har\s+kun\w*|dinamika\w*|trend\w*|haftalik|"
+    r"каждый\s+день|every\s+day|each\s+day|"
     r"по\s+дням|динамик\w*|по\s+неделям|ежедневн\w*|daily|per\s+day|by\s+day|over\s+time|"
     r"timeline|line)\b"
 )

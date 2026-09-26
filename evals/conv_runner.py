@@ -111,6 +111,16 @@ TABLE_RE = re.compile(r"^[ \t]*\|.*\|[ \t]*\r?\n[ \t]*\|[ \t:|-]*-{3,}[ \t:|-]*\
 CHART_FENCE_RE = re.compile(r"```chart\s*\n")
 
 
+def _citation_tokens(ctx: dict[str, Any]) -> set[str]:
+    """`context.citations` → `{"#c12m34", …}` (dict `{token}` yoki yalang'och satr)."""
+    out: set[str] = set()
+    for cite in ctx.get("citations") or []:
+        token = str(cite.get("token") or "") if isinstance(cite, dict) else str(cite)
+        if token:
+            out.add("#" + token.lstrip("#"))
+    return out
+
+
 def plan_steps(ctx: dict[str, Any]) -> list[str]:
     """Orkestrator qadamlari (ko'nikma nomlari) — auto va deep turn'lar uchun bitta yo'l.
 
@@ -437,8 +447,15 @@ def check_turn(
         # yo'q" deb aytib, o'tmishdagi **real** xabarlarga tayandi, tekshiruv
         # esa uni to'qima deb yiqitdi. Shuning uchun yalang'och id faqat
         # retrieval umuman bo'lmaganda (dalil manbasi yo'q) to'qima sanaladi.
-        found = sorted(set(DEEP_CITE_RE.findall(answer or "")))[:5]
-        if not executed:
+        #
+        # Orkestrator (auto ham) `#c<chat>m<id>` tokenlarini **haqiqiy** dalilga
+        # qo'yadi va ular `context.citations` da keladi — o'sha to'plamdagi token
+        # to'qima emas (uni-16/18 da haqiqiy sitatalar yiqitilardi). To'plamda
+        # yo'q token (masalan `#c307m…` — model xato ko'chirgan) esa baribir ushlanadi.
+        valid = _citation_tokens(ctx)
+        found = sorted(set(DEEP_CITE_RE.findall(answer or "")) - valid)[:5]
+        retrieved = bool(executed) or bool(valid) or bool(ctx.get("messages"))
+        if not retrieved:
             found += sorted(set(BARE_CITE_RE.findall(answer or "")))[:5]
         add("no_fabricated_citations", not found, f"citation-like tokens: {found}")
     if want := expect.get("forbid_regex"):

@@ -759,6 +759,13 @@ async def _stats(ctx: RunState, args: dict[str, Any]) -> SkillResult:
     slot = str(args.get("slot") or "")
     slot = slot if slot in STATS_SLOTS else ""
     notes: list[str] = []
+    if period and not slot and ctx.plan.window_from_question:
+        # Savolning o'z oynasi (kodda, `apply_question_window`) planner nomlagan
+        # davrdan ustun: "oxirgi 7 kunda" da planner `last_week` berib, oyna
+        # o'tgan kalendar haftasiga siljirdi (jonli uni-12). Ikki davr
+        # taqqoslashda (`slot`) esa davr nomi — yagona manba.
+        notes.append(f"stats: period {period[:24]!r} ignored — the question names its own window")
+        period = ""
     if period:
         win = TW.period_window(period, tz=plan.window_tz or ctx.tz)
         if win is None:

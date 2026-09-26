@@ -85,6 +85,7 @@ def _ranking_facts() -> list[Fact]:
         ("make a chart of messages per day", "chart", "line", True),
         ("show it as a pie chart", "chart", "bar", False),
         ("top chatlar ro'yxati", "list", "bar", False),
+        ("oxirgi 7 kunda har kuni nechta xabar? jadval", "table", "line", True),
     ],
 )
 def test_detect_format_words(text: str, fmt: str, chart: str, series: bool) -> None:
