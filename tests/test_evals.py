@@ -817,3 +817,118 @@ def test_global_04_rubric_fails_an_answer_with_no_external_source_and_no_note() 
     for token in ("qidirilmagan", "tashqi", "kanal"):
         assert token in lowered, token
     assert "o'z chatlarini" in lowered
+
+
+# ─── conv_runner: orkestrator qadamlari va format bloklari (uni-*) ───────────
+
+
+def test_plan_steps_reads_orchestrator_steps_used_and_deep_plan() -> None:
+    from evals.conv_runner import plan_steps
+
+    auto = {
+        "steps": ["stats"],
+        "orchestrator": {
+            "steps": [{"skill": "stats", "args": {}}, {"skill": "format_output"}],
+            "used": ["stats", "format_output"],
+        },
+    }
+    assert plan_steps(auto) == ["stats", "format_output"]
+    assert plan_steps({"steps": ["chat_digest", "send_result"]}) == ["chat_digest", "send_result"]
+    assert plan_steps({"plan": {"steps": [{"skill": "compute"}]}}) == ["compute"]
+    assert plan_steps({}) == []
+
+
+def test_normalize_deep_carries_step_names() -> None:
+    from evals.conv_runner import _normalize_deep, plan_steps
+
+    raw = {"answer": "x", "plan": {"steps": [{"skill": "stats"}, {"skill": "compute"}]}}
+    ctx = _normalize_deep(raw)["context"]
+    assert ctx["steps"] == ["stats", "compute"] and plan_steps(ctx) == ["stats", "compute"]
+
+
+def _steps_checks(expect: dict, ctx: dict, answer: str = "ok") -> dict[str, bool]:
+    from evals.conv_runner import check_turn
+
+    checks = check_turn(
+        expect=expect, mode="auto", answer=answer, ctx=ctx, cost=0.01, actions=[], chat_hint=None
+    )
+    return {c.name: c.ok for c in checks}
+
+
+def test_check_turn_steps_any_all_none() -> None:
+    ctx = {"orchestrator": {"steps": [{"skill": "stats"}, {"skill": "compute"}], "used": []}}
+    got = _steps_checks(
+        {
+            "steps_any": ["stats", "window"],
+            "steps_all": ["stats", "compute"],
+            "steps_none": ["scan_corpus"],
+        },
+        ctx,
+    )
+    assert got == {"steps_any": True, "steps_all": True, "steps_none": True}
+    got = _steps_checks(
+        {
+            "steps_any": ["window"],
+            "steps_all": ["stats", "format_output"],
+            "steps_none": ["compute"],
+        },
+        ctx,
+    )
+    assert got == {"steps_any": False, "steps_all": False, "steps_none": False}
+
+
+def test_check_turn_has_table_and_has_chart() -> None:
+    table = "Natija:\n\n| weekday | messages |\n|---|---:|\n| Dushanba | 12 |\n"
+    chart = 'Mana:\n```chart\n{"type":"bar","labels":["a"],"series":[]}\n```'
+    assert _steps_checks({"has_table": True, "has_chart": False}, {}, table) == {
+        "has_table": True,
+        "has_chart": True,
+    }
+    assert _steps_checks({"has_table": True, "has_chart": True}, {}, "faqat | matn |") == {
+        "has_table": False,
+        "has_chart": False,
+    }
+    assert _steps_checks({"has_chart": True}, {}, chart) == {"has_chart": True}
+
+
+def test_universal_suite_is_well_formed() -> None:
+    from evals.conv_runner import load_scenarios
+
+    root = Path(__file__).resolve().parents[1] / "evals" / "conversations"
+    uni = [s for s in load_scenarios(root) if s.category == "universal"]
+    assert [s.id for s in uni] == [f"uni-{i:02d}" for i in range(1, 21)]
+    assert {s.priority for s in uni} == {1, 2}
+    known = {
+        "answer_direct",
+        "clarify",
+        "reuse_prior",
+        "chat_digest",
+        "stats",
+        "compute",
+        "window",
+        "search_local",
+        "search_server",
+        "discover",
+        "scan_corpus",
+        "write_propose",
+        "agent_tools",
+        "format_output",
+        "create_alert",
+        "set_briefing",
+        "remind",
+        "cancel_reminder",
+        "send_result",
+    }
+    for s in uni:
+        for t in s.turns:
+            assert t.mode == "auto", s.id
+            assert t.expect.get("judge"), f"{s.id}: har turn'da o'zbekcha rubrika"
+            for key in ("steps_any", "steps_all", "steps_none"):
+                assert set(t.expect.get(key) or []) <= known, (s.id, key)
+    by_id = {s.id: s for s in uni}
+    # Yozish/avtomatlashtirish: taklif kutiladi, xavfsizlik: taklif yo'q.
+    for sid in ("uni-07", "uni-09", "uni-10", "uni-11"):
+        assert by_id[sid].turns[-1].expect["must_propose_action"] is True
+    assert by_id["uni-20"].turns[0].expect["must_propose_action"] is False
+    assert by_id["uni-12"].turns[0].expect["has_table"] is True
+    assert by_id["uni-13"].turns[0].expect["has_chart"] is True

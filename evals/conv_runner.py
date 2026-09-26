@@ -85,6 +85,7 @@ CATEGORIES = (
     "mode",
     "economy",
     "daily",
+    "universal",
 )
 
 GLOBAL_TOOLS = {"discover_channels", "search_global"}
@@ -103,6 +104,35 @@ PERSON_TOOLS = {"get_user_info"}
 #: retrieval bo'lmaganda (qarang: `no_fabricated_citations` tekshiruvi).
 DEEP_CITE_RE = re.compile(r"#c\d+m\d+")
 BARE_CITE_RE = re.compile(r"#\d{3,}")
+
+#: Javobdagi format bloklari (`output_formats`): GFM jadval (sarlavha + `|---|`
+#: ajratgich) va md.js ```chart fence'i.
+TABLE_RE = re.compile(r"^[ \t]*\|.*\|[ \t]*\r?\n[ \t]*\|[ \t:|-]*-{3,}[ \t:|-]*\|", re.M)
+CHART_FENCE_RE = re.compile(r"```chart\s*\n")
+
+
+def plan_steps(ctx: dict[str, Any]) -> list[str]:
+    """Orkestrator qadamlari (ko'nikma nomlari) — auto va deep turn'lar uchun bitta yo'l.
+
+    Manba tartibi: `context.orchestrator.steps` (+ `used`) → `context.steps` →
+    `context.plan.steps` (deep, `_normalize_deep`). Element `{"skill": …}` yoki
+    yalang'och nom bo'lishi mumkin.
+    """
+    raw: list[Any] = []
+    orch = ctx.get("orchestrator")
+    if isinstance(orch, dict):
+        raw = list(orch.get("steps") or []) + list(orch.get("used") or [])
+    if not raw:
+        raw = list(ctx.get("steps") or [])
+    if not raw:
+        raw = list((ctx.get("plan") or {}).get("steps") or [])
+    out: list[str] = []
+    for s in raw:
+        name = s.get("skill") if isinstance(s, dict) else s
+        if name and str(name) not in out:
+            out.append(str(name))
+    return out
+
 
 #: Tirnoq/kod ichidagi bo'laklar — `unless_quoted` ularni tekshiruvdan chiqaradi.
 #: Kerak, chunki injection senariylarida javob **aynan** taqiqlangan so'zni
@@ -514,6 +544,25 @@ def check_turn(
                 f"external_hits={got_external} < min {cap}",
             )
 
+    # Orkestrator qadamlari (ko'nikma nomlari) — auto va deep uchun bir xil.
+    if any(k in expect for k in ("steps_any", "steps_all", "steps_none")):
+        steps = set(plan_steps(ctx))
+        if want := expect.get("steps_any"):
+            hit = sorted(steps & set(want))
+            add("steps_any", bool(hit), f"want any of {want}, got {sorted(steps)}")
+        if want := expect.get("steps_all"):
+            miss = sorted(set(want) - steps)
+            add("steps_all", not miss, f"missing {miss}, got {sorted(steps)}" if miss else "")
+        if want := expect.get("steps_none"):
+            bad = sorted(steps & set(want))
+            add("steps_none", not bad, f"forbidden steps used: {bad}" if bad else "")
+    if "has_table" in expect:
+        got_table = bool(TABLE_RE.search(answer or ""))
+        add("has_table", got_table == bool(expect["has_table"]), f"table={got_table}")
+    if "has_chart" in expect:
+        got_chart = bool(CHART_FENCE_RE.search(answer or ""))
+        add("has_chart", got_chart == bool(expect["has_chart"]), f"chart={got_chart}")
+
     if (cap := expect.get("max_cost_usd")) is not None and cost is not None:
         add("max_cost_usd", cost <= float(cap) * 1.5, f"${cost:.4f} vs cap ${cap}")
 
@@ -687,6 +736,11 @@ def _normalize_deep(raw: dict[str, Any]) -> dict[str, Any]:
         "degraded": raw.get("degraded"),
         "messages": raw.get("evidence") or raw.get("evidence_count"),
         "run_id": raw.get("run_id"),
+        # Orkestrator qadamlari (`OrchPlan.to_dict()["steps"]`) — `steps_*` tekshiruvlari.
+        "steps": [
+            s.get("skill") if isinstance(s, dict) else s
+            for s in ((raw.get("plan") or {}).get("steps") or [])
+        ],
     }
     return {
         "text": raw.get("answer") or raw.get("text") or "",
@@ -788,6 +842,9 @@ async def run_scenario(
                     for c in executed
                 ],
                 "iterations": ctx.get("iterations"),
+                # Orkestrator qadamlari va niyati — hisobot jadvali uchun.
+                "steps": plan_steps(ctx),
+                "intent": ctx.get("intent") or "",
                 # Yugurish byudjeti: `chat_service` `calls_executed` va
                 # `stop_reason` ni contextga yozadi (`answered` | `call_budget` |
                 # `cost_budget` | `iterations`). Ular bo'lmasa qopqoqlarning
@@ -953,13 +1010,14 @@ def render_md(result: dict[str, Any]) -> str:
 
     out.append("## Barcha senariylar")
     out.append("")
-    out.append("| id | kategoriya | turn | natija | tool | $ |")
-    out.append("|---|---|--:|---|---|--:|")
+    out.append("| id | kategoriya | turn | natija | tool | qadamlar | $ |")
+    out.append("|---|---|--:|---|---|---|--:|")
     for r in rows:
         tools = sorted({x for t in r["turns"] for x in (t.get("tools_executed") or [])})
+        steps = " / ".join("→".join(t.get("steps") or []) or "—" for t in r["turns"])
         out.append(
             f"| `{r['id']}` | {r['category']} | {len(r['turns'])} | "
-            f"{'✅' if r['passed'] else '❌'} | {', '.join(tools) or '—'} | "
+            f"{'✅' if r['passed'] else '❌'} | {', '.join(tools) or '—'} | {steps} | "
             f"{float(r['cost_usd'] or 0):.4f} |"
         )
     out.append("")

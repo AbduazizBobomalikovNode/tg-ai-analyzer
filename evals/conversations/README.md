@@ -14,7 +14,7 @@ scenarios:
     title: "..."                # inson uchun
     category: precise           # absurd|precise|account|global|time|people|
                                 # engagement|digest|multiturn|safety|mode|economy|
-                                # daily
+                                # daily|universal
     locale: uz                  # uz|ru|en — so'rov tili (Accept-Language ham shu)
     priority: 1                 # 1 = live yugurishda majburiy, 2 = kengaytirilgan
     chat_hint: "Honadoshlar"    # ixtiyoriy: chat sarlavhasining bo'lagi.
@@ -30,6 +30,11 @@ scenarios:
           tools_any: [search_messages, search_calendar]   # kamida bittasi chaqirilsin
           tools_all: [get_chat_stats]                     # hammasi chaqirilsin (ixtiyoriy)
           tools_none: [discover_channels, send_message]   # hech biri chaqirilmasin
+          steps_any: [stats, chat_digest]                 # orkestrator qadami (auto+deep)
+          steps_all: [stats, compute]                     # `plan_steps`: orchestrator.steps+used
+          steps_none: [scan_corpus]                       # hech biri rejada bo'lmasin
+          has_table: true                                 # javobda GFM jadval (`|---|`)
+          has_chart: true                                 # javobda ```chart fence
           max_tool_calls: 4                               # bajarilgan chaqiruvlar shifti
           scope: chat           # chat | account | global | none
           scope_chat_hint: "aiogram"  # `scope: chat` uchun senariy `chat_hint`
