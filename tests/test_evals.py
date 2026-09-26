@@ -947,3 +947,44 @@ def test_no_fabricated_citations_accepts_real_tokens_and_flags_unknown_ones() ->
     assert _steps_checks({"no_fabricated_citations": True}, {}, "xabar #4567") == {
         "no_fabricated_citations": False
     }
+
+
+def test_tools_expectations_match_orchestrator_proposals() -> None:
+    """daily-45: "Otabekka yoz" → `write_propose` qadami `send_message` **taklifini**
+    yaratadi; tool jurnali bo'sh, taklif esa `actions[].tool` da. `tools_any`
+    buni "ishlatilgan" deb ko'rsin, `tools_none` esa taqiqlasin."""
+    from evals.conv_runner import check_turn
+
+    ctx = {"mode": "agent", "tool_calls": [], "tools": ["write_propose"]}
+    actions = [{"id": 523, "tool": "send_message", "status": "proposed"}]
+    ok = check_turn(
+        expect={"tools_any": ["send_message"], "must_propose_action": True},
+        mode="auto",
+        answer="Taklif tayyor — xabar **yuborilmadi**. #523",
+        ctx=ctx,
+        cost=0.016,
+        actions=actions,
+        chat_hint=None,
+    )
+    assert all(c.ok for c in ok), [c for c in ok if not c.ok]
+    none = check_turn(
+        expect={"tools_none": ["send_message"]},
+        mode="auto",
+        answer="…",
+        ctx=ctx,
+        cost=0.01,
+        actions=actions,
+        chat_hint=None,
+    )
+    assert [c.name for c in none if not c.ok] == ["tools_none"]
+    # Taklifsiz — avvalgidek yiqiladi.
+    miss = check_turn(
+        expect={"tools_any": ["send_message"]},
+        mode="auto",
+        answer="…",
+        ctx=ctx,
+        cost=0.01,
+        actions=[],
+        chat_hint=None,
+    )
+    assert [c.name for c in miss if not c.ok] == ["tools_any"]

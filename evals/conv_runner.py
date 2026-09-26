@@ -371,15 +371,25 @@ def check_turn(
     def add(name: str, ok: bool, detail: str = "") -> None:
         checks.append(Check(name, ok, detail))
 
+    # Orkestrator yozish/avtomatlashtirish qadamlari tool jurnalida emas, amal
+    # kartasida (`actions[].tool`) keladi: "Otabekka yoz" → `write_propose` qadami
+    # `send_message` taklifini yaratadi (daily-45). `tools_any`/`tools_none` uni
+    # ham ko'radi — taklif ham "shu tool ishlatildi" degani.
+    names_prop = {str(a.get("tool")) for a in actions if isinstance(a, dict) and a.get("tool")}
     if not is_deep:
         if want := expect.get("tools_any"):
-            hit = sorted(names_all & set(want))
-            add("tools_any", bool(hit), f"want any of {want}, got {sorted(names_all)}")
+            hit = sorted((names_all | names_prop) & set(want))
+            add(
+                "tools_any",
+                bool(hit),
+                f"want any of {want}, got {sorted(names_all)}"
+                + (f" + proposals {sorted(names_prop)}" if names_prop else ""),
+            )
         if want := expect.get("tools_all"):
             miss = sorted(set(want) - names_all)
             add("tools_all", not miss, f"missing {miss}" if miss else "")
         if want := expect.get("tools_none"):
-            bad = sorted(names_all & set(want))
+            bad = sorted((names_all | names_prop) & set(want))
             add("tools_none", not bad, f"forbidden tools used: {bad}" if bad else "")
         if caps := expect.get("tools_max"):
             # "bu tool mumkin, lekin ko'pi bilan N marta" — `tools_none` dan
