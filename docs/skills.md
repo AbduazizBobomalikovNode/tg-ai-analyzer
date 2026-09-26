@@ -105,6 +105,12 @@ Joriy turn qidirib hech narsa topmasa (`ranked` bo'sh va `chat_total`/`total` = 
 `turn_found_nothing`) taklif **yaratilmaydi**, javob oxiriga `send_empty` izohi
 qo'shiladi: "topilmadi" matni uchinchi odamga yuborilmasin.
 
+Manzil (`skills_ext.send_target`): (1) suhbat holatidagi yechim
+(`conv_state.resolve_name` — "Otabekka yubor", "unga yubor"), planner boshqa
+shu nomli chat id sini bergan bo'lsa ham; (2) planner chat id si; (3) nom ≥2
+shaxsiy chatga **teng** mos kelsa — `send_which` bilan so'raladi, taklif yo'q;
+(4) aks holda nom `write_tools` ga.
+
 `clean_for_send`: sitata tokenlari, qamrov/qadamlar izohi va ```chart
 olib tashlanadi, ≤4000 belgi. Taklif `write_tools.propose_or_execute
 ("send_message")` — `assert_writable`, peer guard, `read_only`,

@@ -2657,7 +2657,9 @@ def test_deep_prompts_describe_the_follow_up_contract() -> None:
     # tasvirlaydi (`### chat` → `#### kun` → `[#id] HH:MM kim: matn`, e7aacff).
     # 2026-09-25.4 — `answer_length:` satri (niyat bo'yicha chiqish byudjeti,
     # `synth_budget`; jonli conv 285: oyna dayjesti 17,949 chiqish tokeni).
-    assert DEEP_PROMPT_VERSION == "2026-09-25.4"
+    # 2026-09-26.1 — `EMPTY_RESULT_PROMPT` (uni-18), planner 13-14-qoidalar
+    # (media filtri, nom to'qnashuvi → clarify), `answer_direct` meta_cost.
+    assert DEEP_PROMPT_VERSION == "2026-09-26.1"
     assert "answer_length:" in DEEP_SYNTH_PROMPT
     # Eski `[chat | date | sender]` qavsi hech bir prompt'da qolmasin.
     for prompt in (DEEP_SYNTH_PROMPT, SCALE_MAP_PROMPT, SCALE_FILTER_PROMPT):

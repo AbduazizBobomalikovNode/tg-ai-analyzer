@@ -44,10 +44,11 @@ yerda umuman chaqirilmaydi, telefon raqami hech qayerda yo'q.
 from __future__ import annotations
 
 import math
+import re
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import structlog
@@ -177,6 +178,90 @@ def stratify_order(hits: Sequence[S.Hit]) -> list[S.Hit]:
     return out
 
 
+# ─── media filtri ────────────────────────────────────────────────────────────
+#: `args.media` → `messages.media_type` qiymatlari. `ingestion._media_type`
+#: Telethon sinf nomidan yozadi: `MessageMediaPhoto` → `photo`,
+#: `MessageMediaDocument` → `document`, `MessageMediaWebPage` → `webpage`, …
+#: Telegram video, ovozli xabar, audio, stiker va fayllarni **bitta**
+#: `MessageMediaDocument` bilan beradi — sxemada ular ajralmaydi, shuning uchun
+#: `video` / `voice` / `document` hammasi `document` ga tushadi (qamrov va
+#: sintez izohi buni ochiq aytadi). `any` — har qanday media, havola
+#: ko'rinishi (`webpage`) bundan mustasno.
+MEDIA_KINDS = ("photo", "video", "document", "voice", "any")
+MEDIA_VALUES: dict[str, tuple[str, ...]] = {
+    "photo": ("photo",),
+    "video": ("document",),
+    "document": ("document",),
+    "voice": ("document",),
+}
+MEDIA_ANY_EXCLUDE = ("webpage",)
+#: Savolda media turi + "yuborish" fe'li — kod darvozasi (planner arg bermasa).
+_MEDIA_WORDS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("photo", re.compile(r"\brasm\w*|\bsurat\w*|\bfoto\w*|\bphoto\w*|\bpictures?\b|\bimages?\b"
+                         r"|\bpics?\b|фото\w*|картин\w*|снимк\w*|снимок")),
+    ("video", re.compile(r"\bvideo\w*|\bvidyo\w*|видео\w*|\bklip\w*")),
+    ("voice", re.compile(r"\bovozli\b|\bvoice\b|\baudio\w*|голосов\w*|аудио\w*")),
+    ("document", re.compile(r"\bfayl\w*|\bhujjat\w*|\bdocuments?\b|\bfiles?\b|\bpdf\b"
+                            r"|файл\w*|документ\w*")),
+    ("any", re.compile(r"\bmedia\w*|медиа\w*")),
+)  # fmt: skip
+_MEDIA_SEND_RE = re.compile(
+    r"\byubor\w*|\btashla\w*|\bjo'nat\w*|\bjonat\w*|\bulash\w*|\bjo'natil\w*"
+    r"|отправ\w*|присла\w*|присыла\w*|скину\w*|скидыва\w*|кида\w*"
+    r"|\bsent\b|\bsend\w*|\bshared?\b|\bposted\b"
+)
+
+
+def normalize_media(value: Any) -> str:
+    """Planner argumenti → `MEDIA_KINDS` dan biri yoki `""` (filtr yo'q)."""
+    kind = str(value or "").strip().lower()
+    aliases = {"image": "photo", "picture": "photo", "file": "document", "audio": "voice"}
+    kind = aliases.get(kind, kind)
+    return kind if kind in MEDIA_KINDS else ""
+
+
+def detect_media(question: str) -> str:
+    """ "kim rasm yubordi" / "who sent photos" — media turi (kodda) yoki `""`.
+
+    Ataylab tor: media so'zi **va** yuborish fe'li bo'lishi shart —
+    "rasm haqida nima deyishdi" mavzu savoli, media filtri emas.
+    """
+    text = TW.fold(question or "")
+    if not _MEDIA_SEND_RE.search(text):
+        return ""
+    for kind, pattern in _MEDIA_WORDS:
+        if pattern.search(text):
+            return kind
+    return ""
+
+
+def media_line(kind: str) -> str:
+    """Oyna blokidagi media filtri satri — nima sanalgani va nima **ajralmasligi**."""
+    values = ", ".join(MEDIA_VALUES.get(kind, ())) or f"any except {', '.join(MEDIA_ANY_EXCLUDE)}"
+    merged = (
+        " (the archive stores video, voice, audio and files all as `document` — they "
+        "cannot be told apart)"
+        if kind in ("video", "voice", "document")
+        else ""
+    )
+    return (
+        f"media filter: only messages with media ({kind}; messages.media_type = {values}){merged}"
+        "; the counts and lines above/below are media messages only; the file itself is "
+        "never stored, so what a picture shows is unknown"
+    )
+
+
+def media_cond(kind: str) -> Any | None:
+    """`WindowSpec.media` → SQL sharti (`messages.media_type`)."""
+    if not kind:
+        return None
+    if kind == "any":
+        return and_(
+            Message.media_type.is_not(None), Message.media_type.not_in(list(MEDIA_ANY_EXCLUDE))
+        )
+    return Message.media_type.in_(list(MEDIA_VALUES.get(kind, (kind,))))
+
+
 @dataclass(slots=True)
 class WindowSpec:
     """Oyna so'rovining barcha kirishlari — bitta joyda, qayta hisoblanmaydi."""
@@ -190,11 +275,14 @@ class WindowSpec:
     #: `in | out | both | ""` — `deep_search.DIRECTIONS`. `inbox=True` eski
     #: yozuv (moslik taxallusi) va `direction="in"` bilan bir xil.
     direction: str = ""
+    #: `MEDIA_KINDS` dan biri yoki `""` — faqat shu turdagi media xabarlar.
+    media: str = ""
 
     def __post_init__(self) -> None:
         if self.inbox and not self.direction:
             self.direction = "in"
         self.inbox = self.direction == "in"
+        self.media = normalize_media(self.media)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -204,6 +292,7 @@ class WindowSpec:
             "direction": self.direction,
             "chats": len(self.chats) if self.chats else 0,
             "tz": self.tz,
+            "media": self.media,
         }
 
 
@@ -228,6 +317,9 @@ def _conds(spec: WindowSpec) -> list[Any]:
     if spec.since is not None:
         conds.append(Message.published_at >= spec.since)
     conds.append(Message.published_at < spec.until)
+    media = media_cond(spec.media)
+    if media is not None:
+        conds.append(media)
     if spec.direction == "out":
         # "Men kimga yozdim" — faqat mening xabarlarim.
         conds.append(Message.out.is_(True))
@@ -325,6 +417,7 @@ def _hit(m: Message, title: str) -> S.Hit:
         chat_title=title,
         date=m.published_at,
         text=m.text or "",
+        media_type=str(getattr(m, "media_type", None) or ""),
     )
 
 
@@ -798,6 +891,8 @@ def render_window_stats(
         f"messages in window: {count.total}; chats: {count.chats}; "
         f"evidence lines shown: {taken or len(evidence)}",
     ]
+    if spec is not None and spec.media:
+        lines.append(media_line(spec.media))
     if sampled:
         lines.append(
             "evidence is a per-chat sample (share of each chat proportional to its volume, "
@@ -838,8 +933,20 @@ _DIRECTION_TEXT = {
 }
 
 
-def _day(dt: datetime | None) -> str:
-    return dt.strftime("%Y-%m-%d") if dt else "—"
+def _day(dt: datetime | None, tz: str = "", *, end: bool = False) -> str:
+    """Sana **akkaunt mintaqasida** (`tz`), UTC emas.
+
+    Jonli uni-12: "oxirgi 7 kun" oynasi mahalliy yarim tundan boshlanadi
+    (Toshkentda 19:00 UTC), UTC sanasi esa bir kun oldinni ko'rsatardi.
+    `end=True` — eksklyuziv yuqori chegara: aniq yarim tun bo'lsa oldingi kun
+    ko'rsatiladi ("o'tgan hafta" … → yakshanba, dushanba emas).
+    """
+    if dt is None:
+        return "—"
+    local = dt.astimezone(TW.zone(tz)) if tz and dt.tzinfo else dt
+    if end and (local.hour, local.minute, local.second, local.microsecond) == (0, 0, 0, 0):
+        local = local - timedelta(microseconds=1)
+    return local.strftime("%Y-%m-%d")
 
 
 def _period_text(spec: WindowSpec | None) -> str:
@@ -853,10 +960,11 @@ def _period_text(spec: WindowSpec | None) -> str:
     """
     if spec is None:
         return "butun davr"
-    until = _day(spec.until)
+    until = _day(spec.until, spec.tz, end=True)
+    zone = f" ({TW.zone(spec.tz)})"
     if spec.since is None:
-        return f"butun davr … → {until}"
-    return f"{_day(spec.since)} → {until}"
+        return f"butun davr … → {until}{zone}"
+    return f"{_day(spec.since, spec.tz)} → {until}{zone}"
 
 
 def _render_stats(
@@ -870,15 +978,16 @@ def _render_stats(
     """Sanoq yo'lining bloki — reyting jadvali tayyor, model faqat o'qiydi."""
     total = max(count.total, 0)
     window = ""
+    tz = spec.tz if spec is not None else ""
     if spec is not None:
-        window = f"{_day(spec.since) if spec.since else '…'} → {_day(spec.until)}"
+        window = f"{_day(spec.since, tz) if spec.since else '…'} → {_day(spec.until, tz, end=True)}"
     lines = [
         "## window stats (counted in code with count(*) over EVERY message in the window "
         "— exact and complete; use these numbers verbatim, do not recount)",
         f"period: {_period_text(spec)}",
         f"direction: {_DIRECTION_TEXT.get(stats.direction, _DIRECTION_TEXT[''])}",
-        f"window: {window or '—'}; first message: {_day(count.first_at)}; "
-        f"last message: {_day(count.last_at)}",
+        f"window: {window or '—'}; first message: {_day(count.first_at, tz)}; "
+        f"last message: {_day(count.last_at, tz)}",
         f"total messages: {total}; chats: {count.chats}",
     ]
     if stats.direction != "out" and stats.mine_total:
@@ -906,7 +1015,7 @@ def _render_stats(
                 mine = ""
             lines.append(
                 f"{i}. {title}{kind}: {row.n} ({share:.1f}%){mine}; "
-                f"{_day(row.first_at)} … {_day(row.last_at)}"
+                f"{_day(row.first_at, tz)} … {_day(row.last_at, tz)}"
             )
         rest = count.chats - len(stats.per_chat)
         if rest > 0:
@@ -1014,6 +1123,7 @@ async def run_window(
     confirm: bool = True,
     locale: str = "uz",
     distributions: Sequence[str] = (),
+    media: str = "",
 ) -> SC.ScaleOutcome:
     """Oyna yo'lining to'liq yugurishi — `deep_search._run_pipeline` shu yerga kiradi.
 
@@ -1037,6 +1147,7 @@ async def run_window(
         inbox=plan.inbox,
         tz=plan.window_tz or TW.DEFAULT_TZ,
         direction=getattr(plan, "direction", "") or ("in" if plan.inbox else ""),
+        media=media,
     )
     outcome.window = spec
 

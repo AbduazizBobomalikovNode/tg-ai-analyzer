@@ -26,7 +26,7 @@ system'ga emas, user turn'iga qo'shiladi.
 
 from __future__ import annotations
 
-DEEP_PROMPT_VERSION = "2026-09-25.4"
+DEEP_PROMPT_VERSION = "2026-09-26.1"
 
 # Ishonch qoidalari yagona manbadan (`prompts._CORE`) olinadi — ikkala joyda
 # ikki xil yozilib qolmasin. Import bo'lmasa (masalan prompt'lar bo'lingan
@@ -643,6 +643,40 @@ to ask it directly instead of guessing an answer.
 - No <untrusted_data> tags in your output, no JSON, no headings unless a list is clearer."""
 )
 
+# ─── 8b. Bo'sh natija (orkestrator `EMPTY_EVIDENCE_MIN`) ─────────────────────
+# Qidiruv (va replan) dan keyin **mos** dalil < 3 bo'lsa oddiy sintez o'rniga:
+# jonli uni-18 da "kvant pingvinlar festivali" ga "topilmadi, lekin kvant va
+# festival haqida mana bular…" deb uzun, bog'liq bo'lmagan javob yozilardi.
+EMPTY_RESULT_PROMPT = (
+    """You are the user's Telegram archive assistant. A search of the owner's archive for \
+this question found NOTHING (or almost nothing) that answers it. Your job is a short, honest \
+"not found" answer — not an answer to the question.
+
+"""
+    + TRUST_RULES
+    + """
+
+## What you get
+- A "search summary" computed by code inside the evidence envelope: which chats and how many \
+were searched, the time window, the search terms, whether Telegram's server search ran, and \
+suggestion hints.
+- At most a couple of message lines the ranker judged relevant (maybe none). Anything else \
+was judged NOT relevant and is not shown on purpose.
+
+## How to answer (in the user's language, at most ~8 lines)
+1. First sentence: say plainly that nothing — or, when a line or two are shown below, only \
+very little — was found about this; name the subject in the user's own words.
+2. One or two lines on WHAT was searched: the chats (count, and a few names if listed), the \
+period, the terms. Only facts from the search summary — never invent numbers.
+3. If one or two relevant lines ARE shown, you may mention them in one line each with their \
+citation token — only if they truly answer part of the question.
+4. Then 2-3 concrete next steps, taken from the suggestion hints: other wording (give an \
+actual alternative phrase), a wider or different period, a specific chat to look in, or \
+Telegram's server search when it has not run yet.
+- NEVER pad the answer with loosely related topics ("but there were messages about …"), \
+never guess, never invent a person, a fact or a citation token. No headings, no tables."""
+)
+
 # ─── 9. Oyna yo'li uchun qo'shimcha ko'rsatma (user turn'ida) ────────────────
 # Nega system'da emas: system prompt kesh prefiksi — u har turn'da bir xil
 # qolishi kerak (CLAUDE.md, "Agent / tool'lar"). Bu satr esa faqat
@@ -763,9 +797,20 @@ follow-up without a new period keeps last_window. `reuse_prior` re-reads \
 last_result.evidence_refs. A correction ("yo'q, men boshqasini…") or a new subject drops \
 the old entity/window. <chat_hints> are chats whose title matches a name in the question. \
 When the question is about what a person said/wrote ("Otabek nima dedi?", "что писал Иван") \
-and <chat_hints> lists private chat(s) with that name, target those private chat ids (up to \
-3) — the user means their own conversation with that person, not public figures who share \
-the name. Search all chats only when the user says so ("hamma chatlarda", "everywhere").
+and <chat_hints> lists a private chat with that name, target that private chat id — the \
+user means their own conversation with that person, not public figures who share the name \
+(several private chats matching equally well → rule 14). Search all chats only when the \
+user says so ("hamma chatlarda", "everywhere").
+13. Media ("kim rasm/video/fayl yuborgan", "who sent me photos", "кто присылал фото"): \
+`window` with args {"media": "photo"|"video"|"document"|"voice"|"any"} and the direction \
+the user asks for ("menga" = incoming, "men yuborgan" = outgoing); with a subject use \
+`search_local` with the same `media` arg. The archive keeps only the media TYPE, never the \
+file: video, voice and files are all stored as "document", and nobody can say what a \
+picture shows.
+14. When <chat_hints> lists two or more chats matching the SAME name equally well (three \
+private chats "Otabek …") and <conversation_state> has no resolved entity for that name, \
+plan one `clarify` step whose options are those chat titles — unless the user clearly \
+means all of them ("hamma Otabeklar", "ikkalasi", "all of them", "всех").
 
 ## Examples
 selected chat "Honadoshlar" / latest: "bu chatda nima bor edi!"
@@ -855,6 +900,7 @@ __all__ = [
     "DEEP_REFLECT_PROMPT",
     "DEEP_SYNTH_PROMPT",
     "DIGEST_SYNTH_NOTE",
+    "EMPTY_RESULT_PROMPT",
     "FACTS_SYNTH_NOTE",
     "ORCH_PLAN_ADDENDUM",
     "ORCH_REPLAN_PROMPT",

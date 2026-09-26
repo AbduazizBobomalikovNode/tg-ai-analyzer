@@ -148,9 +148,16 @@ class RunState:
     conv: Any = None
     #: Savoldagi nomga mos chatlar (`agent.chat_hints`, kodda) — bir marta hisoblanadi.
     hints: list[Any] | None = None
+    #: Qidiruv ko'nikmalari **mos** deb topgan dalillar soni (rerank bahosi, server
+    #: topilmalari, skan filtri) — `None`: hech bir qidiruv yugurmagan. Bo'sh-natija
+    #: strategiyasi (`orchestrator.EMPTY_EVIDENCE_MIN`) shunga qaraydi.
+    relevant_hits: int | None = None
 
     def elapsed(self) -> float:
         return self.now() - self.started
+
+    def note_relevant(self, n: int) -> None:
+        self.relevant_hits = (self.relevant_hits or 0) + max(0, int(n))
 
     def fan_budget(self) -> float:
         return max(
@@ -355,6 +362,7 @@ async def run_escalation(ctx: RunState, *, scope: str, reason: str) -> SkillResu
     if not ctx.server_out.reason:
         ctx.server_out.reason = reason
     hydrated = await _absorb_server(ctx, out)
+    ctx.note_relevant(len(hydrated))
     if hydrated:
         # Server kanali alohida RRF ro'yxati (og'irlik 0.9) — eski quvur bilan bir xil.
         merged = S.rrf(ctx.ranked, hydrated, weights=(1.0, DS.SERVER_RRF_WEIGHT))
@@ -374,11 +382,158 @@ async def run_escalation(ctx: RunState, *, scope: str, reason: str) -> SkillResu
 # ─── 1. answer_direct / clarify ──────────────────────────────────────────────
 
 
+_COST_TEXT = {
+    "uz": {
+        "last": (
+            "Oldingi javob: {tin} kirish + {tout} chiqish token{think}{cached}, "
+            "taxminiy narx **{cost}**{model}."
+        ),
+        "total": "Shu suhbat jami: {n} ta javob, {tokens} token, **{cost}**.",
+        "none": "Bu suhbatda hali javob yo'q — narxini aytadigan oldingi javob topilmadi.",
+        "unknown": "narxi hisoblanmagan (model narx jadvalida yo'q)",
+        "think": " (shundan fikrlash: {n})",
+        "cached": ", keshdan {n}",
+        "foot": (
+            "Narx `llm/pricing.py` jadvalidan hisoblangan taxmin; token sonlari provayderdan. "
+            "Bu javobning o'zi LLM chaqirmadi ($0)."
+        ),
+    },
+    "ru": {
+        "last": (
+            "Предыдущий ответ: {tin} входных + {tout} выходных токенов{think}{cached}, "
+            "оценка стоимости **{cost}**{model}."
+        ),
+        "total": "Всего в этой беседе: {n} ответ(ов), {tokens} токенов, **{cost}**.",
+        "none": "В этой беседе ещё нет ответов — нечего оценивать.",
+        "unknown": "стоимость не рассчитана (модели нет в таблице цен)",
+        "think": " (из них рассуждение: {n})",
+        "cached": ", из кэша {n}",
+        "foot": (
+            "Стоимость — оценка по таблице `llm/pricing.py`; токены — от провайдера. "
+            "Этот ответ сам не вызывал LLM ($0)."
+        ),
+    },
+    "en": {
+        "last": (
+            "Previous answer: {tin} input + {tout} output tokens{think}{cached}, "
+            "estimated cost **{cost}**{model}."
+        ),
+        "total": "This conversation so far: {n} answer(s), {tokens} tokens, **{cost}**.",
+        "none": "There is no answer in this conversation yet — nothing to price.",
+        "unknown": "cost not computed (the model is not in the price table)",
+        "think": " (thinking: {n})",
+        "cached": ", cached {n}",
+        "foot": (
+            "The cost is an estimate from `llm/pricing.py`; token counts come from the "
+            "provider. This reply itself made no LLM call ($0)."
+        ),
+    },
+}
+
+
+def _usd(value: float | None) -> str | None:
+    if value is None:
+        return None
+    return f"${value:.4f}" if value < 1 else f"${value:.2f}"
+
+
+def render_cost_text(
+    last: dict[str, Any] | None, totals: dict[str, Any], *, locale: str = "uz"
+) -> str:
+    """Narx savoliga javob — **kod** yozadi (uz/ru/en), raqamlar DB qatorlaridan.
+
+    `last` — oxirgi assistant qatori (`tokens_in/out/thinking/cached`, `cost_usd`,
+    `model`), `totals` — suhbat bo'yicha yig'indi (`n`, `tokens`, `cost_usd`).
+    """
+    t = _COST_TEXT.get(locale, _COST_TEXT["uz"])
+    if not last:
+        return t["none"]
+    think = int(last.get("tokens_thinking") or 0)
+    cached = int(last.get("tokens_cached") or 0)
+    model = U.attr(str(last.get("model") or ""), max_chars=64)
+    lines = [
+        t["last"].format(
+            tin=int(last.get("tokens_in") or 0),
+            tout=int(last.get("tokens_out") or 0),
+            think=t["think"].format(n=think) if think else "",
+            cached=t["cached"].format(n=cached) if cached else "",
+            cost=_usd(last.get("cost_usd")) or t["unknown"],
+            model=f" ({model})" if model else "",
+        )
+    ]
+    if int(totals.get("n") or 0) > 1:
+        lines.append(
+            t["total"].format(
+                n=int(totals.get("n") or 0),
+                tokens=int(totals.get("tokens") or 0),
+                cost=_usd(totals.get("cost_usd")) or t["unknown"],
+            )
+        )
+    lines.append(t["foot"])
+    return "\n\n".join(lines)
+
+
+async def meta_cost_text(ctx: RunState) -> str:
+    """Oxirgi assistant turn'i va suhbat jami — `conversation_messages` dan (LLM yo'q)."""
+    from app.db.models import ConversationMessage as CM
+
+    async with ctx.session_factory() as session:
+        row = (
+            await session.execute(
+                select(
+                    CM.tokens_in,
+                    CM.tokens_out,
+                    CM.tokens_thinking,
+                    CM.tokens_cached,
+                    CM.cost_usd,
+                    CM.model,
+                )
+                .where(CM.conversation_id == ctx.conversation_id, CM.role == "assistant")
+                .order_by(CM.id.desc())
+                .limit(1)
+            )
+        ).first()
+        agg = (
+            await session.execute(
+                select(
+                    func.count(),
+                    func.coalesce(
+                        func.sum(
+                            CM.tokens_in + CM.tokens_out + func.coalesce(CM.tokens_thinking, 0)
+                        ),
+                        0,
+                    ),
+                    func.sum(CM.cost_usd),
+                ).where(CM.conversation_id == ctx.conversation_id, CM.role == "assistant")
+            )
+        ).one()
+    last = (
+        {
+            "tokens_in": row[0],
+            "tokens_out": row[1],
+            "tokens_thinking": row[2],
+            "tokens_cached": row[3],
+            "cost_usd": row[4],
+            "model": row[5],
+        }
+        if row is not None
+        else None
+    )
+    totals = {"n": int(agg[0] or 0), "tokens": int(agg[1] or 0), "cost_usd": agg[2]}
+    return render_cost_text(last, totals, locale=ctx.locale)
+
+
 async def _answer_direct(ctx: RunState, args: dict[str, Any]) -> SkillResult:
     intent = str(args.get("intent") or "")
     if intent not in DS.DIRECT_INTENTS:
         follow = ctx.plan.intent_follow_up
         intent = follow if follow in DS.DIRECT_FOLLOW_UPS else "chitchat"
+    if intent in ("meta", "chitchat") and DS.direct_intent(ctx.raw_question) == "meta_cost":
+        intent = "meta_cost"  # planner "meta" dedi, kod darvozasi narx savolini taniydi
+    if intent == "meta_cost":
+        # Narx shaffofligi — raqamlar DB'dan, matn kodda: model narxni o'ylab topmasin.
+        text = await meta_cost_text(ctx)
+        return SkillResult(answer=text, stop=True, summary={"intent": intent})
     text, res = await DS.answer_direct(
         ctx.meter,
         ctx.raw_question,
@@ -426,8 +581,49 @@ async def _reuse_prior(ctx: RunState, args: dict[str, Any]) -> SkillResult:
     ctx.taint.add_hits(hits)
     ctx.add_candidates(hits)
     ctx.add_evidence(hits[: DS.RERANK_KEEP])
+    block = prior_sources_block(hits, ctx.chat_titles)
+    if block:
+        ctx.claims.append(block)
     await DS._emit(ctx.events, "search", subquery="", hits=len(hits), reused=True)
-    return SkillResult(evidence=hits, summary={"hits": len(hits)})
+    chats = len({h.chat_id for h in hits if h.chat_id})
+    return SkillResult(
+        evidence=hits,
+        facts=[
+            Fact(
+                "prior_chats",
+                chats,
+                label="chats the previous answer's evidence came from",
+                source="reuse_prior",
+            )
+        ]
+        if chats
+        else [],
+        summary={"hits": len(hits)},
+    )
+
+
+def prior_sources_block(hits: Sequence[S.Hit], titles: dict[int, str]) -> str:
+    """Oldingi javob dalillari **qaysi chatlardan** — kodda sanaladi (sarlavha + soni).
+
+    "Bu qaysi chatdan edi?" ga javob modelning satrlardan taxmini emas, shu
+    ro'yxat. Sarlavha begona matn — `attr` dan o'tadi, blok yagona dalil
+    konvertiga (`ctx.claims`) tushadi.
+    """
+    counts: dict[int, int] = {}
+    for h in hits:
+        if h.chat_id:
+            counts[h.chat_id] = counts.get(h.chat_id, 0) + 1
+    if not counts:
+        return ""
+    lines = [
+        "### previous answer — source chats (counted by code from the reused references; "
+        "use these titles when asked which chat it was)"
+    ]
+    for cid, n in sorted(counts.items(), key=lambda p: -p[1]):
+        fallback = next((h.chat_title for h in hits if h.chat_id == cid), "")
+        title = U.attr(titles.get(cid) or fallback)
+        lines.append(f'- "{title or f"chat {cid}"}" (id {cid}): {n} message(s)')
+    return "\n".join(lines)
 
 
 # ─── 3. chat_digest ──────────────────────────────────────────────────────────
@@ -719,6 +915,7 @@ def _window_meta(plan: DS.DeepPlan, outcome: Any, *, stats: bool) -> dict[str, A
         ),
         "dropped_duplicates": outcome.stats.dropped_duplicates,
         "sampled": outcome.window_sampled,
+        "media": (spec.media if spec else "") or "",
         "chats": wcount.chats if wcount else 0,
     }
 
@@ -1013,6 +1210,35 @@ def distribution_facts(agg: Any) -> list[Fact]:
     return out
 
 
+#: Media filtri ishlagan turn'da sintezga (`step_notes`) — nima sanalgan, nima
+#: noma'lum. Ism o'ylab topilmasin: `user:<id>` — nomi saqlanmagan odam.
+#: ≤ `orchestrator.STEP_NOTE_CHARS` (300) — undan uzuni kesiladi.
+MEDIA_NOTE = (
+    "media filter '{kind}' (media_type; video/voice/files = 'document'). Files are not "
+    "stored: never describe a picture. Sender user:<id> = no stored name: write the id + "
+    "«nomi yo'q» / «имя неизвестно» / «name unknown», never guess a name."
+)
+
+
+def media_arg(ctx: RunState, args: dict[str, Any]) -> str:
+    """`args.media` (planner) yoki savoldan kodda (`window_search.detect_media`)."""
+    from app.services import window_search as WS
+
+    return WS.normalize_media(args.get("media")) or WS.detect_media(ctx.raw_question)
+
+
+def media_filter(hits: Sequence[S.Hit], kind: str) -> list[S.Hit]:
+    """`search_local` uchun: gidratatsiya qilingan hitlardan faqat shu media turi."""
+    from app.services import window_search as WS
+
+    if not kind:
+        return list(hits)
+    if kind == "any":
+        return [h for h in hits if h.media_type and h.media_type not in WS.MEDIA_ANY_EXCLUDE]
+    values = set(WS.MEDIA_VALUES.get(kind, (kind,)))
+    return [h for h in hits if h.media_type in values]
+
+
 async def _window(ctx: RunState, args: dict[str, Any]) -> SkillResult:
     """Mavzusiz vaqt oynasi dayjesti — `window_search.run_window` (namuna + map)."""
     from app.services import window_search as WS
@@ -1023,6 +1249,15 @@ async def _window(ctx: RunState, args: dict[str, Any]) -> SkillResult:
         plan.until = plan.until or datetime.now(UTC)
         plan.since = plan.until - timedelta(days=WINDOW_DEFAULT_DAYS)
         notes.append(f"window: no period in the question, used the last {WINDOW_DEFAULT_DAYS} days")
+    media = media_arg(ctx, args)
+    if media:
+        # "Kim rasm yuborgan" — yo'nalish kodda (`detect_direction`), planner
+        # argumenti emas; "menga" = kiruvchi.
+        if not plan.direction:
+            plan.direction = DS.detect_direction(TW.fold(f"{ctx.raw_question}\n{ctx.question}"))
+        plan.inbox = plan.direction == "in"
+        ctx.plan.direction, ctx.plan.inbox = plan.direction, plan.inbox
+        notes.append(MEDIA_NOTE.format(kind=media))
     outcome = await WS.run_window(
         ctx.session_factory,
         account_id=ctx.account_id,
@@ -1037,6 +1272,7 @@ async def _window(ctx: RunState, args: dict[str, Any]) -> SkillResult:
         deadline=ctx.deadline(),
         confirm=ctx.confirm,
         locale=ctx.locale,
+        media=media,
     )
     ctx.scan_meta = _scan_meta(ctx, outcome)
     ctx.estimate_meta = outcome.estimate.to_dict() if outcome.estimate else {}
@@ -1115,25 +1351,35 @@ async def _search_local(ctx: RunState, args: dict[str, Any]) -> SkillResult:
             budget_s=ctx.fan_budget(),
         )
         widened = True
+    media = media_arg(ctx, args)
+    media_notes: list[str] = []
+    if media:
+        before = len(candidates)
+        candidates = media_filter(candidates, media)
+        media_notes = [
+            MEDIA_NOTE.format(kind=media),
+            f"search_local: media={media} kept {len(candidates)} of {before} candidates",
+        ]
     ctx.taint.add_hits(candidates)
     ctx.add_candidates(candidates)
     deduped, clusters = await DS.dedup_and_cluster(
         ctx.session_factory, candidates, meter=ctx.meter, locale=ctx.locale, events=ctx.events
     )
-    ranked = await DS.rank(
+    ranked, relevant = await DS.rank_scored(
         ctx.question,
         deduped,
         meter=ctx.meter,
         events=ctx.events,
         dropped=len(candidates) - len(deduped),
     )
+    ctx.note_relevant(len(ranked) if relevant is None else relevant)
     if clusters:
         ctx.clusters = list(clusters)
     ctx.add_evidence(ranked)
     chats = len({h.chat_id for h in deduped if h.chat_id})
     return SkillResult(
         evidence=ranked,
-        notes=["search_local: widened after zero hits"] if widened else [],
+        notes=(["search_local: widened after zero hits"] if widened else []) + media_notes,
         summary={
             "candidates": len(candidates),
             "hits": len(ranked),
@@ -1184,6 +1430,7 @@ async def _scan_corpus(ctx: RunState, args: dict[str, Any]) -> SkillResult:
     if outcome.clusters:
         ctx.clusters = list(outcome.clusters)
     ctx.add_evidence(outcome.evidence[: SC.SYNTH_EVIDENCE_LINES])
+    ctx.note_relevant(len(outcome.evidence))
     block = SC.render_claims_block(outcome.claims, outcome.contradictions, outcome.timeline)
     if block:
         ctx.claims.append(block)
@@ -1258,10 +1505,19 @@ async def _write_propose(ctx: RunState, args: dict[str, Any]) -> SkillResult:
     tool = str(args.get("tool") or "send_message")
     if tool not in W.WRITE_TOOL_NAMES:
         return SkillResult(answer=_WRITE_FAIL.get(ctx.locale, _WRITE_FAIL["uz"]) + tool, stop=True)
+    from app.services import conv_state as CS
+
     call_args: dict[str, Any] = {
         k: v for k, v in args.items() if k in ("text", "reply_to", "message_id", "chat")
     }
     chat_id = args.get("chat_id")
+    named = str(args.get("chat") or "").strip()
+    ent = CS.resolve_name(ctx.conv, named) if named else None
+    if ent is not None and int(ent["chat_id"]) in ctx.chats_by_id:
+        # Suhbatda allaqachon aniqlangan nom ("Otabek" → 110) — nom bo'yicha
+        # qayta qidirilmaydi (bir nechta "Otabek" bo'lsa boshqasiga ketardi).
+        chat_id = int(ent["chat_id"])
+        call_args.pop("chat", None)
     pinned = (
         int(chat_id)
         if isinstance(chat_id, int)
@@ -1419,8 +1675,10 @@ SKILLS: dict[str, Skill] = {
     for s in (
         Skill(
             "answer_direct",
-            "salom / rahmat / 'nimalar qila olasan' — qidiruvsiz qisqa javob",
-            "greeting, thanks, 'what can you do' — a short answer with no retrieval",
+            "salom / rahmat / 'nimalar qila olasan' / 'bu javob qancha turdi' (intent=meta_cost) "
+            "— qidiruvsiz qisqa javob",
+            "greeting, thanks, 'what can you do', 'how much did this answer cost' "
+            "(intent=meta_cost: tokens/cost from the DB) — a short answer with no retrieval",
             {"intent": "str"},
             0.002,
             2.0,
@@ -1502,9 +1760,11 @@ SKILLS: dict[str, Skill] = {
         ),
         Skill(
             "window",
-            "mavzusiz vaqt oynasi: 'bugun kimlar yozdi', 'kecha nima bo'ldi' (namuna + xulosa)",
-            "a time window with no subject: 'who wrote today', 'what happened yesterday'",
-            {},
+            "mavzusiz vaqt oynasi: 'bugun kimlar yozdi', 'kecha nima bo'ldi' (namuna + xulosa); "
+            "media=photo — 'kim rasm yuborgan'",
+            "a time window with no subject: 'who wrote today', 'what happened yesterday'; "
+            "media=photo|video|document|voice|any — only media messages ('who sent me photos')",
+            {"media": "str"},
             0.02,
             15.0,
             "fast",
@@ -1517,7 +1777,7 @@ SKILLS: dict[str, Skill] = {
             "search_local",
             "lokal indeksda mavzu qidiruvi (matn + ma'no, klaster, rerank)",
             "topic search in the local index (keyword + meaning, clusters, rerank)",
-            {"queries": "list[str]"},
+            {"queries": "list[str]", "media": "str"},
             0.02,
             12.0,
             "fast",

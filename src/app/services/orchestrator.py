@@ -59,6 +59,7 @@ from app.services import untrusted as U
 from app.services.prompts_deep import (
     DEEP_PLAN_PROMPT,
     DIGEST_SYNTH_NOTE,
+    EMPTY_RESULT_PROMPT,
     FACTS_SYNTH_NOTE,
     ORCH_PLAN_ADDENDUM,
     ORCH_REPLAN_PROMPT,
@@ -140,6 +141,8 @@ class OrchPlan:
     output_budget: str = "normal"
     notes: list[str] = field(default_factory=list)
     planner_ok: bool = True
+    #: Nom to'qnashuvi bo'yicha `clarify` — holatga (`conv_state.pending_name`).
+    pending_name: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -527,6 +530,7 @@ def parse_orch_plan(
     tz: str,
     now: datetime,
     conv: CS.ConvState | None = None,
+    hints: list[Any] | None = None,
 ) -> OrchPlan:
     """Planner JSON → `OrchPlan`. Eski maydonlar `deep_search.parse_plan` dan o'tadi.
 
@@ -587,6 +591,25 @@ def parse_orch_plan(
         # Holat "kim/qaysi chat" ni allaqachon biladi — so'rash shart emas.
         steps = []
         notes.append("state: referent resolved — clarify dropped")
+    pending: dict[str, Any] = {}
+    collision = CS.name_collision(hints or [], question) if hints else None
+    if (
+        collision is not None
+        and not applied.chats
+        and not sel_synced
+        and plan.intent_follow_up not in DS.DIRECT_FOLLOW_UPS
+        and not means_all_names(question, collision[0])
+    ):
+        steps, target, pending = resolve_collision(
+            collision,
+            plan=plan,
+            steps=steps,
+            target=target,
+            conv=conv,
+            known_chats=set(known_chats),
+            question=question,
+            notes=notes,
+        )
     steps, guard_notes = apply_guards(
         steps,
         plan=plan,
@@ -604,7 +627,82 @@ def parse_orch_plan(
         expected_answer_kind=kind if kind in ANSWER_KINDS else "text",
         output_budget=budget if budget in OUTPUT_BUDGETS else "normal",
         notes=notes,
+        pending_name=pending,
     )
+
+
+# ─── nom to'qnashuvi (bir nechta "Otabek") ───────────────────────────────────
+
+#: "Hamma Otabeklar" / "ikkalasi" / "all of them" — to'qnashuv so'rash emas, hammasi.
+ALL_NAMES_RE = re.compile(
+    r"\b(?:hamma|barcha|ikkala\w*|uchala\w*|har\s+ikki\w*|both|all\s+of\s+them|everyone)\b"
+    r"|(?<!\w)(?:всех|обоих|обеих|все)(?!\w)",
+    re.I,
+)
+_CLARIFY_NAME = {
+    "uz": "«{name}» nomli bir nechta suhbat bor — qaysi birini nazarda tutyapsiz?",
+    "ru": "Нашлось несколько чатов «{name}» — какой вы имеете в виду?",
+    "en": "There are several chats named “{name}” — which one do you mean?",
+}
+#: Holatdagi yechim bilan qayta yo'naltiriladigan qadamlar (manzil argumenti bor).
+TARGETED_SKILLS = frozenset({"write_propose", "send_result", "agent_tools", "chat_digest"})
+
+
+def means_all_names(question: str, key: str) -> bool:
+    """Savol shu nomdagi **hamma** chatni nazarda tutadimi ("hamma Otabeklar")."""
+    folded = TW.fold(question)
+    plural = f"{TW.fold(key)}lar"
+    return bool(ALL_NAMES_RE.search(folded)) or (len(key) >= 3 and plural in folded)
+
+
+def resolve_collision(
+    collision: tuple[str, list[Any]],
+    *,
+    plan: DS.DeepPlan,
+    steps: list[Step],
+    target: Any,
+    conv: CS.ConvState | None,
+    known_chats: set[int],
+    question: str,
+    notes: list[str],
+) -> tuple[list[Step], Any, dict[str, Any]]:
+    """Bitta nomga ≥2 teng mos shaxsiy chat: holatda yechim bo'lsa — **o'sha**, aks holda `clarify`.
+
+    Holat yechimi ("Otabek" → 110) rejaning chatlari va manzilli qadamlarga
+    (`write_propose` / `send_result` / …) qo'yiladi: planner to'qnashuvdagi
+    boshqa "Otabek" ni tanlagan bo'lsa ham. Yechim yo'q — bitta `clarify`
+    (variantlar = sarlavhalar), `pending` esa holatga yoziladi.
+    """
+    key, tied = collision
+    ids = [int(h.chat_id) for h in tied]
+    known = CS.resolve_name(conv, key)
+    if known and int(known["chat_id"]) in known_chats:
+        cid = int(known["chat_id"])
+        plan.chats = [cid]
+        fixed: list[Step] = []
+        for s in steps:
+            args = dict(s.args)
+            if s.skill in TARGETED_SKILLS:
+                named = str(args.get("chat") or "")
+                points_here = args.get("chat_id") in ids or (
+                    named and CS.resolve_name(conv, named) == known
+                )
+                if points_here or ("chat_id" not in args and not named):
+                    args["chat_id"] = cid
+                    args.pop("chat", None)
+            fixed.append(Step(s.skill, args, s.why, s.origin))
+        notes.append(f"state: name {key!r} resolved → [id:{cid}]")
+        return fixed, [cid], {}
+    locale = CS.detect_language(question)
+    ask = _CLARIFY_NAME.get(locale, _CLARIFY_NAME["uz"]).format(name=U.attr(key, max_chars=40))
+    notes.append(f"guard: name {key!r} matches {len(ids)} chats → clarify")
+    clarify = Step(
+        "clarify",
+        {"question": ask, "options": [str(h.title) for h in tied][:3]},
+        "several chats share this name",
+        "guard",
+    )
+    return [clarify], target, {"key": key, "chat_ids": ids}
 
 
 def plan_task() -> Task:
@@ -626,6 +724,7 @@ async def plan_orchestrated(
     now: datetime | None = None,
     conv: CS.ConvState | None = None,
     hint_lines: list[str] | None = None,
+    hints: list[Any] | None = None,
 ) -> OrchPlan:
     """**Bitta** planner chaqiruvi (`plan_task()`). Yiqilsa — kod sukuti bilan davom.
 
@@ -685,6 +784,7 @@ async def plan_orchestrated(
         tz=tz,
         now=when,
         conv=conv,
+        hints=hints,
     )
     out.planner_ok = ok
     return out
@@ -719,11 +819,140 @@ def build_replan_prompt(
     )
 
 
+def relevant_count(ctx: SK.RunState) -> int:
+    """Mos dalillar soni: rerank/server/skan bahosi, bo'lmasa sintez ro'yxati uzunligi."""
+    if ctx.relevant_hits is None:
+        return len(ctx.ranked)
+    return min(ctx.relevant_hits, len(ctx.ranked))
+
+
 def needs_replan(ctx: SK.RunState) -> bool:
-    """Replan faqat qidiruv qadami ingichka natija berganda — kodda qaror."""
+    """Replan faqat qidiruv qadami ingichka natija berganda — kodda qaror.
+
+    "Ingichka" = **mos** dalil < `REPLAN_MIN_HITS`: rerank ro'yxati hech qachon
+    bo'sh qolmaydi (tashlanganlar orqaga tushadi), shuning uchun uzunlik emas,
+    reranker "mos" degan son (`relevant_count`) o'lchanadi.
+    """
     if not ctx.used & (SEARCH_SKILLS | {"search_server", "discover"}):
         return False
-    return len(ctx.ranked) < REPLAN_MIN_HITS
+    return relevant_count(ctx) < REPLAN_MIN_HITS
+
+
+# ─── bo'sh natija strategiyasi (uni-18) ──────────────────────────────────────
+#: Qidiruv + replan'dan keyin shundan kam **mos** dalil — oddiy sintez o'rniga
+#: `EMPTY_RESULT_PROMPT`: nima qidirilgani va 2-3 aniq keyingi qadam, bog'liq
+#: bo'lmagan "lekin mana bular…" to'ldirmasisiz.
+EMPTY_EVIDENCE_MIN = 3
+#: Bo'sh-natija javobining ko'rinadigan byudjeti (+ fikrlash zaxirasi, sintez qoidasi).
+EMPTY_MAX_TOKENS = 700
+EMPTY_THINKING = "minimal"
+EMPTY_SEARCH_SKILLS = frozenset({"search_local", "search_server", "discover", "scan_corpus"})
+#: Bular o'zi javob beradi (sanoq, dayjest, oyna, oldingi dalil, agent) — bo'sh
+#: qidiruv ham "topilmadi" degani emas.
+EMPTY_ANSWERING_SKILLS = frozenset(
+    {"stats", "compute", "chat_digest", "window", "reuse_prior", "agent_tools", "format_output"}
+)
+EMPTY_SHOWN_TITLES = 6
+
+
+def empty_result(ctx: SK.RunState) -> bool:
+    """Bu turn "topilmadi" javobini talab qiladimi — **kodda**, modelda emas."""
+    if not ctx.used & EMPTY_SEARCH_SKILLS or ctx.used & EMPTY_ANSWERING_SKILLS:
+        return False
+    if ctx.claims or ctx.facts:
+        return False
+    return relevant_count(ctx) < EMPTY_EVIDENCE_MIN
+
+
+def empty_summary(ctx: SK.RunState) -> str:
+    """ "Nima qidirildi" bloki + keyingi qadam maslahatlari — raqam va ro'yxatlar kodda.
+
+    Chat sarlavhalari begona matn: blok yagona dalil konvertining **ichiga**
+    tushadi (`claims_block`), har sarlavha `attr` dan o'tgan.
+    """
+    plan = ctx.plan
+    total = len(ctx.chats_by_id)
+    ids = [c for c in (plan.chats or []) if c in ctx.chats_by_id]
+    searched = len(ids) if ids else total
+    titles = [U.attr(ctx.chats_by_id[c].title) for c in ids[:EMPTY_SHOWN_TITLES]]
+    lines = ["### search summary (computed by code — use these facts only)"]
+    chat_line = f"chats searched: {searched} of {total}"
+    if titles:
+        more = f" (+{len(ids) - len(titles)})" if len(ids) > len(titles) else ""
+        chat_line += ": " + ", ".join(f'"{t}"' for t in titles) + more
+    else:
+        chat_line += " (all synced chats)"
+    lines.append(chat_line)
+    if plan.since is not None or plan.window_from_question:
+        win = TW.TimeWindow(
+            since=plan.since,
+            until=plan.until or datetime.now(UTC),
+            kind="",
+            tz=plan.window_tz or ctx.tz,
+        )
+        lines.append(f"period: {TW.format_window(win)}")
+    else:
+        lines.append("period: the whole synced history (no period was named)")
+    terms = [U.neutralize(q)[:80] for q in plan.subqueries[:5] if q]
+    if terms:
+        lines.append("search terms: " + "; ".join(f'"{t}"' for t in terms))
+    lines.append(
+        f"candidates looked at: {len(ctx.candidates)}; judged relevant: {relevant_count(ctx)}"
+    )
+    srv = ctx.server_out
+    ran_server = bool(ctx.used & {"search_server", "discover"}) or srv.calls > 0
+    lines.append(
+        f"telegram server search: ran ({srv.calls} call(s), {len(srv.hits)} hit(s))"
+        if ran_server
+        else "telegram server search: not run"
+    )
+    gaps = [
+        c for c in (ids or list(ctx.chats_by_id)) if (ctx.chats_by_id[c].synced_min_id or 0) != 1
+    ]
+    hints = ["other wording: a synonym, a shorter or more specific phrase, another language"]
+    if plan.since is not None or plan.window_from_question:
+        hints.append("a wider period than the one searched")
+    else:
+        hints.append("a specific period (for example the month it happened)")
+    if not ids:
+        hints.append("one specific chat or person where it was likely discussed")
+    if not ran_server:
+        hints.append(
+            "Telegram's server search"
+            + (f" ({len(gaps)} chat(s) are not fully synced)" if gaps else "")
+            + " — ask «serverda ham qidir»"
+        )
+    lines.append("suggestion hints:")
+    lines.extend(f"- {h}" for h in hints[:4])
+    return "\n".join(lines)
+
+
+async def synthesize_empty(
+    ctx: SK.RunState, evidence: list[DS.DeepEvidence]
+) -> tuple[str, list[DS.DeepEvidence], Any]:
+    """Bo'sh natija javobi — **bitta** arzon chaqiruv (`Task.SEARCH`, fikrlash minimal).
+
+    Dalil (≤2 mos satr) va qidiruv xulosasi o'sha **yagona** evidence
+    konvertida; bog'liq bo'lmagan nomzodlar umuman berilmaydi.
+    """
+    envelope, kept = DS.build_evidence_envelope(evidence, [], claims_block=empty_summary(ctx))
+    hist = DS.render_history(ctx.history)
+    head = f"{hist}\n\n" if hist else ""
+    user_turn = (
+        f"{head}{envelope}\n\nQuestion: {U.neutralize(ctx.raw_question)}\n"
+        f"(locale: {ctx.locale}; answer_length: ≤{EMPTY_MAX_TOKENS} tokens)"
+    )
+    try:
+        res = await ctx.meter.chat(
+            Task.SEARCH,
+            [Msg.system(EMPTY_RESULT_PROMPT), Msg.user(user_turn)],
+            max_tokens=min(DS.SYNTH_MAX_TOKENS, EMPTY_MAX_TOKENS + DS.SYNTH_THINKING_RESERVE),
+            thinking=EMPTY_THINKING,
+        )
+    except LLMError as exc:
+        log.warning("orch.empty_synth_failed", error=str(exc)[:200])
+        raise DS.DeepSearchError("llm", str(exc)[:200]) from exc
+    return res.text.strip(), kept, res
 
 
 async def replan(
@@ -736,7 +965,10 @@ async def replan(
         and not (SK.SKILLS[n].needs_confirm(ctx.mode) and not ctx.confirm and n == "scan_corpus")
     ]
     prompt = build_replan_prompt(ctx.question, ran, allowed=allowed, facts=list(ctx.facts.values()))
-    ctx.taint.assert_clean("replan", prompt)
+    # Planner yozgan savol (u xabar matnini ko'rmagan) — postning boshlanishiga
+    # tasodifan mos kelishi sizish emas (jonli: "Samarqand davlat universiteti…").
+    own = [ctx.question, ctx.raw_question]
+    ctx.taint.assert_clean("replan", prompt, allow=[*own, *(U.neutralize(q) for q in own)])
     try:
         res = await ctx.meter.chat(
             Task.ROUTE,
@@ -930,7 +1162,7 @@ async def run_pipeline(
         ctx.plan = DS.DeepPlan(
             subqueries=[],
             standalone_question=question[:400],
-            intent_follow_up="chitchat" if gate == "greeting" else gate,
+            intent_follow_up=DS.DIRECT_GATE_FOLLOW_UP.get(gate, gate),
             needs_retrieval=False,
         )
         orch = OrchPlan(
@@ -964,6 +1196,7 @@ async def run_pipeline(
                 tz=rctx.tz,
                 conv=ctx.conv,
                 hint_lines=[hint_line(h) for h in ctx_hints(ctx)],
+                hints=ctx_hints(ctx),
             )
             ctx.plan = orch.plan
             ctx.question = orch.plan.standalone_question or question
@@ -1155,6 +1388,21 @@ def hint_line(h: Any) -> str:
     return f'"{h.title}" [id:{h.chat_id}] {h.kind} msgs={h.msgs} match={h.score:g}'
 
 
+def _state_leaks(ctx: SK.RunState, state: CS.ConvState) -> bool:
+    """Holat JSON'ida begona xabar matni bormi — akkaunt chat sarlavhalari ruxsat.
+
+    Sarlavha xabar emas (planner uni `chat_lines` da allaqachon ko'radi), lekin
+    kanal postlari ko'pincha kanal nomi bilan boshlanadi — ruxsatsiz u
+    har gal "sizish" bo'lib ko'rinardi.
+    """
+    titles = [t for t in ctx.chat_titles.values() if t]
+    allow = [*titles, *(U.attr(t, max_chars=120) for t in titles)]
+    blob = json.dumps(state.to_json(), ensure_ascii=False, default=str)
+    return ctx.taint.state_leak(U.neutralize(blob), allow=allow) or ctx.taint.state_leak(
+        blob, allow=allow
+    )
+
+
 async def _save_state(
     ctx: SK.RunState,
     orch: OrchPlan,
@@ -1184,11 +1432,17 @@ async def _save_state(
             selected=ctx.selected,
             answer_kind=orch.expected_answer_kind,
             terminal=terminal,
+            pending=orch.pending_name or None,
         )
-        blob = json.dumps(new.to_json(), ensure_ascii=False, default=str)
-        if ctx.taint.state_leak(U.neutralize(blob)) or ctx.taint.state_leak(blob):
-            log.error("orch.state_taint", conversation_id=ctx.conversation_id)
-            return
+        if _state_leaks(ctx, new):
+            # Matnli maydonlar (sarlavha, `topic`) shubhali — ularsiz saqlanadi:
+            # havolalar/oyna/raqamlar **yangilanishi shart**, aks holda keyingi
+            # turn eski dalilni o'qiydi (daily-30 t6/t7).
+            new = CS.strip_text(new)
+            if _state_leaks(ctx, new):
+                log.error("orch.state_taint", conversation_id=ctx.conversation_id)
+                return
+            log.warning("orch.state_text_dropped", conversation_id=ctx.conversation_id)
         ctx.conv = new
         await CS.save(ctx.session_factory, ctx.conversation_id, new)
     except Exception as exc:  # holat — yordamchi; javob allaqachon yozilgan
@@ -1579,29 +1833,49 @@ async def _finish_answer(
         f"{' → '.join(s.skill for s in orch.steps)})"
     )
     budget = answer_budget(ctx, orch)
-    answer, kept, res = await DS.synthesize(
-        ctx.meter,
-        ctx.raw_question,
-        evidence,
-        ctx.clusters,
-        locale=ctx.locale,
-        deep=ctx.deep,
-        history=ctx.history,
-        follow_up=plan.intent_follow_up,
-        claims_block=claims_block,
-        mode_note="\n".join(notes),
-        outside_asked=DS.question_asks_outside(plan),
-        task=synth_task(ctx.used, ctx.deep),
-        budget=budget,
-    )
+    empty = empty_result(ctx)
+    if empty:
+        # Mos dalil < EMPTY_EVIDENCE_MIN — "topilmadi" + nima qidirildi + keyingi
+        # qadam; bog'liq bo'lmagan nomzodlar sintezga umuman berilmaydi.
+        shown = evidence[: min(relevant_count(ctx), EMPTY_EVIDENCE_MIN - 1)]
+        log.info(
+            "orch.empty_result",
+            conversation_id=ctx.conversation_id,
+            candidates=len(ctx.candidates),
+            relevant=relevant_count(ctx),
+            shown=len(shown),
+        )
+        answer, kept, res = await synthesize_empty(ctx, shown)
+    else:
+        answer, kept, res = await DS.synthesize(
+            ctx.meter,
+            ctx.raw_question,
+            evidence,
+            ctx.clusters,
+            locale=ctx.locale,
+            deep=ctx.deep,
+            history=ctx.history,
+            follow_up=plan.intent_follow_up,
+            claims_block=claims_block,
+            mode_note="\n".join(notes),
+            outside_asked=DS.question_asks_outside(plan),
+            task=synth_task(ctx.used, ctx.deep),
+            budget=budget,
+        )
     state["answer"] = answer
-    if len(kept) < len(evidence):
+    if not empty and len(kept) < len(evidence):
         truncated = True
     finish_reason = res.finish_reason if res else ""
     truncated_answer = DS.is_length_finish(finish_reason)
     if truncated_answer:
         truncated = True
     citations, invalid = DS.validate_citations(answer, kept)
+    removed_citations = 0
+    if invalid:
+        # Dalilda yo'q token javobda qolmasin (uni-16 `#c307m…`) — soni qamrovda.
+        answer, removed_citations = DS.strip_invalid_citations(answer, kept)
+        state["answer"] = answer
+        log.warning("orch.invalid_citations_removed", removed=removed_citations)
     shown_external = sum(1 for e in kept if e.external)
     ext_note = DS.external_claim_note(answer, shown_external, locale=ctx.locale)
     if ext_note:
@@ -1652,6 +1926,7 @@ async def _finish_answer(
         scan=scan_for_cov,
         window=ctx.window_meta or None,
     )
+    coverage.invalid_citations_removed = removed_citations
     for i in range(0, len(answer), DS.TOKEN_CHUNK_CHARS):
         await DS._emit(ctx.events, "token", text=answer[i : i + DS.TOKEN_CHUNK_CHARS])
     await DS._emit(ctx.events, "coverage", **coverage.to_dict())
@@ -1712,6 +1987,8 @@ async def _finish_answer(
         "selected_chats": list(ctx.selected),
         "evidence_refs": DS.evidence_refs(kept),
         "reused_evidence": "reuse_prior" in ctx.used,
+        "empty_result": empty,
+        "relevant_hits": ctx.relevant_hits,
         **(agent_context(ctx) if ctx.context_mode == "agent" or ctx.agent_meta else {}),
     }
     scan_persist = ctx.scan_meta if ctx.used & {"scan_corpus", "window", "stats"} else None

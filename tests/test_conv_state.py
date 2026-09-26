@@ -32,6 +32,7 @@ from app.db.models import ChatType
 from app.services import conv_state as CS
 from app.services import deep_search as DS
 from app.services import orchestrator as OR
+from app.services.prompts_deep import DEEP_SYNTH_PROMPT
 
 __all__ = ["wired"]  # fixture — import qilingan, pytest shu nom bilan topadi
 
@@ -354,3 +355,118 @@ def test_state_api_is_read_only_and_owner_only(monkeypatch: pytest.MonkeyPatch) 
         assert client.put("/api/conversations/1/state", json={}).status_code in (403, 405)
         client.cookies.set(sec.SESSION_COOKIE, sec.issue_session(8))
         assert client.get("/api/conversations/1/state").status_code == 404
+
+
+# ─── tuzatishdan keyingi follow-up (daily-30 t5→t6→t7) ───────────────────────
+
+
+async def test_follow_ups_after_a_correction_read_the_corrected_evidence(
+    monkeypatch: pytest.MonkeyPatch, wired: dict[str, Any], stored: dict[str, Any]
+) -> None:
+    """Tuzatish turn'i yangi dalil topadi → "ruscha yoz" va "qaysi chatdan" o'shani o'qiydi.
+
+    Jonli regressiya: kanal postlari chat sarlavhasi ("Samarqand davlat
+    universiteti…") bilan boshlanardi, sarlavha holatda turgani uchun taint
+    qo'riqchisi butun holatni tashlab yubordi — `last_result.evidence_refs`
+    oldingi ("chuqurroq") turn'da qoldi va keyingi ikki turn eski dalilni o'qidi.
+    """
+    samdu = _chat(5, "Samarqand davlat universiteti")
+    wired["chats"].append(samdu)
+    stale = [{"chat_id": 1, "tg_msg_id": 777}]
+    stored["state"] = CS.ConvState(
+        last_result={"skill": "scan_corpus", "evidence_refs": stale}, topic="ijara narxi"
+    )
+    body = "Samarqand davlat universiteti talabalari uchun ijara kompensatsiyasi haqida"
+    use_multi(monkeypatch, lambda q: [_hit(i, chat_id=5, text=f"{body} #{i}") for i in range(1, 6)])
+    wired["history"] = [
+        DS.Turn(role="user", text="Chuqurroq qidir."),
+        DS.Turn(role="assistant", text="Toshkentdagi ijara.", evidence_refs=list(stale)),
+    ]
+    # t5 — tuzatish: yangi qidiruv, Samarqand chati.
+    llm5 = FakeLLM(
+        plan=_plan(
+            standalone_question="Samarqand davlat universiteti chatida ijara haqida nima deyishdi?",
+            intent_follow_up="correction",
+            target_chats=[5],
+            server_scope="none",
+            steps=[{"skill": "search_local"}],
+        ),
+        rerank='{"ranking":[0,1,2]}',
+        synth="Ijara kompensatsiyasi #c5m101.",
+    )
+    fifth = await run("Yo'q, men Samarqand guruhini nazarda tutgan edim.", llm5, mode="deep")
+    refs5 = stored["state"].last_result["evidence_refs"]
+    assert refs5 and {r["chat_id"] for r in refs5} == {5}, refs5
+    assert stored["state"].topic  # sarlavha holatda qonuniy — matnli maydon ham saqlandi
+
+    seen: list[list[dict[str, int]]] = []
+
+    async def refs_to_hits(session: Any, refs: Any, **kw: Any) -> list[Any]:
+        seen.append([dict(r) for r in refs])
+        return [
+            _hit(int(r["tg_msg_id"]) - 100, chat_id=int(r["chat_id"]), text=f"{body} {r}")
+            for r in refs
+        ]
+
+    monkeypatch.setattr(DS, "_refs_to_hits", refs_to_hits)
+    wired["history"] += [
+        DS.Turn(role="user", text="Yo'q, men Samarqand guruhini nazarda tutgan edim."),
+        DS.Turn(role="assistant", text="Ijara kompensatsiyasi.", plan=fifth.plan,
+                evidence_refs=list(refs5)),
+    ]  # fmt: skip
+    # t6 — "Shuni ruscha yoz." → tuzatilgan javob dalili qayta o'qiladi.
+    llm6 = FakeLLM(
+        plan=_plan(
+            standalone_question="Oldingi javobni rus tiliga tarjima qil.",
+            intent_follow_up="reformat",
+            needs_retrieval=False,
+            steps=[{"skill": "reuse_prior"}],
+        ),
+        synth="Компенсация аренды #c5m101.",
+    )
+    sixth = await run("Shuni ruscha yoz.", llm6, mode="deep")
+    assert [s["skill"] for s in sixth.plan["steps"]] == ["reuse_prior"]
+    assert seen[-1] == refs5
+    synth6 = llm6.user_turn(DEEP_SYNTH_PROMPT)
+    assert "source chats" in synth6 and '"Samarqand davlat universiteti" (id 5)' in synth6
+    assert "#c1m777" not in synth6  # eski ("chuqurroq") dalil yo'q
+    assert {r["chat_id"] for r in stored["state"].last_result["evidence_refs"]} == {5}
+
+    wired["history"] += [
+        DS.Turn(role="user", text="Shuni ruscha yoz."),
+        DS.Turn(role="assistant", text="Компенсация аренды.", plan=sixth.plan,
+                evidence_refs=list(refs5)),
+    ]  # fmt: skip
+    # t7 — "Bu qaysi chatdan edi?" → o'sha havolalar, chat nomi kodda sanalgan.
+    llm7 = FakeLLM(
+        plan=_plan(
+            standalone_question="Oldingi javob qaysi chatdan olingan?",
+            intent_follow_up="about_prior",
+            needs_retrieval=False,
+            steps=[{"skill": "reuse_prior"}],
+        ),
+        synth="Bu «Samarqand davlat universiteti» chatidan #c5m101.",
+    )
+    seventh = await run("Bu qaysi chatdan edi?", llm7, mode="deep")
+    assert seen[-1] == refs5
+    synth7 = llm7.user_turn(DEEP_SYNTH_PROMPT)
+    assert '"Samarqand davlat universiteti" (id 5)' in synth7
+    assert "Samarqand davlat universiteti" in seventh.answer
+
+
+def test_state_text_fallback_keeps_refs_when_a_text_field_leaks() -> None:
+    taint = DS._Taint()
+    taint.add_hits([_hit(1, text=f"Maxfiy post: {INJECTION}")])
+    st = CS.ConvState(
+        resolved_entities={"Ali": {"chat_id": 3, "title": f"Maxfiy post: {INJECTION}"}},
+        last_result={"evidence_refs": [{"chat_id": 3, "tg_msg_id": 9}]},
+        topic=f"Maxfiy post: {INJECTION}",
+    )
+    blob = CS.render_block(st)
+    assert taint.state_leak(blob)
+    # Akkaunt chat sarlavhasi ruxsat ro'yxatida — u sizish emas.
+    assert taint.state_leak(blob, allow=[f"Maxfiy post: {INJECTION}"]) is False
+    clean = CS.strip_text(st)
+    assert not taint.state_leak(CS.render_block(clean))
+    assert clean.last_result["evidence_refs"] == [{"chat_id": 3, "tg_msg_id": 9}]
+    assert clean.topic == "" and clean.resolved_entities["Ali"]["title"] == ""

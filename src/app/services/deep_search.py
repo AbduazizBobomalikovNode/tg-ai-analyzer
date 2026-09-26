@@ -200,8 +200,20 @@ NO_RETRIEVAL_FOLLOW_UPS = ("reformat", "explain", "about_prior")
 #: (`answer_direct`). Ular **tarixsiz** birinchi turn'da ham bo'la oladi.
 DIRECT_FOLLOW_UPS = ("meta", "chitchat")
 #: `direct_intent` (kod darvozasi) qaytara oladigan qiymatlar.
-DIRECT_INTENTS = ("greeting", "meta", "chitchat")
+DIRECT_INTENTS = ("greeting", "meta", "chitchat", "meta_cost")
+#: Darvoza niyati → rejaning `intent_follow_up` i (`FOLLOW_UPS` ichida qolsin).
+DIRECT_GATE_FOLLOW_UP = {"greeting": "chitchat", "meta_cost": "meta"}
+#: Qidiruvsiz javobning **ko'rinadigan** byudjeti. Jonli daily-37 ("Sen nimalar
+#: qila olasan?"): `max_tokens=900` ni Gemini fikrlashi yeb, javob
+#: "* **" da `MAX_TOKENS` bilan kesildi. Endi sintez bilan bir xil naqsh:
+#: chaqiruv `max_tokens` i = byudjet + `SYNTH_THINKING_RESERVE` (qopqoq
+#: `SYNTH_MAX_TOKENS`), shu niyatlarda fikrlash `minimal`, kesilsa **bitta**
+#: davom ettirish.
 DIRECT_MAX_TOKENS = 900
+DIRECT_CALL_MAX_TOKENS = min(SYNTH_MAX_TOKENS, DIRECT_MAX_TOKENS + SYNTH_THINKING_RESERVE)
+#: Chuqur mulohaza kerak bo'lmagan niyatlar — chaqiruv bo'yicha `thinking=minimal`.
+DIRECT_MINIMAL_THINKING = frozenset({"meta", "greeting", "chitchat"})
+DIRECT_THINKING = "minimal"
 
 # ─── bosqichlar ro'yxati (UI reyki shu hodisadan quriladi) ───────────────────
 # Quvur har doim bir xil emas: rejim — **qopqoq**, ssenariy emas. Shuning
@@ -612,6 +624,8 @@ class DeepEvidence:
     # Sitata tokeni `#` siz: `c<chat_id>m<tg_msg_id>` yoki tashqi uchun `x<n>`.
     # `to_evidence` qo'yadi — konvert, validator va frontend shuni ishlatadi.
     token: str = ""
+    #: `messages.media_type` — satrda `[photo]` / `[document]` belgisi (matn bo'sh bo'lsa ham).
+    media: str = ""
 
     def to_citation(self) -> dict[str, Any]:
         return {
@@ -633,6 +647,8 @@ class Coverage:
     messages_scanned: int = 0
     range_from: datetime | None = None
     range_to: datetime | None = None
+    #: `range_*` ni qaysi mintaqada ko'rsatish (oyna yo'lida akkaunt `tz`); bo'sh — UTC.
+    range_tz: str = ""
     gaps: list[str] = field(default_factory=list)
     server_rungs_used: bool = False
     server_calls: int = 0  # bajarilgan MTProto so'rovlari
@@ -687,9 +703,14 @@ class Coverage:
     dropped_duplicates: int = 0
     #: Mavzusiz dayjest: dalil chat bo'yicha namuna, sanoqlar aniq (`window_search`).
     window_sampled: bool = False
+    #: Oyna media filtri (`window_search.MEDIA_KINDS`) — qamrov satrida `[photo]`.
+    window_media: str = ""
+    #: Javobdan olib tashlangan sitata tokenlari (dalilda yo'q — `strip_invalid_citations`).
+    invalid_citations_removed: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "invalid_citations_removed": self.invalid_citations_removed,
             "retrieval_kind": self.retrieval_kind,
             "inbox": self.inbox,
             "direction": self.direction,
@@ -702,6 +723,7 @@ class Coverage:
                 "taken": self.window_taken,
                 "dropped_duplicates": self.dropped_duplicates,
                 "sampled": self.window_sampled,
+                "media": self.window_media,
             },
             "buckets_scanned": self.buckets_scanned,
             "buckets_planned": self.buckets_planned,
@@ -720,6 +742,7 @@ class Coverage:
             "range": {
                 "from": self.range_from.isoformat() if self.range_from else None,
                 "to": self.range_to.isoformat() if self.range_to else None,
+                "tz": self.range_tz,
             },
             "gaps": list(self.gaps),
             "server_rungs_used": self.server_rungs_used,
@@ -888,13 +911,20 @@ class _Taint:
                 continue  # javob savolni takrorlayapti — bu begona matn emas
             self._prior.add(head)
 
-    def assert_clean(self, stage: str, prompt: str) -> None:
+    def assert_clean(self, stage: str, prompt: str, *, allow: Sequence[str] = ()) -> None:
         """Begona **xabar** matni promptga tushganmi — tushgan bo'lsa xato.
 
         Oldingi javob bu yerda tekshirilmaydi: u qattiq xato emas, chunki
         yolg'on pozitivning narxi butun suhbatning o'lishi edi (500, har
         turn'da). Uni `prior_leak` qaytaradi va chaqiruvchi tarixni tashlab
         davom etadi.
+
+        `allow` — promptga **qonuniy** tushgan, xabar bo'lmagan matnlar
+        (planner o'zi yozgan `standalone_question`, akkaunt chat sarlavhalari):
+        tekshiruvdan oldin olib tashlanadi. Planner xabar matnini hech qachon
+        ko'rmaydi, ya'ni uning savoli postning boshlanishi ("Samarqand davlat
+        universiteti…") bilan mos kelishi — tasodif, sizish emas; ilgari
+        replan shu sababli `taint` bilan yiqilardi.
         """
         if stage in QUARANTINED_STAGES:
             # Bu bosqich ataylab begona matn ko'radi (`QUARANTINED_STAGES`).
@@ -902,22 +932,33 @@ class _Taint:
             # tushib qolsa qo'riqchi darhol qizaradi, ya'ni "karantin" ro'yxati
             # kodda ko'rinadigan, testdan o'tadigan qaror bo'lib qoladi.
             return
+        for allowed in sorted({a for a in allow if a}, key=len, reverse=True):
+            prompt = prompt.replace(allowed, " ")
         for body in self._texts:
             if body in prompt:
                 raise DeepSearchError("taint", f"{stage}: untrusted message text in prompt")
 
-    def state_leak(self, text: str) -> bool:
+    def state_leak(self, text: str, *, allow: Sequence[str] = ()) -> bool:
         """Suhbat holatida (`conv_state`) begona **xabar** yoki oldingi javob bo'lagi bormi.
 
         Holat faqat id / sarlavha / raqam / foydalanuvchi matnidan iborat
         bo'lishi shart — u keyingi turn'larda planner promptiga ochiq JSON
         bo'lib tushadi. Foydalanuvchining o'z matni (savol) bu tekshiruvdan
         oldin olib tashlanadi: u javobda takrorlangan bo'lishi mumkin.
+
+        `allow` — holatga **qonuniy** tushadigan matnlar (akkaunt chatlarining
+        sarlavhalari): ular ham tekshiruvdan oldin olib tashlanadi. Jonli
+        daily-30: kanal postlari "Samarqand davlat universiteti…" bilan
+        boshlanardi — o'sha kanal sarlavhasi holatda turgani uchun butun
+        holat "sizib chiqdi" deb saqlanmay qoldi va keyingi turn eski
+        dalillarni qayta o'qidi.
         """
         body = text or ""
         for user_text in self._user:
             if user_text:
                 body = body.replace(user_text, " ")
+        for allowed in sorted({a for a in allow if a}, key=len, reverse=True):
+            body = body.replace(allowed, " ")
         return any(t in body for t in self._texts) or any(p in body for p in self._prior)
 
     def assert_state(self, stage: str, text: str) -> None:
@@ -1633,6 +1674,49 @@ _META_RE = re.compile(
 )""",
     re.X,
 )
+#: "Bu javob qancha turdi / qancha xarajat bo'ldi" — narx shaffofligi (uni-19).
+#: Javob **kodda**, DB'dan (`skills._answer_direct` → `meta_cost_text`), LLM'siz.
+#: Ikki shakl: (a) javob/so'rov/suhbat/token + narx fe'li; (b) juda qisqa (≤5
+#: so'z) yalang'och narx savoli. "ijara narxi qancha" bu yerga tushmaydi — unda
+#: na (a) ning ot qismi, na (b) ning narx fe'li bor.
+_META_COST_RE = re.compile(
+    r"""(?:
+    (?:javob|sorov|savol|suhbat|token)\w*\s+(?:menga\s+|sizga\s+)?(?:qancha|necha\w*)
+        \s+(?:turdi|ketdi|pul|dollar|sent|token|sarf\w*|xarajat\w*|boldi|narx\w*) |
+    (?:javob|sorov|suhbat)\w*\s+(?:narxi|xarajati|tannarxi) |
+    (?:qancha|necha)\s+token |
+    skolko\s+(?:stoil|stoilo|stoit|stoila|potrach\w*|ushlo|tokenov) |
+    (?:stoimost|rashod|rashody)\s+(?:etogo\s+|otveta\s+|zaprosa\s+)?
+        (?:otveta|zaprosa|dialoga|besedy) |
+    how\s+much\s+(?:did|does)\s+(?:this|that|it|the\s+\w+)\s+(?:\w+\s+)?cost |
+    how\s+many\s+tokens |
+    (?:cost|price)\s+of\s+(?:this|that|the)\s+(?:answer|reply|request|conversation|chat)
+)""",
+    re.X,
+)
+_META_COST_SHORT_RE = re.compile(
+    r"\b(?:qancha\s+(?:turdi|xarajat\w*|sarf\w*|pul\s+ketdi)|xarajat\w*\s+qancha"
+    r"|skolko\s+stoil\w*|what\s+did\s+(?:it|this|that)\s+cost|how\s+much\s+was\s+(?:it|this))\b"
+)
+_META_COST_SHORT_TOKENS = 5
+#: Yalang'och narx savolida narx iborasidan tashqari faqat shu so'zlar bo'la oladi —
+#: "Otabek qancha turdi deb yozdi" (ism, fe'l) narx savoli emas.
+_META_COST_FILLER = frozenset(
+    "bu shu ushbu oxirgi oldingi menga sizga jami umumiy hammasi hozir javob javobing "
+    "boldi etot eto vsego it this that so far total in".split()
+)
+
+
+def _short_cost_question(folded: str, tokens: Sequence[str]) -> bool:
+    if len(tokens) > _META_COST_SHORT_TOKENS:
+        return False
+    m = _META_COST_SHORT_RE.search(folded)
+    if m is None:
+        return False
+    rest = (folded[: m.start()] + " " + folded[m.end() :]).split()
+    return set(rest) <= _META_COST_FILLER
+
+
 #: Bitta so'zli yordam so'rovi — faqat to'liq mos kelganda.
 _META_SOLO = frozenset({"yordam", "pomosh", "pomogi", "help", "spravka", "menyu", "menu"})
 _META_MAX_TOKENS = 12
@@ -1688,7 +1772,7 @@ def _fold_turn(text: str) -> str:
 def direct_intent(question: str, history: Sequence[Turn] = ()) -> str | None:
     """Qidiruvsiz javob beriladigan turn'ni **kodda** aniqlaydi.
 
-    `"greeting" | "meta" | "chitchat"` yoki `None` (→ planner). Deterministik
+    `"greeting" | "meta" | "meta_cost" | "chitchat"` yoki `None` (→ planner). Deterministik
     va konservativ: qidirilishi mumkin bo'lgan har qanday narsa `None`.
 
     Args:
@@ -1710,6 +1794,9 @@ def direct_intent(question: str, history: Sequence[Turn] = ()) -> str | None:
     tokens = folded.split(" ")
     if _GREETING_RE.fullmatch(folded):
         return "greeting"
+    if len(tokens) <= _META_MAX_TOKENS and not _CONTENT_MARKS.search(folded):
+        if _META_COST_RE.search(folded) or _short_cost_question(folded, tokens):
+            return "meta_cost"
     if _CONTENT_MARKS.search(folded) or _CONTENT_WORDS & set(tokens):
         return None  # raqam, @username, chat/xabar so'zi — arxiv savoli
     if len(tokens) <= _META_MAX_TOKENS and (_META_RE.search(folded) or folded in _META_SOLO):
@@ -1851,6 +1938,7 @@ async def _hydrate(
         h.sender = _sender_label(m, chat)
         h.date = m.published_at
         h.text = S.compact_text(m.text or "", max_chars=S.MAX_MSG_CHARS)
+        h.media_type = str(getattr(m, "media_type", None) or "")
     return hits
 
 
@@ -2473,11 +2561,26 @@ async def dedup_and_cluster(
 async def rank(
     question: str, deduped: list[S.Hit], *, meter: _Meter, events: EventSink | None, dropped: int
 ) -> list[S.Hit]:
-    ranked = await RR.rerank(
+    ranked, _relevant = await rank_scored(
+        question, deduped, meter=meter, events=events, dropped=dropped
+    )
+    return ranked
+
+
+async def rank_scored(
+    question: str, deduped: list[S.Hit], *, meter: _Meter, events: EventSink | None, dropped: int
+) -> tuple[list[S.Hit], int | None]:
+    """`rank` + reranker **mos** deb topgan nomzodlar soni (`RR.rerank_scored`).
+
+    Orkestratorning bo'sh-natija strategiyasi (`EMPTY_EVIDENCE_MIN`) shunga
+    tayanadi: ro'yxat hech qachon bo'sh qolmaydi (model tashlaganlari orqaga
+    tushadi), lekin "hech biri mos emas" endi ko'rinadi. `None` — baho yo'q.
+    """
+    ranked, relevant = await RR.rerank_scored(
         question, deduped[:RERANK_INPUT], llm=cast(LLM, meter), top_n=RERANK_KEEP
     )
-    await _emit(events, "rerank", kept=len(ranked), dropped_dupes=dropped)
-    return ranked
+    await _emit(events, "rerank", kept=len(ranked), dropped_dupes=dropped, relevant=relevant)
+    return ranked, relevant
 
 
 # ─── 4. Refleksiya ───────────────────────────────────────────────────────────
@@ -2597,6 +2700,7 @@ def to_evidence(
                 cluster=cluster_of.get(h.message_id, 0),
                 server=h.message_id in from_server or external,
                 external=external,
+                media=h.media_type or "",
             )
         )
     return out
@@ -2657,6 +2761,9 @@ def evidence_line(e: DeepEvidence) -> str:
     tag = ""
     if e.server:
         tag = " [server external]" if e.external else " [server]"
+    if e.media:
+        # Media turi — kodda, `messages.media_type` dan (fayl yuklanmaydi).
+        tag += f" [{U.attr(e.media, max_chars=24)}]"
     return f"[#{e.token}]{tag} {when} {U.attr(e.sender) or '?'}: {U.neutralize(e.text)}"
 
 
@@ -2796,6 +2903,56 @@ def validate_citations(
             continue
         cited.append(found.to_citation())
     return cited, invalid
+
+
+#: Yaroqsiz sitata tokeni + uning atrofi: ixtiyoriy `[`/backtick o'rami va
+#: ortidan kelgan havola (`(t.me/…)`, `[…](t.me/…)` yoki yalang'och `t.me/…`).
+_BAD_CITE_TAIL = (
+    r"(?:\s*\((?:https?://)?t\.me/[^)\s]*\)"
+    r"|\s*\[[^\]\n]{0,80}\]\((?:https?://)?t\.me/[^)\s]*\)"
+    r"|\s+(?:https?://)?t\.me/\S+)?"
+)
+
+
+def strip_invalid_citations(answer: str, evidence: Sequence[DeepEvidence]) -> tuple[str, int]:
+    """Dalilda **yo'q** sitata tokenlarini javob matnidan olib tashlaydi.
+
+    `validate_citations` ularni faqat sanardi — token javobda qolib, UI uni
+    haqiqiy havoladek chizardi (uni-16: `#c307m211637`, dalilda `#c3807m…`).
+    Endi token (va ortidagi `t.me` havolasi) o'chiriladi, qolgan tinish
+    belgilari tozalanadi, soni esa qamrovga yoziladi. Haqiqiy tokenlarga
+    tegilmaydi.
+    """
+    known = {e.token for e in evidence if e.token}
+    removed = 0
+
+    def drop(m: re.Match[str]) -> str:
+        nonlocal removed
+        if m.group("tok") in known:
+            return m.group(0)
+        removed += 1
+        return ""
+
+    pattern = re.compile(
+        r"\[?`?#(?P<tok>"
+        + _CITE_RE.pattern.removeprefix("#").strip("()")
+        + r")`?\]?"
+        + _BAD_CITE_TAIL
+    )
+    text = pattern.sub(drop, answer or "")
+    if not removed:
+        return answer, 0
+    # O'chirishdan qolgan bo'sh qavslar, ketma-ket vergullar va osilgan tinish.
+    text = re.sub(r"\(\s*[,;]?\s*\)|\[\s*[,;]?\s*\]", "", text)
+    text = re.sub(r"(?:\s*,){2,}", ",", text)
+    text = re.sub(r"\(\s*,\s*", "(", text)
+    text = re.sub(r"\s*,\s*\)", ")", text)
+    text = re.sub(r"[ \t]+([,.;:])", r"\1", text)
+    text = re.sub(r",([.;:!?])", r"\1", text)
+    text = re.sub(r",(\s*(?:\n|$))", r"\1", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    return text.strip(), removed
 
 
 def external_channels(evidence: Sequence[DeepEvidence]) -> list[str]:
@@ -3084,25 +3241,52 @@ async def answer_direct(
     `<untrusted_data kind="prior_answer">` konvertida (`render_history`),
     xabar matni esa bu yerga umuman yetib kelmaydi.
     """
+    if intent == "meta_cost":
+        # Narx savoli kodda (`skills._answer_direct`, DB'dan) — bu yerga faqat eski
+        # quvur yetib keladi: imkoniyatlar matni bilan halol "meta" javob.
+        intent = "meta"
     hist = render_history(history)
     parts = [hist] if hist else []
     if intent == "meta":
         parts.append(f"<capabilities>\n{capabilities_text(locale)}\n</capabilities>")
     parts.append(f"<question>{U.neutralize(question)}</question>")
-    parts.append(f"(intent: {intent}; locale: {locale}; no retrieval ran this turn)")
+    parts.append(
+        f"(intent: {intent}; locale: {locale}; no retrieval ran this turn; "
+        f"answer_length: ≤{DIRECT_MAX_TOKENS} tokens, complete sentences)"
+    )
     prompt = "\n\n".join(parts)
     if taint is not None:
         taint.assert_clean("direct", prompt)
+    thinking = DIRECT_THINKING if intent in DIRECT_MINIMAL_THINKING else None
+    messages = [Msg.system(DEEP_DIRECT_PROMPT), Msg.user(prompt)]
     try:
         res = await meter.chat(
-            Task.SEARCH,
-            [Msg.system(DEEP_DIRECT_PROMPT), Msg.user(prompt)],
-            max_tokens=DIRECT_MAX_TOKENS,
+            Task.SEARCH, messages, max_tokens=DIRECT_CALL_MAX_TOKENS, thinking=thinking
         )
     except LLMError as exc:
         log.warning("deep.direct_failed", intent=intent, error=str(exc)[:200])
         raise DeepSearchError("llm", str(exc)[:200]) from exc
-    return res.text.strip(), res
+    answer = res.text.strip()
+    if not is_length_finish(res.finish_reason):
+        return answer, res
+    # Zaxiraga qaramay kesildi — sintez bilan bir qoida: **bitta** davom ettirish.
+    log.info("deep.direct_continued", intent=intent, tokens_out=res.usage.tokens_out)
+    try:
+        more = await meter.chat(
+            Task.SEARCH,
+            [
+                *messages,
+                Msg.assistant(answer, signature=res.signature),
+                Msg.user(SYNTH_CONTINUE_NUDGE),
+            ],
+            max_tokens=DIRECT_CALL_MAX_TOKENS,
+            thinking=thinking,
+        )
+    except LLMError as exc:  # davomi kelmadi — kesilgan javob baribir javob
+        log.warning("deep.direct_continue_failed", error=str(exc)[:200])
+        return answer, res
+    extra = more.text.strip()
+    return (f"{answer}\n{extra}".strip() if extra else answer), more
 
 
 def evidence_refs(evidence: Sequence[DeepEvidence]) -> list[dict[str, int]]:
@@ -3221,6 +3405,12 @@ def build_coverage(
         cov.kept = cov.window_taken
         cov.dropped_duplicates = int(window.get("dropped_duplicates") or 0)
         cov.window_sampled = bool(window.get("sampled"))
+        cov.window_media = str(window.get("media") or "")
+        if cov.window_to is not None:
+            # "oraliq" — oynaning o'zi (akkaunt mintaqasida), namuna dalillar oralig'i emas.
+            cov.range_from = cov.window_from
+            cov.range_to = cov.window_to
+            cov.range_tz = cov.window_tz or TW.DEFAULT_TZ
         # Oyna yo'lida reyting (tirsak) yo'q: nechtasi o'qilgani oyna qatorida
         # aytiladi. Aks holda namuna "ahamiyati past nomzodlar reyting bilan
         # tashlandi (400/12461)" deb yolg'on izohlanardi (jonli conv 287).
@@ -3254,6 +3444,7 @@ _COVERAGE_LABELS: dict[str, dict[str, str]] = {
         "confidence": "ishonch",
         "server": "Telegram server qidiruvi",
         "server_skipped": "shift to'ldi, o'tkazib yuborildi",
+        "citations_removed": "{n} ta noto'g'ri sitata olib tashlandi (dalilda yo'q havola)",
         "external": "tashqi (lokal indeksda yo'q) topilma",
         "scan": "korpus skani",
         "buckets": "bo'lak",
@@ -3297,6 +3488,7 @@ _COVERAGE_LABELS: dict[str, dict[str, str]] = {
         "confidence": "уверенность",
         "server": "Поиск на сервере Telegram",
         "server_skipped": "лимит исчерпан, шаг пропущен",
+        "citations_removed": "удалено неверных ссылок: {n} (нет в данных)",
         "external": "внешние (не из локального индекса) находки",
         "scan": "скан корпуса",
         "buckets": "блоки",
@@ -3339,6 +3531,7 @@ _COVERAGE_LABELS: dict[str, dict[str, str]] = {
         "confidence": "confidence",
         "server": "Telegram server search",
         "server_skipped": "rate limit reached, rung skipped",
+        "citations_removed": "{n} invalid citation(s) removed (not in the evidence)",
         "external": "external (not in the local index) hits",
         "scan": "corpus scan",
         "buckets": "buckets",
@@ -3396,6 +3589,18 @@ def coverage_disclosure(cov: Coverage, lab: dict[str, str]) -> str:
     return ""
 
 
+def _cov_day(dt: datetime, tz: str, *, end: bool = False) -> str:
+    """Qamrov sanasi: `tz` berilsa **mahalliy** kalendar kuni (oyna yo'li), aks holda UTC.
+
+    `end=True` — eksklyuziv yuqori chegara aniq mahalliy yarim tunda bo'lsa oldingi
+    kun ("o'tgan hafta" → yakshanba). Jonli uni-12: "oraliq: 2026-09-14" UTC edi.
+    """
+    local = dt.astimezone(TW.zone(tz)) if tz and dt.tzinfo else dt
+    if tz and end and (local.hour, local.minute, local.second, local.microsecond) == (0, 0, 0, 0):
+        local = local - timedelta(microseconds=1)
+    return local.strftime("%Y-%m-%d")
+
+
 def render_coverage(cov: Coverage, *, locale: str = "uz") -> str:
     """Qamrov hisoboti — **kod** yozadi, model emas. Javob ostiga qo'shiladi."""
     lab = _COVERAGE_LABELS.get(locale, _COVERAGE_LABELS["uz"])
@@ -3409,11 +3614,11 @@ def render_coverage(cov: Coverage, *, locale: str = "uz") -> str:
         # Qidiruv hech narsa keltirmadi — buni birinchi bo'lib aytamiz,
         # "0/213" ni o'quvchi o'zi yig'ib olishiga qoldirmaymiz.
         parts.insert(0, lab["nothing"])
-    if cov.range_from and cov.range_to:
+    if cov.range_to and (cov.range_from or cov.range_tz):
+        lo = _cov_day(cov.range_from, cov.range_tz) if cov.range_from else "…"
         parts.insert(
             2,
-            f"{lab['range']}: {cov.range_from.strftime('%Y-%m-%d')} … "
-            f"{cov.range_to.strftime('%Y-%m-%d')}",
+            f"{lab['range']}: {lo} … {_cov_day(cov.range_to, cov.range_tz, end=True)}",
         )
     out = f"---\n**{lab['title']}** — " + " · ".join(parts)
     if cov.gaps:
@@ -3440,6 +3645,8 @@ def render_coverage(cov: Coverage, *, locale: str = "uz") -> str:
             taken = lab["window_all"]
         else:
             taken = lab["window_part"].format(taken=cov.window_taken, total=cov.window_total)
+        if cov.window_media:
+            msgs += f" [{U.attr(cov.window_media, max_chars=24)}]"
         out += (
             f"\n\n{lab['window']}: {TW.format_window(win)} · "
             f"{cov.chats_searched} {lab['chats']} · {msgs} · {taken}"
@@ -3467,6 +3674,8 @@ def render_coverage(cov: Coverage, *, locale: str = "uz") -> str:
         out += f"\n\n⚠️ {lab['server_skipped']}: {', '.join(cov.server_skipped)}"
     for note in cov.server_notes[:3]:
         out += f"\n\n⚠️ {note}"
+    if cov.invalid_citations_removed:
+        out += f"\n\n⚠️ {lab['citations_removed'].format(n=cov.invalid_citations_removed)}"
     disclosure = coverage_disclosure(cov, lab)
     if disclosure:
         out += f"\n\n{disclosure}"
@@ -4044,7 +4253,7 @@ async def _run_pipeline(
             DeepPlan(
                 subqueries=[],
                 standalone_question=question[:400],
-                intent_follow_up="chitchat" if gate == "greeting" else gate,
+                intent_follow_up=DIRECT_GATE_FOLLOW_UP.get(gate, gate),
                 needs_retrieval=False,
             ),
             emit_plan=True,
@@ -4497,6 +4706,10 @@ async def _run_pipeline(
         log.warning("deep.answer_truncated", chars=len(answer), finish_reason=finish_reason)
 
     citations, invalid = validate_citations(answer, kept)
+    removed_citations = 0
+    if invalid:
+        answer, removed_citations = strip_invalid_citations(answer, kept)
+        state["answer"] = answer
     # Sitatalar bilan bir joyda: javob "ochiq/tashqi kanallardan" deb da'vo
     # qildi-yu, `external_hits == 0` bo'lsa — qayta yozmaymiz, qisqa halol
     # izoh qo'shamiz (sitatalar va shakl buzilmasin).
@@ -4540,6 +4753,7 @@ async def _run_pipeline(
         scan=scan_meta,
         window=window_meta or None,
     )
+    coverage.invalid_citations_removed = removed_citations
 
     # Javobni oqim bo'lib beramiz (fasadda streaming yo'q) — keyin qamrov.
     for i in range(0, len(answer), TOKEN_CHUNK_CHARS):
@@ -4797,6 +5011,7 @@ __all__ = [
     "render_history",
     "run_deep_search",
     "stream_deep_search",
+    "strip_invalid_citations",
     "to_evidence",
     "validate_citations",
     "widen_plan",

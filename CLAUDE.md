@@ -292,6 +292,24 @@ ularni tartibda yuritadi. Rejim — faqat **qopqoq**: `fast` ≤ `search_server`
   tushmaydi. `unbacked_numbers` ishorani modul bilan solishtiradi ("33% kam"
   = `-33.33`). `OUTBOUND_RE` endi "yozdimmi"/"yozaman" ni ham taniydi.
 
+- **2026-09-26 bo'shliqlari** (`tests/test_orch_gaps.py`, `test_conv_state.py`):
+  `answer_direct` chaqiruvi `DIRECT_MAX_TOKENS + SYNTH_THINKING_RESERVE`,
+  `meta/greeting/chitchat` da `thinking=minimal`, kesilsa **bitta** davom;
+  `meta_cost` ("bu javob qancha turdi") — kod darvozasi, javob DB'dan
+  (`skills.meta_cost_text`), LLM yo'q. Holat saqlashda akkaunt chat
+  sarlavhalari taint'dan **ozod** (`state_leak(allow=…)`), matnli maydon
+  shubhali bo'lsa `conv_state.strip_text` bilan saqlanadi — `evidence_refs`
+  hech qachon eski turn'da qolmaydi; replan prompti planner savolini
+  `assert_clean(allow=…)` bilan o'tkazadi. `window`/`search_local` `media`
+  argumenti (`window_search.MEDIA_*`: video/ovoz/fayl = `document`), dalil
+  satrida `[photo]`. Dalilda yo'q sitata javobdan olib tashlanadi
+  (`strip_invalid_citations`, qamrovda izoh). Mos dalil
+  < `EMPTY_EVIDENCE_MIN` (reranker "mos" degan son, `rerank_scored`) →
+  `EMPTY_RESULT_PROMPT` (nima qidirildi + 2-3 qadam), replan ham shu son
+  bilan. Bitta nomga teng mos ≥2 shaxsiy chat va holatda yechim yo'q →
+  `clarify` (`conv_state.pending_name`), yechim bo'lsa manzilli qadamlar
+  (`send_result` ham) o'shani oladi. Oyna sarlavhasi va qamrov "oraliq" —
+  akkaunt `tz` sida.
 - **Katalog** (`skills.SKILLS`): `answer_direct`, `clarify`, `reuse_prior`,
   `chat_digest`, `stats`, `compute`, `window`, `search_local`,
   `search_server`, `discover`, `scan_corpus`, `write_propose`. Har biri —

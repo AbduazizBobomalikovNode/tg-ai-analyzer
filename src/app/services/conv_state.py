@@ -116,6 +116,9 @@ class ConvState:
     topic: str = ""
     language: str = ""
     turns: int = 0
+    #: Nom to'qnashuvi bo'yicha so'ralgan `clarify`: `{"key": "Otabek", "chat_ids": [..]}`.
+    #: Keyingi turn shu ro'yxatdan **bitta** chatga qaratilsa — `resolved_entities[key]`.
+    pending_name: dict[str, Any] = field(default_factory=dict)
 
     @property
     def empty(self) -> bool:
@@ -125,6 +128,7 @@ class ConvState:
             or self.last_window
             or self.last_result
             or self.topic
+            or self.pending_name
         )
 
     def last_entity_ref(self) -> dict[str, Any] | None:
@@ -146,6 +150,7 @@ class ConvState:
             "topic": self.topic,
             "language": self.language,
             "turns": self.turns,
+            "pending_name": self.pending_name,
         }
 
 
@@ -224,7 +229,86 @@ def from_json(raw: Any) -> ConvState:
     st.language = lang if lang in ("uz", "ru", "en") else ""
     turns = raw.get("turns")
     st.turns = turns if isinstance(turns, int) and turns >= 0 else 0
+    pending = raw.get("pending_name")
+    if isinstance(pending, Mapping) and isinstance(pending.get("key"), str):
+        ids = [c for c in (_int(x) for x in (pending.get("chat_ids") or [])) if c][:MAX_ENTITIES]
+        if len(ids) >= 2:
+            st.pending_name = {"key": U.attr(pending["key"], max_chars=64), "chat_ids": ids}
     return st
+
+
+def name_words(text: str) -> list[str]:
+    from app.services import agent as AG
+
+    return [
+        w
+        for w in AG._hint_words(text)
+        if len(w) >= AG.CHAT_HINT_MIN_CHARS and w not in AG._HINT_STOPWORDS
+    ]
+
+
+def resolve_name(state: ConvState | None, text: str) -> dict[str, Any] | None:
+    """Matndagi nom (yoki olmosh) → holatdagi aniqlangan entity (yoki `None`).
+
+    "Otabekka yubor" + holatda `Otabek → 110` → `{"chat_id": 110, …}`; "unga
+    yubor" → oxirgi entity. Moslik `agent.chat_hints` bilan bir mezon
+    (`_word_forms` + `_similar` ≥ 0.8): kalitning **har** so'zi matnda bo'lsin.
+    """
+    found = resolve_entity(state, text)
+    return found[1] if found else None
+
+
+def resolve_entity(state: ConvState | None, text: str) -> tuple[str, dict[str, Any]] | None:
+    """`resolve_name` — lekin `(kalit, entity)` bilan."""
+    if state is None or not state.resolved_entities:
+        return None
+    from app.services import agent as AG
+
+    forms: set[str] = set()
+    for word in name_words(text):
+        forms |= AG._word_forms(word)
+    if forms:
+        for key, ent in reversed(list(state.resolved_entities.items())):
+            words = name_words(key)
+            if words and all(
+                max(AG._similar(f, w) for f in forms) >= AG.CHAT_HINT_MIN_RATIO for w in words
+            ):
+                return key, ent
+    if has_referent(text):
+        ref = state.last_entity_ref()
+        if ref is not None:
+            return state.last_entity or "", ref
+    return None
+
+
+def name_collision(hints: Sequence[Any], question: str) -> tuple[str, list[Any]] | None:
+    """Bitta nomga **teng** mos kelgan ≥2 shaxsiy chat — `(kalit, maslahatlar)` yoki `None`.
+
+    "Otabek nima dedi?" + "Otabek Kursdosh" (0.5), "Otabek Xonadosh" (0.5) →
+    to'qnashuv. Aniq mos (`score` eng yuqori va yolg'iz: "Otabek" = 1.0) —
+    to'qnashuv emas. Guruh/kanallar hisobga olinmaydi: "Samarqand guruhi" bir
+    necha chatga tegishli bo'lishi odatiy, planner hammasini oladi.
+    """
+    groups: dict[str, list[Any]] = {}
+    for h in hints:
+        if str(getattr(h, "kind", "") or "") != "private":
+            continue
+        groups.setdefault(entity_key(question, str(h.title)), []).append(h)
+
+    def strength(h: Any) -> tuple[int, float]:
+        # Nechta sarlavha so'zi mos kelgani, keyin ulushi: "Otabek Kursdoshga" da
+        # "Otabek Kursdosh" (2 so'z) "Otabek" (1 so'z) dan aniqroq — to'qnashuv emas.
+        words = len(name_words(str(h.title))) or 1
+        return round(float(h.score) * words), float(h.score)
+
+    for key, items in groups.items():
+        if len(items) < 2:
+            continue
+        top = max(strength(h) for h in items)
+        tied = [h for h in items if strength(h) == top]
+        if len(tied) >= 2:
+            return key, tied
+    return None
 
 
 # ─── sof yordamchilar ────────────────────────────────────────────────────────
@@ -379,6 +463,7 @@ def update_after_turn(
     selected: Sequence[int] = (),
     answer_kind: str = "",
     terminal: str = "",
+    pending: Mapping[str, Any] | None = None,
 ) -> ConvState:
     """Turn'dan keyingi holat — **sof** funksiya (model qatnashmaydi).
 
@@ -388,9 +473,16 @@ def update_after_turn(
     bo'lgan chaqiruvning `chat` argumenti ham entity (sarlavha bilan).
     `terminal` — `clarify`/`answer_direct`/`write_propose`: bunday turn
     natija/oynani o'zgartirmaydi.
+
+    `pending` — shu turn nom to'qnashuvi bo'yicha `clarify` so'radi
+    (`{"key", "chat_ids"}`): holatda eslab qolinadi. Keyingi turn reja shu
+    chatlardan **bittasiga** qaratilsa, u `resolved_entities[key]` bo'ladi —
+    "Otabek" keyingi savollarda (va `send_result` da) o'sha chat.
     """
     follow = str(getattr(plan, "intent_follow_up", "none") or "none")
     st = from_json(prev.to_json())  # nusxa
+    pending_prev = dict(st.pending_name)
+    st.pending_name = {}
     if follow == "context_switch":
         st = ConvState(language=prev.language, turns=prev.turns)
     elif follow == "correction":
@@ -399,10 +491,36 @@ def update_after_turn(
         st.topic = ""
     st.turns += 1
     st.language = detect_language(question, previous=st.language)
-    if terminal:
-        return st
     titles = dict(chat_titles or {})
     plan_chats = list(getattr(plan, "chats", None) or [])
+    picked = (
+        int(plan_chats[0])
+        if pending_prev and len(plan_chats) == 1 and plan_chats[0] in pending_prev["chat_ids"]
+        else None
+    )
+
+    def resolve_pending() -> None:
+        if picked is None:
+            return
+        key = str(pending_prev["key"])
+        st.resolved_entities.pop(key, None)
+        st.resolved_entities[key] = {
+            "chat_id": picked,
+            "title": U.attr(titles.get(picked, ""), max_chars=120),
+            "kind": "private",
+        }
+        st.last_entity = key
+
+    if terminal:
+        resolve_pending()
+        if pending and isinstance(pending.get("key"), str):
+            ids = [c for c in (_int(x) for x in (pending.get("chat_ids") or [])) if c]
+            if len(ids) >= 2:
+                st.pending_name = {
+                    "key": U.attr(pending["key"], max_chars=64),
+                    "chat_ids": ids[:MAX_ENTITIES],
+                }
+        return st
     seen = {int(r["chat_id"]) for r in evidence_refs if r.get("chat_id")}
     # ── entity'lar: chat maslahati + muvaffaqiyatli tool chaqiruvi ──────────
     # Maslahat faqat shu turn'da **ishlatilgan** chatga bo'lsa entity bo'ladi:
@@ -445,6 +563,7 @@ def update_after_turn(
                 new_key = key
     if new_key:
         st.last_entity = new_key
+    resolve_pending()
     while len(st.resolved_entities) > MAX_ENTITIES:
         st.resolved_entities.pop(next(iter(st.resolved_entities)))
     st.selected_chats = [int(c) for c in (selected or plan_chats)][:MAX_SELECTED]
@@ -477,6 +596,21 @@ def update_after_turn(
     return st
 
 
+def strip_text(state: ConvState) -> ConvState:
+    """Holatning **matnsiz** nusxasi: sarlavhalar va `topic` bo'sh, qolgani (id,
+    oyna, havolalar, raqamlar) o'zgarmaydi.
+
+    `_save_state` zaxira yo'li: taint qo'riqchisi matnli maydonda shubha
+    topsa, holat butunlay tashlanmaydi — aks holda `last_result.evidence_refs`
+    eski turn'da qolib, "shuni ruscha yoz" / "bu qaysi chatdan edi?" eski
+    dalilni o'qirdi (daily-30 t6/t7).
+    """
+    st = from_json(state.to_json())
+    st.resolved_entities = {key: {**val, "title": ""} for key, val in st.resolved_entities.items()}
+    st.topic = ""
+    return st
+
+
 def render_block(state: ConvState) -> str:
     """Planner uchun ixcham holat bloki — JSON, konvert ichida (sarlavhalar begona).
 
@@ -504,12 +638,16 @@ def render_block(state: ConvState) -> str:
         compact["topic"] = state.topic
     if state.language:
         compact["language"] = state.language
+    if state.pending_name:
+        compact["pending_name"] = state.pending_name
     body = U.neutralize(json.dumps(compact, ensure_ascii=False, default=str))
     return (
         f'<untrusted_data kind="conversation_state">\n{body}\n</untrusted_data>\n'
         "conversation_state: kept by code across turns. Resolve 'u/o'sha/shu odam/shu guruh/"
         "o'sha vaqt/он/him/that chat' from resolved_entities.last_entity and last_window "
-        "before anything else — do not clarify what the state already answers."
+        "before anything else — do not clarify what the state already answers. "
+        "pending_name: the user was just asked which of these chat ids they meant by that "
+        "name — their reply picks ONE of them (target only that chat id)."
     )
 
 
@@ -556,8 +694,13 @@ __all__ = [
     "has_referent",
     "is_follow_up",
     "load",
+    "name_collision",
+    "name_words",
     "render_block",
+    "resolve_entity",
+    "resolve_name",
     "save",
+    "strip_text",
     "update_after_turn",
     "window_of",
 ]

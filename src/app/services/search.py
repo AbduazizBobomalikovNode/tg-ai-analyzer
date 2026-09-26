@@ -156,6 +156,8 @@ class Hit:
     # ierarxiya darajasi: 0 — xom xabar (sukut), 1 epizod, 2 kun, 3 hafta.
     # Tugun kanalidan kelgan hit'da bu manba tugunning darajasi bo'ladi.
     level: int = 0
+    #: `messages.media_type` (`photo`, `document`, …) — dalil satrida `[photo]` belgisi.
+    media_type: str = ""
 
 
 @dataclass(slots=True)

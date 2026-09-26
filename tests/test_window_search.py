@@ -27,6 +27,7 @@ import pytest
 from app.llm.base import ChatResult, Usage
 from app.services import deep_search as DS
 from app.services import scale_search as SC
+from app.services import timewin as TW
 from app.services import window_search as WS
 from app.services.prompts_deep import (
     SCALE_FILTER_PROMPT,
@@ -1115,9 +1116,13 @@ def test_render_window_stats_carries_the_period_line() -> None:
     bounded = WS.WindowSpec(account_id=1, chats=None, since=_local(2026, 9, 1), until=NOW_25)
     stats = WS.WindowStats(direction="", per_chat=[WS.ChatStat(chat_id=1, n=6)])
     dated = WS.render_window_stats(count, titles={1: "A"}, stats=stats, spec=bounded)
-    since_str = bounded.since.strftime("%Y-%m-%d") if bounded.since else "—"
-    until_str = bounded.until.strftime("%Y-%m-%d")
-    assert f"period: {since_str} → {until_str}" in dated
+    # Sana **akkaunt mintaqasida** (item 7): mahalliy yarim tun (Toshkent) UTC da
+    # oldingi kunning 19:00 i — sarlavha baribir 2026-09-01 deydi, UTC sanasini emas.
+    tz = TW.zone(bounded.tz)
+    since_str = bounded.since.astimezone(tz).strftime("%Y-%m-%d") if bounded.since else "—"
+    until_str = bounded.until.astimezone(tz).strftime("%Y-%m-%d")
+    assert since_str == "2026-09-01"
+    assert f"period: {since_str} → {until_str} ({tz})" in dated
 
 
 def test_window_estimate_reports_weeks_days_and_chats_never_zero_weeks() -> None:

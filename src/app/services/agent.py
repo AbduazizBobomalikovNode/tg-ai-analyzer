@@ -194,7 +194,7 @@ def direct_intent_note(intent: str, locale: str) -> str:
     """
     from app.services.prompts_deep import capabilities_text
 
-    if intent == "meta":
+    if intent in ("meta", "meta_cost"):
         return (
             "Bu turn tizimning o'zi haqida: tool chaqirma, quyidagi ro'yxatdan "
             "foydalanuvchi tilida qisqa javob ber va ro'yxatda yo'q imkoniyatni "
@@ -307,6 +307,8 @@ _HINT_STOPWORDS = frozenset(
     tashkent bilan oxirgi marta nima nimalar haqida qachon kim kimlar bugun kecha hafta oy yil
     bu shu men meni menga mening biz bizning siz sizning uchun va yoki ham emas bor yoq
     gaplashganmiz gaplashdik yozgan yozdi dedi degan aytdi
+    shuni shunga shuning shundan shunda buni bunga buning bundan bunda uni unga uning undan
+    ularni ularga ularning
     the and for with from what when who last about this that
     chto kak kogda kto eto dlya ili posledniy poslednie
     """.split()

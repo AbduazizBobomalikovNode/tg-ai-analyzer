@@ -90,6 +90,7 @@ _MSG = {
         "no_reminders": "Kutayotgan eslatma yo'q.",
         "which_reminder": "Qaysi eslatmani bekor qilay? (hammasini — «hammasini bekor qil»)",
         "send_where": "Qaysi chatga yuboray? Chat nomini yoki @username ni yozing.",
+        "send_which": "«{name}» nomli bir nechta chat bor — qaysi biriga yuboray?\n{options}",
         "send_nothing": "Yuboradigan natija yo'q — avval qidiruv yoki xulosa kerak.",
         "send_empty": "\n\n---\nNatija bo'sh — hech narsa yuborish taklif qilinmadi. Boshqa davr "
         "yoki chatni ko'rsating.",
@@ -110,6 +111,7 @@ _MSG = {
         "no_reminders": "Нет ожидающих напоминаний.",
         "which_reminder": "Какое напоминание отменить? (все — «отмени все»)",
         "send_where": "В какой чат отправить? Напишите название или @username.",
+        "send_which": "Нашлось несколько чатов «{name}» — в какой отправить?\n{options}",
         "send_nothing": "Нечего отправлять — сначала нужен поиск или вывод.",
         "send_empty": "\n\n---\nРезультат пуст — отправка не предложена. Укажите другой период "
         "или чат.",
@@ -131,6 +133,8 @@ _MSG = {
         "no_reminders": "No pending reminders.",
         "which_reminder": "Which reminder should I cancel? (all of them — “cancel all”)",
         "send_where": "Which chat should I send it to? Give its title or @username.",
+        "send_which": "There are several chats named “{name}” — which one should I send it "
+        "to?\n{options}",
         "send_nothing": "Nothing to send yet — a search or summary is needed first.",
         "send_empty": "\n\n---\nThe result is empty — nothing was proposed for sending. Try "
         "another period or chat.",
@@ -571,6 +575,46 @@ async def _synth_current(ctx: RunState) -> str:
     return answer
 
 
+def send_target(ctx: RunState, args: dict[str, Any]) -> tuple[str | None, str]:
+    """Yuborish manzili → `(chat id yoki nom, aniqlashtirish matni)`.
+
+    Tartib: (1) holatdagi yechim (`conv_state.resolved_entities`) — "Otabekka
+    yubor" suhbatda allaqachon aniqlangan "Otabek" ga boradi, planner boshqa
+    "Otabek" chat id sini bergan bo'lsa ham; (2) planner bergan chat id;
+    (3) nom bir nechta shaxsiy chatga **teng** mos kelsa — so'raladi (hech
+    narsa taklif qilinmaydi); (4) aks holda nom `write_tools` ga o'tadi.
+    """
+    from app.services import agent as AG
+    from app.services import conv_state as CS
+
+    named = str(args.get("chat") or "").strip()[:120]
+    cid = args.get("chat_id")
+    conv = getattr(ctx, "conv", None)
+    ent = CS.resolve_name(conv, named) if named else None
+    if ent is None and isinstance(cid, int) and cid in ctx.chats_by_id:
+        # Planner id bergan, lekin savoldagi nom holatda **boshqa** "shu nomli"
+        # chatga bog'langan (bir nechta "Otabek": planner tasodifan boshqasini
+        # tanlagan) — holat yutadi.
+        asked = CS.resolve_entity(conv, ctx.raw_question)
+        if asked is not None and int(asked[1]["chat_id"]) != cid:
+            key_words = set(CS.name_words(asked[0]))
+            if key_words and key_words <= set(CS.name_words(ctx.chats_by_id[cid].title)):
+                ent = asked[1]
+    if ent is not None and int(ent["chat_id"]) in ctx.chats_by_id:
+        return str(int(ent["chat_id"])), ""
+    if isinstance(cid, int) and cid in ctx.chats_by_id:
+        return str(cid), ""
+    if not named:
+        return None, ""
+    hints = AG.chat_hints(named, list(ctx.chats_by_id.values()))
+    collision = CS.name_collision(hints, named)
+    if collision is not None:
+        key, tied = collision
+        options = "\n".join(f"- {U.attr(str(h.title))}" for h in tied[:3])
+        return None, _m(ctx, "send_which", name=U.attr(key, max_chars=40), options=options)
+    return named, ""
+
+
 async def _send_result(ctx: RunState, args: dict[str, Any]) -> SkillResult:
     """Oldingi qadam natijasi → **bitta** `send_message` taklifi (tasdiq bilan)."""
     from app.services import tools as T
@@ -578,12 +622,9 @@ async def _send_result(ctx: RunState, args: dict[str, Any]) -> SkillResult:
 
     if not SEND_INTENT_RE.search(ctx.raw_question):
         return _stop(_m(ctx, "no_intent"), proposed=False, reason="no_intent")
-    target: str | None = None
-    cid = args.get("chat_id")
-    if isinstance(cid, int) and cid in ctx.chats_by_id:
-        target = str(cid)
-    elif str(args.get("chat") or "").strip():
-        target = str(args["chat"]).strip()[:120]
+    target, ask = send_target(ctx, args)
+    if ask:
+        return _stop(ask, proposed=False, reason="ambiguous_target")
     if target is None:
         return _stop(_m(ctx, "send_where"), proposed=False, reason="no_target")
     source = str(args.get("text_from") or "answer")
