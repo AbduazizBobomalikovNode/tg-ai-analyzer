@@ -114,6 +114,7 @@ def test_distribution_facts_pick_the_busiest_bucket() -> None:
     assert got["top_weekday"] == "Wednesday" and got["top_weekday_n"] == 25
     assert got["wd_mon_n"] == 10 and got["wd_fri_n"] == 7
     assert got["top_hour"] == 22 and got["top_hour_n"] == 11
+    assert got["hr_09_n"] == 4 and got["hr_22_n"] == 11 and "hr_10_n" not in got
 
 
 def test_typed_gate_ignores_topical_questions() -> None:

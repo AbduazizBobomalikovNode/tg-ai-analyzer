@@ -154,6 +154,50 @@ def ranking_rows(facts: Sequence[Fact]) -> list[tuple[str, float | int]]:
     return [(name, value) for _, name, value in found]
 
 
+#: `stats(by=weekday|hour)` faktlari (`skills.distribution_facts`): `wd_<kun>_n`, `hr_<HH>_n`.
+_WD_KEYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+_WD_LABELS = {
+    "uz": ("Dushanba", "Seshanba", "Chorshanba", "Payshanba", "Juma", "Shanba", "Yakshanba"),
+    "ru": ("Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"),
+    "en": ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"),
+}
+_HOUR_NAME_RE = re.compile(r"^hr_(\d{2})_n$")
+_HOUR_WORD_RE = re.compile(r"\b(soat\w*|hour\w*|час\w*|время)\b")
+
+
+def distribution_rows(
+    facts: Sequence[Fact], *, locale: str = "uz", prefer: str = ""
+) -> tuple[str, list[tuple[str, float | int]]]:
+    """Hafta kuni / soat taqsimoti → `(tur, [(yorliq, son)])` (tur: weekday|hour|"").
+
+    Ilgari `format_output` bu faktlarni ko'rmasdi: "haftaning qaysi kuni ko'p
+    yozaman? jadval" da blok **chat reytingi** bo'lib chiqardi (jonli, conv 382).
+    `prefer` — "weekday"/"hour" yoki savol matni (soat so'zi bo'lsa soat).
+    """
+    by_name = {f.name: f for f in facts if f.numeric}
+    labels = _WD_LABELS.get(locale, _WD_LABELS["uz"])
+    wd: list[tuple[str, float | int]] = [
+        (labels[i], by_name[f"wd_{k}_n"].value)  # type: ignore[misc]
+        for i, k in enumerate(_WD_KEYS)
+        if f"wd_{k}_n" in by_name
+    ]
+    hours: list[tuple[int, float | int]] = []
+    for name, f in by_name.items():
+        m = _HOUR_NAME_RE.match(name)
+        if m:
+            hours.append((int(m.group(1)), f.value))  # type: ignore[arg-type]
+    hours.sort()
+    hr = [(f"{h:02d}:00", v) for h, v in hours]
+    want_hour = prefer == "hour" or (
+        prefer not in ("weekday", "hour") and bool(_HOUR_WORD_RE.search(_fold(prefer)))
+    )
+    if hr and (want_hour or not wd):
+        return "hour", hr
+    if wd:
+        return "weekday", wd
+    return "", []
+
+
 def numeric_rows(facts: Sequence[Fact]) -> list[tuple[str, str, float | int]]:
     """Umumiy faktlar jadvali: `(nom, izoh, qiymat)` — faqat raqamlilar."""
     out: list[tuple[str, str, float | int]] = []
@@ -368,6 +412,7 @@ __all__ = [
     "chart_spec",
     "count_series",
     "detect_format",
+    "distribution_rows",
     "ensure_blocks",
     "extract_blocks",
     "fill_series",

@@ -283,3 +283,47 @@ async def test_skill_without_numbers_is_a_noop() -> None:
     ctx = _ctx("jadval qil", [Fact("period", "2026-09", source="x")])
     res = await SX._format_output(ctx, {})
     assert ctx.claims == [] and res.summary["rows"] == 0 and res.notes
+
+
+def _weekday_facts() -> list[Fact]:
+    days = {"mon": 2916, "tue": 2285, "wed": 2776, "thu": 2249, "fri": 2217, "sat": 1695}
+    facts = [Fact(f"wd_{k}_n", v, source="stats") for k, v in days.items()]
+    facts.append(Fact("wd_sun_n", 1643, source="stats"))
+    return facts
+
+
+def test_distribution_rows_weekday_order_and_hour_preference() -> None:
+    kind, rows = OF.distribution_rows(list(reversed(_weekday_facts())), locale="uz")
+    assert kind == "weekday"
+    assert [label for label, _ in rows][:2] == ["Dushanba", "Seshanba"]
+    assert rows[-1] == ("Yakshanba", 1643)
+    hours = [Fact("hr_09_n", 5, source="stats"), Fact("hr_21_n", 12, source="stats")]
+    kind, rows = OF.distribution_rows(_weekday_facts() + hours, prefer="soat nechada ko'p")
+    assert kind == "hour" and rows == [("09:00", 5), ("21:00", 12)]
+    assert OF.distribution_rows(_weekday_facts() + hours, prefer="weekday")[0] == "weekday"
+    assert OF.distribution_rows(_ranking_facts()) == ("", [])
+
+
+async def test_skill_weekday_table_beats_ranking() -> None:
+    # Jonli (conv 382): "haftaning qaysi kuni … jadval" — blok chat reytingi bo'lib chiqardi.
+    ctx = _ctx(
+        "haftaning qaysi kuni ko'p yozaman? jadval qilib ber", _weekday_facts() + _ranking_facts()
+    )
+    res = await SX._format_output(ctx, {"format": "table"})
+    assert res.summary == {"format": "table", "kind": "weekday", "rows": 7}
+    [block] = OF.extract_blocks(ctx.claims)
+    assert "| Dushanba | 2916 |" in block and "Ish" not in block
+    # Aniq "ranking" so'ralsa — reyting.
+    ctx = _ctx("jadval", _weekday_facts() + _ranking_facts())
+    res = await SX._format_output(ctx, {"series": "ranking"})
+    assert res.summary["kind"] == "ranking"
+
+
+async def test_skill_hour_chart_from_hour_facts() -> None:
+    facts = [Fact("hr_08_n", 3, source="stats"), Fact("hr_22_n", 7, source="stats")]
+    ctx = _ctx("soat nechada yozaman, diagramma", facts)
+    res = await SX._format_output(ctx, {})
+    assert res.summary["kind"] == "hour"
+    [block] = OF.extract_blocks(ctx.claims)
+    spec = json.loads(block.split("\n")[1])
+    assert spec["labels"] == ["08:00", "22:00"] and spec["series"][0]["values"] == [3, 7]

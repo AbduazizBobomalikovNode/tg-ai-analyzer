@@ -979,6 +979,18 @@ def distribution_facts(agg: Any) -> list[Fact]:
             )
     by_hour = list(getattr(agg, "by_hour", []) or [])
     if by_hour:
+        # Har soat soni — `format_output` soat jadvali/diagrammasi shundan chiziladi
+        # (`output_formats.distribution_rows`); faqat nol bo'lmagan soatlar.
+        for hour, n in sorted(by_hour):
+            if 0 <= int(hour) <= 23 and int(n):
+                out.append(
+                    Fact(
+                        f"hr_{int(hour):02d}_n",
+                        int(n),
+                        label=f"messages at {int(hour):02d}:00-{int(hour):02d}:59 (local)",
+                        source="stats",
+                    )
+                )
         top_hour, top_n = max(by_hour, key=lambda p: (p[1], -p[0]))
         out.append(
             Fact(

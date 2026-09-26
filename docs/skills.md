@@ -9,7 +9,7 @@ yuklangan modulni ko'rib, hech narsani ro'yxatga olmasdi.
 
 | Ko'nikma | Argumentlar | Rejim | Karantin | Tasdiq | Terminal |
 |---|---|---|---|---|---|
-| `format_output` | `format` (table/chart/list), `chart` (bar/line/pie), `series` (ranking/per_day/facts), `title` | fast | yo'q | yo'q | yo'q |
+| `format_output` | `format` (table/chart/list), `chart` (bar/line/pie), `series` (ranking/per_day/facts/weekday/hour), `title` | fast | yo'q | yo'q | yo'q |
 | `create_alert` | `kind` (keyword/semantic), `pattern`, `chat_id`, `cooldown_minutes` | fast | yo'q | har rejimda | ha |
 | `set_briefing` | `hour`, `chat_ids` | fast | yo'q | har rejimda | ha |
 | `remind` | `when` (ibora/ISO, zaxira), `text`, `job_ids` | fast | yo'q | har rejimda | ha |
@@ -22,7 +22,9 @@ ya'ni skan baho kartasi chiqmaydi.
 
 ## `format_output` (`services/output_formats.py`)
 
-LLM yo'q. Raqam faqat `ctx.facts` dan (`stats`: `top{i}_n`, `total`, …) yoki
+LLM yo'q. Hafta kuni / soat taqsimoti (`stats(by=…)` → `wd_<kun>_n`, `hr_<HH>_n`,
+`distribution_rows`) chat reytingidan **ustun** — aks holda "haftaning qaysi kuni …
+jadval" da blok reyting bo'lib chiqardi. Raqam faqat `ctx.facts` dan (`stats`: `top{i}_n`, `total`, …) yoki
 `count(*)` dan (`count_series` — oynadagi xabarlar lokal kun/hafta/oy
 bo'yicha, `accounts.tz`). Chiqish:
 
@@ -98,6 +100,10 @@ Matn manbasi:
 - joriy turn'da dalil/da'vo bo'lsa — **bitta** `DS.synthesize` (yagona
   dalil konverti, `taint.add`), shu matn ham javob, ham yuboriladigan matn;
 - aks holda — suhbatning oxirgi assistant javobi (DB'dan to'liq).
+
+Joriy turn qidirib hech narsa topmasa (`ranked` bo'sh va `chat_total`/`total` = 0 —
+`turn_found_nothing`) taklif **yaratilmaydi**, javob oxiriga `send_empty` izohi
+qo'shiladi: "topilmadi" matni uchinchi odamga yuborilmasin.
 
 `clean_for_send`: sitata tokenlari, qamrov/qadamlar izohi va ```chart
 olib tashlanadi, ≤4000 belgi. Taklif `write_tools.propose_or_execute

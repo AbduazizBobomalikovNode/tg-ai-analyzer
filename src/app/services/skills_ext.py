@@ -73,7 +73,8 @@ SEND_EVIDENCE_LINES = 40
 
 
 def _loc(ctx: RunState) -> str:
-    return ctx.locale if ctx.locale in ("uz", "ru", "en") else "uz"
+    loc = getattr(ctx, "locale", "uz")
+    return loc if loc in ("uz", "ru", "en") else "uz"
 
 
 _MSG = {
@@ -90,6 +91,8 @@ _MSG = {
         "which_reminder": "Qaysi eslatmani bekor qilay? (hammasini — «hammasini bekor qil»)",
         "send_where": "Qaysi chatga yuboray? Chat nomini yoki @username ni yozing.",
         "send_nothing": "Yuboradigan natija yo'q — avval qidiruv yoki xulosa kerak.",
+        "send_empty": "\n\n---\nNatija bo'sh — hech narsa yuborish taklif qilinmadi. Boshqa davr "
+        "yoki chatni ko'rsating.",
         "send_proposed": "\n\n---\nYuborish taklifi #{id} → «{chat}»: xabar hali "
         "**yuborilmadi**. Amallar sahifasida matnni ko'rib, tasdiqlang.",
         "send_failed": "\n\n---\nYuborish taklifini tayyorlab bo'lmadi: {err}",
@@ -108,6 +111,8 @@ _MSG = {
         "which_reminder": "Какое напоминание отменить? (все — «отмени все»)",
         "send_where": "В какой чат отправить? Напишите название или @username.",
         "send_nothing": "Нечего отправлять — сначала нужен поиск или вывод.",
+        "send_empty": "\n\n---\nРезультат пуст — отправка не предложена. Укажите другой период "
+        "или чат.",
         "send_proposed": "\n\n---\nПредложение отправки #{id} → «{chat}»: сообщение ещё "
         "**не отправлено**. Проверьте текст и подтвердите на странице действий.",
         "send_failed": "\n\n---\nНе удалось подготовить отправку: {err}",
@@ -127,6 +132,8 @@ _MSG = {
         "which_reminder": "Which reminder should I cancel? (all of them — “cancel all”)",
         "send_where": "Which chat should I send it to? Give its title or @username.",
         "send_nothing": "Nothing to send yet — a search or summary is needed first.",
+        "send_empty": "\n\n---\nThe result is empty — nothing was proposed for sending. Try "
+        "another period or chat.",
         "send_proposed": "\n\n---\nSend proposal #{id} → “{chat}”: the message has **not** been "
         "sent. Review the text on the Actions page and confirm.",
         "send_failed": "\n\n---\nCould not prepare the send proposal: {err}",
@@ -201,13 +208,47 @@ async def _format_output(ctx: RunState, args: dict[str, Any]) -> SkillResult:
     series_arg = str(args.get("series") or "")
     ranking = OF.ranking_rows(facts)
     title = U.neutralize(str(args.get("title") or "")).strip()[:80]
-    want_time = series_arg == "per_day" or (
-        series_arg != "ranking" and (choice.time_series or (choice.fmt == "chart" and not ranking))
+    # Hafta kuni / soat taqsimoti (`stats(by=…)`) reytingdan ustun: "haftaning qaysi
+    # kuni … jadval" da blok ilgari chat reytingi bo'lib chiqardi.
+    dist_kind, dist = OF.distribution_rows(
+        facts,
+        locale=_loc(ctx),
+        prefer=series_arg if series_arg in ("weekday", "hour") else ctx.raw_question,
+    )
+    explicit_time = series_arg == "per_day" or bool(
+        OF._TIME_SERIES_RE.search(OF._fold(ctx.raw_question))
+    )
+    want_dist = (
+        bool(dist)
+        and series_arg not in ("ranking", "per_day", "facts")
+        and (series_arg in ("weekday", "hour") or not explicit_time)
+    )
+    want_time = not want_dist and (
+        series_arg == "per_day"
+        or (
+            series_arg != "ranking"
+            and (choice.time_series or (choice.fmt == "chart" and not ranking))
+        )
     )
     block = ""
     new_facts: list[Fact] = []
     kind = ""
     rows = 0
+    if want_dist:
+        kind = dist_kind
+        rows = len(dist)
+        if choice.fmt == "chart":
+            spec = OF.chart_spec(
+                [label for label, _ in dist],
+                [("messages", [v for _, v in dist])],
+                kind="bar",
+                title=title,
+            )
+            block = OF.render_chart(spec) if spec else ""
+        elif choice.fmt == "list":
+            block = OF.render_list(dist)
+        else:
+            block = OF.render_table([dist_kind, "messages"], dist, numeric_cols=(1,))
     if want_time:
         block, new_facts, rows = await _time_series_block(ctx, choice, title)
         kind = "series"
@@ -434,6 +475,26 @@ async def _cancel_reminder(ctx: RunState, args: dict[str, Any]) -> SkillResult:
 # ─── 5. send_result ──────────────────────────────────────────────────────────
 
 
+#: Joriy turn natijasining hajmini bildiradigan sanoq faktlari (`chat_digest`, `stats`).
+EMPTY_COUNT_FACTS = ("chat_total", "total")
+
+
+def turn_found_nothing(ctx: RunState) -> bool:
+    """Joriy turn qidirdi, dalil yo'q va sanoq faktlari hammasi 0 — yuboradigan narsa yo'q.
+
+    Sanoq fakti umuman bo'lmasa (masalan faqat oldingi javobni yuborish) — `False`:
+    bu holatda matn manbasi oldingi javob.
+    """
+    if ctx.ranked:
+        return False
+    counts = [
+        ctx.facts[name].value
+        for name in EMPTY_COUNT_FACTS
+        if name in ctx.facts and ctx.facts[name].numeric
+    ]
+    return bool(counts) and all(float(v or 0) == 0 for v in counts)
+
+
 def clean_for_send(text: str) -> str:
     """Yuboriladigan matn: sitata tokenlari, qamrov/qadamlar izohi va chart fence'larsiz."""
     body = text or ""
@@ -539,6 +600,15 @@ async def _send_result(ctx: RunState, args: dict[str, Any]) -> SkillResult:
         text = facts_text(ctx)
     if not text:
         return _stop(_m(ctx, "send_nothing"), proposed=False, reason="empty")
+    if turn_found_nothing(ctx):
+        # Joriy turn qidirdi va hech narsa topmadi — "topilmadi" matnini uchinchi
+        # odamga yuborish taklifi foydasiz (jonli: conv 385, taklif #518).
+        head = clean_for_send(shown) if shown else ""
+        return _result(
+            answer=f"{head}{_m(ctx, 'send_empty')}".strip(),
+            stop=True,
+            summary={"proposed": False, "intent": "send_result", "reason": "empty_result"},
+        )
     async with ctx.session_factory() as session:
         run_id = await _ensure_run(ctx, session)
         tctx = T.ToolContext(

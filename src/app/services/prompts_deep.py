@@ -761,7 +761,11 @@ own words — never message text). "u", "uni", "o'sha odam", "shu guruh", "o'sha
 FIRST — target that chat id, never `clarify` who "u" is when the state names them. A \
 follow-up without a new period keeps last_window. `reuse_prior` re-reads \
 last_result.evidence_refs. A correction ("yo'q, men boshqasini…") or a new subject drops \
-the old entity/window. <chat_hints> are chats whose title matches a name in the question.
+the old entity/window. <chat_hints> are chats whose title matches a name in the question. \
+When the question is about what a person said/wrote ("Otabek nima dedi?", "что писал Иван") \
+and <chat_hints> lists private chat(s) with that name, target those private chat ids (up to \
+3) — the user means their own conversation with that person, not public figures who share \
+the name. Search all chats only when the user says so ("hamma chatlarda", "everywhere").
 
 ## Examples
 selected chat "Honadoshlar" / latest: "bu chatda nima bor edi!"

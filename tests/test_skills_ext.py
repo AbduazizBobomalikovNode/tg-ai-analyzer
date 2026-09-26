@@ -230,3 +230,37 @@ async def test_send_result_empty_is_refused(proposals: list[dict[str, Any]]) -> 
 def test_clean_for_send() -> None:
     assert SX.clean_for_send("A #c1m2 va [#x3] B\n\n\n\nC") == "A va B\n\nC"
     assert len(SX.clean_for_send("x" * 10_000)) == SX.SEND_TEXT_MAX
+
+
+async def test_send_result_empty_turn_result_is_not_proposed(
+    proposals: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Jonli (conv 385): kecha guruhda 0 xabar — "topilmadi" matni Otabekka taklif qilinardi.
+    async def fake_synth(meter: Any, question: str, evidence: Any, clusters: Any, **kw: Any):
+        return "Kecha guruhda xabar topilmadi.", [], None
+
+    monkeypatch.setattr(DS, "synthesize", fake_synth)
+    monkeypatch.setattr(DS, "to_evidence", lambda *a, **k: [])
+    ctx = _ctx(
+        "kecha Jamoa guruhida nima bo'lganini yozib, Otabekka yubor",
+        _Session(),
+        facts={"chat_total": Fact("chat_total", 0, label="messages in the chat(s)")},
+        claims=["chat Jamoa: 0 messages"],
+        meter=None,
+        taint=SimpleNamespace(add=lambda *_: None),
+        server_out=DS.ServerOutcome(),
+    )
+    res = await SX._send_result(ctx, {"chat_id": 12})
+    assert proposals == [] and res.stop
+    assert res.summary == {"proposed": False, "intent": "send_result", "reason": "empty_result"}
+    assert res.answer.startswith("Kecha guruhda xabar topilmadi.")
+    assert "taklif qilinmadi" in res.answer
+
+
+def test_turn_found_nothing() -> None:
+    s = _Session()
+    zero = {"chat_total": Fact("chat_total", 0)}
+    assert SX.turn_found_nothing(_ctx("x", s, facts=zero))
+    assert not SX.turn_found_nothing(_ctx("x", s, facts=zero, ranked=[object()]))
+    assert not SX.turn_found_nothing(_ctx("x", s, facts={"total": Fact("total", 3)}))
+    assert not SX.turn_found_nothing(_ctx("x", s))  # sanoq yo'q — oldingi javob manbasi
