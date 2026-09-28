@@ -14,6 +14,10 @@ chaqiradi. Bu yerdagi besh ko'nikma:
   natijasini `write_tools.propose_or_execute("send_message")` orqali **bitta**
   taklifga aylantiradi; matn Actions sahifasida to'liq ko'rinadi,
   `assert_writable` / peer guard / `read_only` o'zgarmagan.
+* `trends` (`services/trends.py`) — ko'rish/reaksiya o'sishi
+  `message_metric_snapshots` dan, SQL; `extract` (`services/extract.py`) —
+  havola/manzil/narx/sana/fayl/mention ajratish, regex; telefon raqami hech
+  qachon chiqmaydi. Ikkalasi LLM'siz, karantinda (xabar matnini ko'radi).
 
 Taint: planner bu modul chiqishini ko'rmaydi — `summary` da faqat sanoq va
 bayroqlar. `send_result` karantinda (sintez qilingan matnni o'qiydi).
@@ -787,7 +791,43 @@ def ext_skills() -> tuple[Skill, ...]:
         terminal=True,
         confirm_modes=all_modes,
     )
-    return (*ext, cancel)
+    return (*ext, cancel, *analysis_skills())
+
+
+def analysis_skills() -> tuple[Skill, ...]:
+    """`trends` / `extract` — faqat o'qish, LLM'siz, karantinda (xabar matnini ko'radi)."""
+    from app.services import trends as TR
+    from app.services.skills import Skill
+
+    return (
+        Skill(
+            "trends",
+            "ko'rish / reaksiya / forward O'SISHI metric snapshot'lardan (SQL, LLM yo'q): top "
+            "postlar, jami o'sish, oldingi teng davrga nisbatan %. metric=views|reactions|"
+            "forwards|replies, top_n, compare=no — taqqoslashsiz, scope=all — barcha chatlar. "
+            "Misol: «bu hafta qaysi post eng ko'p ko'rildi» → trends(metric=views, top_n=5); "
+            "«kanal ko'rishlari o'tgan haftaga nisbatan o'sdimi» → trends(chat_id=…)",
+            "views / reactions / forwards GROWTH from metric snapshots (SQL, no LLM): top posts, "
+            "total growth, % vs the previous equal window. metric=views|reactions|forwards|"
+            "replies, top_n, compare=no to skip the comparison, scope=all for every chat. "
+            "Example: 'top 5 posts by reactions this month' → trends(metric=reactions, "
+            "top_n=5); 'did the channel's views grow compared to last week' → trends(chat_id=…)",
+            {
+                "chat_id": "int",
+                "scope": "str",
+                "period": "str",
+                "metric": "str",
+                "top_n": "int",
+                "compare": "str",
+            },
+            0.0,
+            1.5,
+            "fast",
+            quarantined=True,
+            run=TR.run_trends,
+            rail=("stats",),
+        ),
+    )
 
 
 def register(registry: dict[str, Skill]) -> None:

@@ -24,8 +24,18 @@ from app.services import skills_ext as SX
 from app.services import write_tools as W
 from app.services.compute import Fact
 
-NEW = {"format_output", "create_alert", "set_briefing", "remind", "cancel_reminder", "send_result"}
+NEW = {
+    "format_output",
+    "create_alert",
+    "set_briefing",
+    "remind",
+    "cancel_reminder",
+    "send_result",
+    "trends",
+}
 WRITES = {"create_alert", "set_briefing", "remind", "cancel_reminder", "send_result"}
+#: Begona xabar matnini ko'radi — chiqishi planner'ga tushmaydi.
+QUARANTINED = {"send_result", "trends"}
 
 
 def test_register_adds_skills_without_touching_core() -> None:
@@ -56,7 +66,7 @@ def test_skill_flags() -> None:
     assert set(reg) == NEW
     for name, s in reg.items():
         assert s.min_mode == "fast" and s.allowed("fast")
-        assert s.quarantined is (name == "send_result")
+        assert s.quarantined is (name in QUARANTINED)
         for mode in ("fast", "deep", "exhaustive"):
             assert s.needs_confirm(mode) is (name in WRITES)
         assert s.description_uz and s.description_en
@@ -264,3 +274,15 @@ def test_turn_found_nothing() -> None:
     assert not SX.turn_found_nothing(_ctx("x", s, facts=zero, ranked=[object()]))
     assert not SX.turn_found_nothing(_ctx("x", s, facts={"total": Fact("total", 3)}))
     assert not SX.turn_found_nothing(_ctx("x", s))  # sanoq yo'q — oldingi javob manbasi
+
+
+def test_analysis_skills_catalog_entries() -> None:
+    """`trends` / `extract`: LLM'siz (0$), yozish emas, katalogda ikki misol bilan."""
+    reg = {s.name: s for s in SX.ext_skills()}
+    for name in ("trends",):
+        s = reg[name]
+        assert s.cost_usd == 0.0 and not s.confirm_modes and not s.terminal
+        assert s.description_uz.count("→") >= 2 and s.description_en.count("→") >= 2
+    assert set(reg["trends"].args) == {"chat_id", "scope", "period", "metric", "top_n", "compare"}
+    got = SK.coerce_args(reg["trends"], {"metric": "reactions", "top_n": "5", "compare": True})
+    assert got == {"metric": "reactions", "top_n": 5}

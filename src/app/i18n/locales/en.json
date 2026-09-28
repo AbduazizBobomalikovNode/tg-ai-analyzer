@@ -256,6 +256,7 @@
   "web.skill.remind": "Reminder proposal",
   "web.skill.cancel_reminder": "Reminder cancellation proposal",
   "web.skill.send_result": "Send-result proposal",
+  "web.skill.trends": "Views / reactions growth",
   "web.skill.automation_note": "Created only after you confirm — nothing is written to Telegram.",
   "web.dash.actions": "Write actions",
   "web.pending.title": "Actions awaiting confirmation",

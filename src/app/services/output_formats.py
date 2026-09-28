@@ -79,6 +79,9 @@ _PIE_RE = re.compile(r"\b(doira\w*|pie|кругов\w*)\b")
 
 _TOP_NAME_RE = re.compile(r"^top(\d+)_n$")
 _TOP_LABEL_RE = re.compile(r'#\d+\s+"(.*)"\s*$')
+#: `render_table(raw_cols=…)` — faqat sitata tokenlari (bo'sh joy bilan ajratilgan).
+_CITE_CELL = r"#(?:c\d{1,12}m\d{1,12}|x\d{1,12})"
+_RAW_CELL_RE = re.compile(rf"{_CITE_CELL}(?: {_CITE_CELL})*")
 
 
 def _fold(text: str) -> str:
@@ -212,9 +215,18 @@ def numeric_rows(facts: Sequence[Fact]) -> list[tuple[str, str, float | int]]:
 
 
 def render_table(
-    headers: Sequence[str], rows: Sequence[Sequence[Any]], *, numeric_cols: Sequence[int] = ()
+    headers: Sequence[str],
+    rows: Sequence[Sequence[Any]],
+    *,
+    numeric_cols: Sequence[int] = (),
+    raw_cols: Sequence[int] = (),
 ) -> str:
-    """GFM jadval. Raqamli ustun o'ngga tekislanadi (`---:`)."""
+    """GFM jadval. Raqamli ustun o'ngga tekislanadi (`---:`).
+
+    `raw_cols` — **kodda yasalgan** qiymatlar (sitata tokeni `#c<chat>m<msg>`):
+    `cell()` ularga U+200B qo'yib tokenni buzardi. Faqat token naqshiga mos
+    qiymat xom o'tadi, qolgani baribir `cell()` dan.
+    """
     if not rows:
         return ""
     head = "| " + " | ".join(cell(h) for h in headers) + " |"
@@ -222,7 +234,9 @@ def render_table(
     body = []
     for row in rows[:TABLE_MAX_ROWS]:
         vals = [
-            fmt_number(v) if i in numeric_cols and not isinstance(v, str) else cell(v)
+            fmt_number(v)
+            if i in numeric_cols and not isinstance(v, str)
+            else (str(v) if i in raw_cols and _RAW_CELL_RE.fullmatch(str(v)) else cell(v))
             for i, v in enumerate(row)
         ]
         body.append("| " + " | ".join(vals) + " |")

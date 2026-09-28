@@ -105,6 +105,11 @@ ignore = ["S101"]  # assert allowed in tests
 "tests/test_scheduled.py" = ["RUF001", "RUF002", "RUF003"]
 "tests/test_window_search.py" = ["RUF001", "RUF002", "RUF003"]
 "tests/test_entities.py" = ["RUF001", "RUF002", "RUF003"]
+# trends/extract/export: metrika so'zlari, manzil/narx/sana naqshlari uchta tilda.
+# `S608` — trends SQL'iga faqat `trends.METRICS` oq ro'yxatidagi ustun nomi qo'shiladi,
+# qiymatlar esa bind parametr; foydalanuvchi kiritmasi SQL matniga tushmaydi.
+"src/app/services/trends.py" = ["S608", "RUF001", "RUF002", "RUF003"]
+"tests/test_trends.py" = ["RUF001", "RUF002", "RUF003"]
 # perf o'lchovi: korpus **sintetik** — `random` shu yerda kriptografiya emas,
 # takrorlanadigan urug' (S311). `S608` esa `EXPLAIN` uchun o'zimiz kompilyatsiya
 # qilgan SQL matnini oldiga qo'shishdan kelib chiqadi, foydalanuvchi kiritmasi yo'q.

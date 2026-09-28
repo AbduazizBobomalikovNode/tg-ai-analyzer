@@ -15,6 +15,7 @@ yuklangan modulni ko'rib, hech narsani ro'yxatga olmasdi.
 | `remind` | `when` (ibora/ISO, zaxira), `text`, `job_ids` | fast | yo'q | har rejimda | ha |
 | `cancel_reminder` | `job_ids` | fast | yo'q | har rejimda | ha |
 | `send_result` | `chat_id` / `chat`, `text_from` (answer/facts) | fast | **ha** | har rejimda | yo'q (o'zi to'xtaydi) |
+| `trends` | `chat_id`, `scope` (all), `period`, `metric` (views/reactions/forwards/replies), `top_n`, `compare` (no) | fast | **ha** | yo'q | yo'q |
 
 "Tasdiq" — `Skill.confirm_modes` (katalogda "asks for confirmation"). Bu
 `agent_actions` tasdig'i: ko'nikma `needs_confirm` natijasini **qo'ymaydi**,
@@ -115,6 +116,34 @@ shaxsiy chatga **teng** mos kelsa — `send_which` bilan so'raladi, taklif yo'q;
 olib tashlanadi, ≤4000 belgi. Taklif `write_tools.propose_or_execute
 ("send_message")` — `assert_writable`, peer guard, `read_only`,
 `autonomous` qoidalari o'zgarmagan. Manzil aniq aytilmasa — so'raladi.
+
+## `trends` (`services/trends.py`)
+
+"bu hafta qaysi post eng ko'p ko'rildi", "reaksiyalar bo'yicha top 5",
+"o'tgan haftaga nisbatan ko'rishlar". SQL, LLM yo'q. Planner katalogi:
+`trends(metric=views, top_n=5)`, `trends(chat_id=…)` (misollar tavsifda).
+
+Semantika (`[since, until)`, oyna: `period` → reja oynasi → oxirgi 7 kun):
+
+- **Post o'sishi** — oynada ≥1 snapshoti bor har post: `end` = oynadagi
+  oxirgi snapshot; `start` = post oynada chop etilgan bo'lsa **0** (`born`),
+  aks holda oyna boshidan oldingi 3 kun (`BASELINE_LOOKBACK`) ichidagi oxirgi
+  snapshot (`baseline`), u ham bo'lmasa oynadagi birinchi snapshot
+  (`partial` — o'sish kam hisoblanadi; yolg'iz snapshot → noma'lum,
+  `tr_unknown_n`). `delta = end − start`, kesilmaydi.
+- **Jami** `tr_total_delta` va oldingi **teng** oyna `[since − L, since)`
+  (`tr_prev_total_delta`, `tr_delta_pct_change` — faqat oldingi > 0).
+- **Chop etilganlar** — oynada chop etilgan postlar `messages.<metric>`
+  **oxirgi** qiymati (`tr_posts`, `tr_posts_latest_sum`, oldingi oyna bilan
+  `tr_posts_pct_change`). Snapshot umuman yo'q bo'lsa reyting shundan
+  (`tr_top{i}_latest`) va blokda "Snapshot yo'q — faqat oxirgi qiymat".
+- Bo'shliqlar: `tr_partial_n` (bazasiz postlar), oxirgi snapshot ≥24 soat
+  eski bo'lsa `tr_last_snapshot_age_h` + blok izohi.
+
+Chiqish: `tr_*` faktlar, top postlar jadvali (`wrap_block`: chat, sana,
+o'sish, oxirgi qiymat, sitata tokeni — xabar matni yo'q) va top postlar
+dalil sifatida (`S.Hit`, `neutralize`). Karantinda: matnni ko'radi.
+Metrika ustuni oq ro'yxatdan (`METRICS`) — SQL'ga boshqa nom tushmaydi.
 
 ## Orkestrator bilan ma'lum chegaralar (ulagich egasi uchun)
 
