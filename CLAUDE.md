@@ -310,6 +310,22 @@ ularni tartibda yuritadi. Rejim — faqat **qopqoq**: `fast` ≤ `search_server`
   `clarify` (`conv_state.pending_name`), yechim bo'lsa manzilli qadamlar
   (`send_result` ham) o'shani oladi. Oyna sarlavhasi va qamrov "oraliq" —
   akkaunt `tz` sida.
+- **So'z = chat nomi** (jonli daily-40 "Oyga qancha xabar yozdim?"):
+  `conv_state.word_chat_ambiguity` — savol so'zi (qo'shimchasiz) umumiy so'z
+  (`COMMON_NAME_WORDS`: oy/hafta/kun/yil, kanal, guruh, ish, dars, uy, bozor…,
+  uz/ru/en) **va** akkaunt chatining to'liq nomi/`@username` bo'lsa. O'qilishni
+  **tuzilma** hal qiladi (kodda): qo'shtirnoq / `@` / "… chati" / tanlangan
+  chat / holatdagi yechim → chat (maslahat birinchi, `plan.chats`); "bu/o'tgan/
+  har/necha/raqam" oldida yoki egalik "oyiga" → oddiy so'z; oddiy kelishik
+  ("Oyga", "Oyda") hech narsani hal qilmaydi → planner `ambiguous_name:`
+  satrini oladi (15-qoida) va kod **bitta** `clarify` qo'yadi (variantlar:
+  "«Oy» chati" / "shu oy (vaqt)" — javob sifatida qaytsa o'zi tuzilma).
+  Chat yo'q (yoki so'z o'qilishi) → aniqlovchisiz "Oyga/haftada/yilda" +
+  sanoq so'zi = **joriy davr** (`orchestrator.bare_period` → `this_month`…),
+  `timewin` ga tegilmagan.
+- **Foydalanuvchi xotirasi** — pastdagi bo'limga qarang (`user_memory`,
+  migratsiya 0026): planner `user_memory` blokini (16-qoida), sintez
+  afzallik/fakt izohini oladi; alias `resolved_entities` ga.
 - **Katalog** (`skills.SKILLS`): `answer_direct`, `clarify`, `reuse_prior`,
   `chat_digest`, `stats`, `compute`, `window`, `search_local`,
   `search_server`, `discover`, `scan_corpus`, `write_propose`. Har biri —
@@ -351,6 +367,45 @@ ularni tartibda yuritadi. Rejim — faqat **qopqoq**: `fast` ≤ `search_server`
   `assert_clean("replan")`.
 - **Qaytish**: `ORCHESTRATOR=false` → eski `_run_pipeline`
   (`run_deep_search(orchestrate=...)`, kutubxona sukuti `False`).
+
+### Foydalanuvchi xotirasi (`services/user_memory.py`, migratsiya 0026)
+
+`user_memories` (id, user_id, kind `fact|preference|alias`, key, value,
+source_conversation_id, created_at, last_used_at, enabled) + `users.memory_enabled`.
+Suhbatlar **orasida** yashaydi (holat — bitta suhbat ichida).
+
+- **Rozilik (qaror):** sukut bo'yicha yoqiq, lekin to'liq ko'rinadi — har yozuv
+  Sozlamalar → Xotira'da (tur belgisi, qiymat, manba suhbat havolasi, sana),
+  alohida o'chirish/o'chirib qo'yish, global kalit. Saqlangan turn javobi
+  oxirida **bitta** qator: "_Eslab qoldim: … (Sozlamalar → Xotira)_"
+  (`orchestrator.with_memory_note`). Kalit o'chiq → na ishlatiladi, na yoziladi,
+  na LLM chaqiriladi.
+- **Faqat user turn'idan** (`question`) — tarix, dalil, xabar matni hech qachon.
+  Sir hech qachon: `is_sensitive` (telefon ≥7 raqam, 4+ ketma-ket raqam,
+  kod/parol/token/karta/SMS so'zlari, e-mail, `logging.scrub_text` shakllari)
+  turn darajasida — bunday turn'dan **hech narsa** olinmaydi — va qiymat
+  darajasida. Testlar qo'riqlaydi; yumshatmang.
+- **Ajratish:** deterministik naqshlar birinchi (alias "X deganda Y guruhini
+  nazarda tutaman" / "когда я говорю… я имею в виду" / "when I say… I mean",
+  "meni X deb chaqir" → `alias self`; afzallik til/uzunlik — "shuni/buni" yoki
+  savol turn'i bo'lsa faqat eslatma so'zi bilan, format faqat "har doim…";
+  fakt "men Samarqanddaman", "ish vaqtim 9–18"). **Bitta** `Task.ROUTE`
+  (`MEMORY_EXTRACT_PROMPT`) faqat eslatma so'zi bo'lsa **va** naqsh hech narsa
+  topmasa; LLM alias/fakt qiymati user matnida bo'lishi shart (`_grounded`).
+  ≤100 yozuv, dedup fold qilingan kalit bo'yicha (bir xil qiymat — yozilmaydi).
+- **Ishlatish** (`orchestrator._prepare_memory_and_names`, byudjetdan keyin,
+  kod darvozasidan **oldin**): til afzalligi → `ctx.locale`; `length=short` →
+  `output_budget=short`; savolda nomlangan alias → `alias_matches` (kalit
+  so'zlari savolda + qiymat `chat_hints` bilan chatga) → maslahat **birinchi**,
+  `plan.chats`, `conv_state.resolved_entities`. Planner — `<untrusted_data
+  kind="user_memory">` bloki (+ `memory_saved:` satri, 16-qoida), sintez —
+  `synth_note`. `last_used_at` — bitta UPDATE.
+- API (CSRF + egalik SQL'da): `GET/DELETE /api/settings/memory`,
+  `PATCH/DELETE /api/settings/memory/{id}` (`{enabled}`),
+  `PUT /api/settings/memory/toggle`. UI — `settings.js` "Xotira" bo'limi,
+  matn faqat `textContent`.
+- Qamrov: faqat orkestrator yo'li (hamma rejim). `ORCHESTRATOR=false` va chat
+  API'ning `direct` rejimi xotirani ishlatmaydi.
 
 ### Suhbatga bog'liqlik (follow-up)
 
@@ -559,6 +614,12 @@ Real DB/LLM'ga ulanadi, `pytest`/`ci` ularni yugurtirmaydi (`tests/test_evals.py
 faqat sof funksiyalarni tekshiradi). **Kamida 3 yugurish** — LLM tebranadi,
 bitta yugurish hech narsani isbotlamaydi (narx qopqoqlari bilan bir qoida).
 `evals/golden.jsonl` va `evals/runs/` commit qilinmaydi.
+
+Suhbat eval'i (`evals/conv_runner.py`) — `--runs 3`: har senariy 3 marta, har gal
+yangi suhbatda (aylanma tartib, `run_plan`); senariy bo'yicha `pass_count/3` va
+sinf `stable_pass` (3/3) · `flaky` (1-2/3) · `stable_fail` (0/3), har yugurish va
+jami narx; hisobotda avval `stable_fail` (`summarize_stability`, sof, testlangan).
+Turn qopqoqlari N ga ko'paytirib tekshiriladi, `--max-cost-usd` — jami.
 
 ## Frontend
 

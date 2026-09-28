@@ -101,6 +101,10 @@ class User(Base):
     prefs: Mapped[dict[str, Any]] = mapped_column(
         JSONB, default=dict, server_default=text("'{}'::jsonb"), nullable=False
     )
+    #: Xotira global kaliti (0026) — false: `user_memories` ishlatilmaydi ham, yozilmaydi ham.
+    memory_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=text("true"), nullable=False
+    )
 
     accounts: Mapped[list[Account]] = relationship(back_populates="user")
 
@@ -1035,3 +1039,33 @@ class UserBudget(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=_now(), onupdate=_now()
     )
+
+
+class UserMemory(Base):
+    """Foydalanuvchi xotirasi — alias / afzallik / fakt (migratsiya 0026).
+
+    Yagona o'qish/yozish nuqtasi — `services/user_memory.py`. Faqat
+    foydalanuvchining o'z turn'idan; sir (telefon, kod, parol) yo'q. Har yozuv
+    Sozlamalar → Xotira'da ko'rinadi va o'chiriladi; `users.memory_enabled`
+    false bo'lsa hech narsa ishlatilmaydi va saqlanmaydi.
+    """
+
+    __tablename__ = "user_memories"
+    __table_args__ = (
+        Index("ix_user_memories_user", "user_id"),
+        Index("uq_user_memory_key", "user_id", "kind", text("lower(key)"), unique=True),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(String(16))  # fact | preference | alias
+    key: Mapped[str] = mapped_column(String(120))
+    value: Mapped[str] = mapped_column(String(300))
+    source_conversation_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("conversations.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now())
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))

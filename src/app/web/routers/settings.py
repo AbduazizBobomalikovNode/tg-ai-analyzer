@@ -4,6 +4,8 @@
     PUT  /api/settings/prefs   {…}         → {prefs: {...}}   (faqat tanilgan kalitlar)
     GET/PUT /api/settings/budget, POST/DELETE /api/settings/budget/boost
                                            → kunlik byudjet (pastda)
+    GET/DELETE /api/settings/memory, PATCH/DELETE /api/settings/memory/{id},
+    PUT  /api/settings/memory/toggle       → foydalanuvchi xotirasi (0026, pastda)
     DELETE /api/accounts/{id}              → akkauntni uzish (ma'lumot qoladi)
     GET  /api/accounts/{id}/sync/status    → yengil holat (5 s poll uchun)
     GET  /api/accounts/{id}/sync/stream    → o'sha holat SSE bo'lib (2 s)
@@ -35,6 +37,7 @@ from app.services import ingestion as ing
 from app.services import limits as LIM
 from app.services import prefs as P
 from app.services import sync_progress as SP
+from app.services import user_memory as UM
 from app.web.routers.chatdata import avatar_url
 from app.web.security import WebIdentity, require_csrf, require_identity
 
@@ -623,3 +626,79 @@ async def delete_boost(
         out = await LIM.budget_view(db, ident.user_id, tz=tz)
     await LIM.invalidate(ident.user_id)
     return out
+
+
+# ─── foydalanuvchi xotirasi (0026) ───────────────────────────────────────────
+#
+#     GET    /api/settings/memory              → {enabled, items: [...], max}
+#     DELETE /api/settings/memory              → hammasini o'chirish
+#     PATCH  /api/settings/memory/{id}         {enabled} → bitta yozuvni yoqish/o'chirish
+#     DELETE /api/settings/memory/{id}         → bitta yozuvni o'chirish
+#     PUT    /api/settings/memory/toggle       {enabled} → global kalit
+#
+# Yagona yozuvchi — `services/user_memory.py`. O'zgartiruvchilar CSRF talab
+# qiladi; yozuv faqat egasiniki (`user_id` bo'yicha filtr SQL'da).
+
+
+class MemoryItemIn(BaseModel):
+    enabled: bool
+
+
+class MemoryToggleIn(BaseModel):
+    enabled: bool
+
+
+async def _memory_view(db: Any, user_id: int) -> dict[str, Any]:
+    return {
+        "enabled": await UM.get_enabled(db, user_id),
+        "items": [it.to_dict() for it in await UM.list_all(db, user_id)],
+        "max": UM.MAX_ITEMS,
+    }
+
+
+@router.get("/api/settings/memory")
+async def get_memory(ident: Annotated[WebIdentity, Depends(require_identity)]) -> dict[str, Any]:
+    async with session_scope() as db:
+        return await _memory_view(db, ident.user_id)
+
+
+@router.delete("/api/settings/memory", dependencies=[Depends(require_csrf)])
+async def delete_memory(
+    ident: Annotated[WebIdentity, Depends(require_identity)],
+) -> dict[str, Any]:
+    async with session_scope() as db:
+        removed = await UM.delete_all(db, ident.user_id)
+        out = await _memory_view(db, ident.user_id)
+    log.info("memory.cleared", user_id=ident.user_id, removed=removed)
+    return {**out, "removed": removed}
+
+
+@router.put("/api/settings/memory/toggle", dependencies=[Depends(require_csrf)])
+async def toggle_memory(
+    body: MemoryToggleIn, ident: Annotated[WebIdentity, Depends(require_identity)]
+) -> dict[str, Any]:
+    async with session_scope() as db:
+        if not await UM.set_enabled(db, ident.user_id, body.enabled):
+            raise HTTPException(status_code=401, detail={"code": "unauthorized"})
+        return await _memory_view(db, ident.user_id)
+
+
+@router.patch("/api/settings/memory/{item_id}", dependencies=[Depends(require_csrf)])
+async def patch_memory_item(
+    item_id: int, body: MemoryItemIn, ident: Annotated[WebIdentity, Depends(require_identity)]
+) -> dict[str, Any]:
+    async with session_scope() as db:
+        item = await UM.set_item_enabled(db, ident.user_id, item_id, body.enabled)
+        if item is None:
+            raise HTTPException(status_code=404, detail={"code": "web.memory.err_not_found"})
+        return {"item": item.to_dict()}
+
+
+@router.delete("/api/settings/memory/{item_id}", dependencies=[Depends(require_csrf)])
+async def delete_memory_item(
+    item_id: int, ident: Annotated[WebIdentity, Depends(require_identity)]
+) -> dict[str, Any]:
+    async with session_scope() as db:
+        if not await UM.delete_item(db, ident.user_id, item_id):
+            raise HTTPException(status_code=404, detail={"code": "web.memory.err_not_found"})
+    return {"ok": True, "id": item_id}

@@ -492,6 +492,136 @@ async function submitBoost(e) {
   }
 }
 
+/* ── Xotira (0026) ───────────────────────────────────────────────────── */
+/*
+ * Sukut bo'yicha yoqiq, lekin har yozuv shu yerda: tur belgisi, qiymat, manba
+ * suhbat havolasi, sana; alohida o'chirib qo'yish va o'chirish. Global kalit
+ * o'chsa yordamchi xotirani ishlatmaydi ham, yozmaydi ham (server tomonda).
+ * Matnlar `textContent` bilan — `innerHTML` yo'q.
+ */
+
+const MEM_KINDS = ["alias", "preference", "fact"];
+const memState = { enabled: true, items: [], max: 100 };
+
+function memLabel(it) {
+  if (it.kind === "alias" && it.key === "self") return t("web.memory.self");
+  if (it.kind === "preference") {
+    const k = `web.memory.pref_${it.key}`;
+    return has(k) ? t(k) : it.key;
+  }
+  return it.kind === "fact" ? String(it.key || "").replace(/_/g, " ") : it.key;
+}
+
+function memValue(it) {
+  if (it.kind === "preference") {
+    const k = `web.memory.val_${it.key}_${it.value}`;
+    if (has(k)) return t(k);
+  }
+  return it.value;
+}
+
+function memRow(it) {
+  const kind = MEM_KINDS.includes(it.kind) ? it.kind : "fact";
+  const meta = [];
+  if (it.created_at) meta.push(el("span", null, dateTime(it.created_at)));
+  if (it.source_conversation_id) {
+    meta.push(el("a", { href: `/ask/${Number(it.source_conversation_id)}` }, t("web.memory.source")));
+  }
+  if (!it.enabled) meta.push(el("span.pill.warn", null, t("web.memory.off")));
+  const sw = el("button.switch", {
+    type: "button",
+    role: "switch",
+    "aria-checked": String(Boolean(it.enabled)),
+    "aria-label": t("web.memory.item_enabled"),
+  });
+  sw.addEventListener("click", () => toggleMemItem(it, sw));
+  const rm = el("button.icon-btn-v2", {
+    type: "button",
+    "aria-label": t("web.memory.delete"),
+    title: t("web.memory.delete"),
+    onclick: () => deleteMemItem(it),
+  }, icon("trash-2"));
+  return el(`div.row-item.mem-row${it.enabled ? "" : ".is-off"}`, null, [
+    el(`span.pill.mem-kind.mem-${kind}`, null, t(`web.memory.kind_${kind}`)),
+    el("div.row-body", null, [
+      el("div.row-title", null, [el("span.mem-key", null, memLabel(it)), el("span.mem-eq", { "aria-hidden": "true" }, " → "), el("span.mem-val", null, memValue(it))]),
+      el("div.row-sub.mem-meta", null, meta),
+    ]),
+    el("div.mem-actions", null, [sw, rm]),
+  ]);
+}
+
+function paintMemory() {
+  const box = $("#mem-list");
+  if (!box) return;
+  const sw = $("#mem-enabled");
+  if (sw) sw.setAttribute("aria-checked", String(Boolean(memState.enabled)));
+  const count = $("#mem-count");
+  if (count) {
+    count.textContent = memState.enabled
+      ? t("web.memory.count", { n: memState.items.length, max: memState.max })
+      : t("web.memory.disabled_note");
+  }
+  const clearBtn = $("#mem-clear");
+  if (clearBtn) clearBtn.hidden = memState.items.length === 0;
+  box.classList.toggle("is-disabled", !memState.enabled);
+  replace(box, memState.items.length
+    ? memState.items.map(memRow)
+    : el("p.set-note", null, t("web.memory.empty")));
+}
+
+function setMemory(d) {
+  memState.enabled = Boolean(d && d.enabled);
+  memState.items = Array.isArray(d && d.items) ? d.items : [];
+  memState.max = Number((d && d.max) || 100);
+  paintMemory();
+}
+
+async function loadMemory() {
+  try { setMemory(await get("/api/settings/memory")); } catch (err) {
+    const box = $("#mem-list");
+    if (box) replace(box, el("p.set-note", null, t("web.memory.err_load")));
+    toastError(err);
+  }
+}
+
+async function toggleMemGlobal() {
+  const next = !memState.enabled;
+  try {
+    setMemory(await put("/api/settings/memory/toggle", { enabled: next }));
+    toast(t(next ? "web.memory.enabled_on" : "web.memory.enabled_off"), { kind: "ok" });
+  } catch (err) { paintMemory(); toastError(err); }
+}
+
+async function toggleMemItem(it, sw) {
+  const next = !it.enabled;
+  try {
+    const res = await patch(`/api/settings/memory/${Number(it.id)}`, { enabled: next });
+    Object.assign(it, res.item || { enabled: next });
+    paintMemory();
+  } catch (err) {
+    if (sw) sw.setAttribute("aria-checked", String(Boolean(it.enabled)));
+    toastError(err);
+  }
+}
+
+async function deleteMemItem(it) {
+  try {
+    await del(`/api/settings/memory/${Number(it.id)}`);
+    memState.items = memState.items.filter((x) => x.id !== it.id);
+    paintMemory();
+    toast(t("web.memory.deleted"), { kind: "ok" });
+  } catch (err) { toastError(err); }
+}
+
+async function clearMemory() {
+  if (!window.confirm(t("web.memory.clear_confirm"))) return;
+  try {
+    setMemory(await del("/api/settings/memory"));
+    toast(t("web.memory.cleared"), { kind: "ok" });
+  } catch (err) { toastError(err); }
+}
+
 /* ── Kirish nuqtasi ──────────────────────────────────────────────────── */
 
 async function main() {
@@ -531,7 +661,7 @@ async function main() {
   }
   paintWriteModes();
   fillArSelect();
-  await Promise.allSettled([loadBriefing(), loadSystem(), loadBudget()]);
+  await Promise.allSettled([loadBriefing(), loadSystem(), loadBudget(), loadMemory()]);
 }
 
 ready(() => {
@@ -540,6 +670,8 @@ ready(() => {
   $("#bud-form")?.addEventListener("submit", saveBudget);
   $("#bud-reset")?.addEventListener("click", resetBudget);
   $("#bud-boost-form")?.addEventListener("submit", submitBoost);
+  $("#mem-enabled")?.addEventListener("click", toggleMemGlobal);
+  $("#mem-clear")?.addEventListener("click", clearMemory);
   for (const chip of $$("#bud-chips [data-tokens], #bud-chips [data-usd]")) {
     chip.addEventListener("click", () => addBoost(Number(chip.dataset.tokens || 0), Number(chip.dataset.usd || 0)));
   }

@@ -80,6 +80,27 @@
 .bud-boost-custom input { flex: 1 1 120px; min-inline-size: 0; inline-size: auto; }
 .bud-boost-custom .btn { flex: none; }
 
+/* ── Xotira (0026) ───────────────────────────────────────────────────── */
+.mem-list { display: grid; gap: var(--s-1); max-block-size: 480px; overflow: auto; }
+.mem-list.is-disabled { opacity: .6; }
+.mem-row { align-items: center; gap: var(--s-3); }
+.mem-row.is-off .row-title { color: var(--muted); }
+.mem-row .row-body { min-inline-size: 0; }
+.mem-row .row-title { overflow-wrap: anywhere; }
+.mem-kind { flex: none; min-inline-size: 72px; justify-content: center; text-transform: lowercase; }
+.mem-alias { color: var(--accent-text); background: var(--accent-soft); border-color: transparent; }
+.mem-preference { color: var(--ok); background: var(--ok-soft); border-color: transparent; }
+.mem-fact { color: var(--muted); background: var(--panel-3); border-color: transparent; }
+.mem-eq { color: var(--muted); }
+.mem-val { font-weight: 600; }
+.mem-meta { display: flex; flex-wrap: wrap; gap: var(--s-2); align-items: center; }
+.mem-actions { display: flex; align-items: center; gap: var(--s-2); flex: none; }
+@media (max-width: 520px) {
+  .mem-row { flex-wrap: wrap; }
+  .mem-row .row-body { flex: 1 1 calc(100% - 90px); }
+  .mem-actions { margin-inline-start: auto; }
+}
+
 @media (min-width: 861px) {
   .set-layout { grid-template-columns: 220px minmax(0, 1fr); }
   .set-nav {

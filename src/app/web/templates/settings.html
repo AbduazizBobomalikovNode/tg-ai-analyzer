@@ -36,6 +36,7 @@
       <a href="#sec-appearance">{{ m.icon("sun") }}{{ t('web.settings.sec_appearance') }}</a>
       <a href="#sec-ai">{{ m.icon("sparkles") }}{{ t('web.settings.sec_ai') }}</a>
       <a href="#sec-budget">{{ m.icon("activity") }}{{ t('web.budget.title') }}</a>
+      <a href="#sec-memory">{{ m.icon("brain") }}{{ t('web.memory.title') }}</a>
       <a href="#sec-write">{{ m.icon("send") }}{{ t('web.settings.sec_write') }}</a>
       <a href="#sec-autoreply">{{ m.icon("message-circle") }}{{ t('web.ar.title') }}</a>
       <a href="#sec-briefing">{{ m.icon("inbox") }}{{ t('web.settings.sec_briefing') }}</a>
@@ -160,6 +161,26 @@
             <button type="submit" class="btn">{{ m.icon("plus") }} {{ t('web.budget.boost_add') }}</button>
           </form>
         </div>
+      {% endcall %}
+
+      {# Foydalanuvchi xotirasi (0026) — sukut bo'yicha yoqiq, har yozuv shu yerda
+         ko'rinadi va o'chiriladi. API: GET/DELETE /api/settings/memory,
+         PATCH/DELETE /api/settings/memory/{id}, PUT /api/settings/memory/toggle. #}
+      {% call m.set_section("sec-memory", "brain", t('web.memory.title')) %}
+        <p class="set-note">{{ t('web.memory.note') }}</p>
+        <div class="field">
+          <span>{{ t('web.memory.enabled') }}</span>
+          <div class="field-row">
+            <button type="button" class="switch" id="mem-enabled" role="switch" aria-checked="true"
+                    aria-label="{{ t('web.memory.enabled') }}"></button>
+            <span class="field-note" id="mem-count" aria-live="polite"></span>
+          </div>
+        </div>
+        <div class="mem-list" id="mem-list" aria-live="polite">{{ m.skeleton_rows(2) }}</div>
+        <div class="form-actions">
+          <button type="button" class="btn ghost" id="mem-clear" hidden>{{ m.icon("trash-2") }} {{ t('web.memory.clear') }}</button>
+        </div>
+        <p class="set-note">{{ t('web.memory.never') }}</p>
       {% endcall %}
 
       {% call m.set_section("sec-write", "send", t('web.settings.sec_write')) %}
