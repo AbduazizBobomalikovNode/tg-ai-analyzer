@@ -988,3 +988,79 @@ def test_tools_expectations_match_orchestrator_proposals() -> None:
         chat_hint=None,
     )
     assert [c.name for c in miss if not c.ok] == ["tools_any"]
+
+
+# ─── conv_runner: --runs N barqarorlik rejimi ────────────────────────────────
+
+
+def test_stability_classes() -> None:
+    from evals.conv_runner import classify
+
+    assert classify(3, 3) == "stable_pass"
+    assert classify(2, 3) == "flaky" and classify(1, 3) == "flaky"
+    assert classify(0, 3) == "stable_fail"
+    assert classify(1, 1) == "stable_pass" and classify(0, 0) == "stable_fail"
+
+
+def test_run_plan_is_round_robin_and_one_conversation_each() -> None:
+    from evals.conv_runner import run_plan
+
+    assert run_plan(["a", "b"], 3) == [("a", 1), ("b", 1), ("a", 2), ("b", 2), ("a", 3), ("b", 3)]
+    assert run_plan(["a"], 0) == [("a", 1)]
+
+
+def _row(sid: str, run: int, passed: bool, cost: float, cat: str = "daily") -> dict:
+    return {"id": sid, "title": sid, "category": cat, "run": run, "runs": 3,
+            "passed": passed, "cost_usd": cost, "turns": []}  # fmt: skip
+
+
+def test_stability_summary_lists_stable_failures_first_with_costs() -> None:
+    from evals.conv_runner import render_stability_md, stability_counts, summarize_stability
+
+    rows = [
+        _row("a-ok", 1, True, 0.01), _row("a-ok", 2, True, 0.02), _row("a-ok", 3, True, 0.01),
+        _row("b-flaky", 1, True, 0.1), _row("b-flaky", 2, False, 0.1),
+        _row("b-flaky", 3, True, 0.1),
+        _row("c-bad", 2, False, 0.05), _row("c-bad", 1, False, 0.05), _row("c-bad", 3, False, 0.0),
+        _row("d-cut", 1, True, 0.02),  # narx shifti: faqat 1 yugurish bo'ldi
+    ]  # fmt: skip
+    stab = summarize_stability(rows, 3)
+    assert [s["id"] for s in stab] == ["c-bad", "b-flaky", "d-cut", "a-ok"]
+    bad, flaky, cut, ok = stab
+    assert (bad["class"], bad["pass_label"], bad["failed_runs"]) == (
+        "stable_fail",
+        "0/3",
+        [1, 2, 3],
+    )
+    assert bad["cost_per_run"] == [0.05, 0.05, 0.0] and bad["cost_total"] == 0.1
+    assert (flaky["class"], flaky["pass_count"], flaky["failed_runs"]) == ("flaky", 2, [2])
+    assert (cut["class"], cut["runs_done"], cut["pass_label"]) == ("flaky", 1, "1/3")
+    assert (ok["class"], ok["cost_total"]) == ("stable_pass", 0.04)
+    counts = stability_counts(stab)
+    assert counts == {
+        "stable_fail": 1, "flaky": 2, "stable_pass": 1, "scenarios": 4, "cost_total": 0.46,
+    }  # fmt: skip
+    md = render_stability_md(stab, 3)
+    lines = [ln for ln in md.splitlines() if ln.startswith("| `")]
+    assert lines[0].startswith("| `c-bad` | daily | 0/3 | stable_fail | #1, #2, #3 |")
+    assert "(yugurdi 1/3)" in lines[2]
+    assert "stable_fail: **1** · flaky: **2** · stable_pass: **1**" in md
+
+
+def test_report_includes_stability_and_run_tags() -> None:
+    from evals.conv_runner import render_md, summarize_stability
+
+    rows = [_row("x", 1, True, 0.01), _row("x", 2, False, 0.01)]
+    for r in rows:
+        r["runs"] = 2
+    result = {
+        "started_at": "2026-09-28T00:00:00+00:00",
+        "summary": {"scenarios": 2, "passed": 1, "pass_rate": 0.5, "turns": 0,
+                    "turns_auto": 0, "turns_deep": 0, "cost_usd": 0.02},
+        "runs": 2,
+        "stability": summarize_stability(rows, 2),
+        "scenarios": rows,
+    }  # fmt: skip
+    md = render_md(result)
+    assert "## Barqarorlik (2 yugurish" in md and "| `x` | daily | 1/2 | flaky |" in md
+    assert "| `x#2` | daily |" in md

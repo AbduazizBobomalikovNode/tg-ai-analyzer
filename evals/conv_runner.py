@@ -43,6 +43,14 @@ Bitta `Task.ROUTE` chaqiruvi (`app.llm.LLM` fasadi orqali, konteyner ichida).
 Unga savollar tarixi + oxirgi javob + rubrika beriladi, `{"pass","reason"}`
 qaytadi. Judge natijasi **tavsiya**, deterministik tekshiruvlar esa hukm —
 hisobotda ikkalasi alohida ustunda.
+
+Barqarorlik (`--runs N`)
+------------------------
+`--runs 3` har senariyni 3 marta yugurtiradi (har gal yangi suhbat, aylanma
+tartib — `run_plan`) va senariy bo'yicha `pass_count/3` + sinf beradi:
+`stable_pass` (3/3), `flaky` (1-2/3), `stable_fail` (0/3); har yugurish narxi
+va jami. Hisobotda avval `stable_fail`. Turn qopqoqlari (`--max-*-turns`)
+N ga ko'paytirilgan son bilan tekshiriladi, `--max-cost-usd` — jami uchun.
 """
 
 from __future__ import annotations
@@ -920,7 +928,111 @@ async def run_scenario(
     }
 
 
+# ─── barqarorlik (`--runs N`) ────────────────────────────────────────────────
+#
+# LLM tebranadi: bitta yugurish hech narsani isbotlamaydi (CLAUDE.md, "kamida
+# 3 yugurish"). `--runs 3` har senariyni 3 marta, har gal **yangi suhbatda**
+# yugurtiradi va senariy bo'yicha `pass_count/3` ni beradi:
+# `stable_pass` (3/3), `flaky` (1-2/3), `stable_fail` (0/3). Hisobotda avval
+# barqaror yiqilganlar — ular haqiqiy xato, `flaky` esa tebranish.
+
+STABILITY_ORDER = ("stable_fail", "flaky", "stable_pass")
+
+
+def run_plan(scenarios: list[Any], runs: int) -> list[tuple[Any, int]]:
+    """`(senariy, yugurish raqami)` tartibi — **aylanma**: avval hamma senariy 1-marta,
+    keyin 2-marta, … Narx shifti yarim yo'lda to'xtatsa, to'liq o'tgan yugurishlar
+    butun to'plam bo'yicha qoladi (bitta senariy 3 marta, qolganlari 0 marta emas).
+    Har element `run_scenario` da **yangi suhbat** ochadi."""
+    return [(sc, n) for n in range(1, max(1, runs) + 1) for sc in scenarios]
+
+
+def classify(pass_count: int, runs: int) -> str:
+    """`stable_pass` (hammasi o'tdi) · `stable_fail` (hech biri) · `flaky` (orasida)."""
+    if runs <= 0 or pass_count <= 0:
+        return "stable_fail"
+    if pass_count >= runs:
+        return "stable_pass"
+    return "flaky"
+
+
+def summarize_stability(rows: list[dict[str, Any]], runs: int) -> list[dict[str, Any]]:
+    """Senariy bo'yicha `pass_count/runs`, sinf, har yugurish narxi va jami — sof funksiya.
+
+    `rows` — `run_scenario` natijalari (`run` maydoni bilan, 1..N). Yugurmay
+    qolgan (narx shifti) yugurishlar `runs_done` < `runs` bo'lib ko'rinadi va
+    ular **o'tmagan** hisoblanadi — to'liq bo'lmagan o'lchov "barqaror" emas.
+    Tartib: `stable_fail` → `flaky` → `stable_pass`, ichida id bo'yicha.
+    """
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for r in rows:
+        groups.setdefault(str(r["id"]), []).append(r)
+    out: list[dict[str, Any]] = []
+    for sid, items in groups.items():
+        items = sorted(items, key=lambda r: int(r.get("run") or 1))
+        passed = sum(1 for r in items if r.get("passed"))
+        costs = [round(float(r.get("cost_usd") or 0.0), 6) for r in items]
+        first = items[0]
+        cls = classify(passed, runs)
+        out.append(
+            {
+                "id": sid,
+                "title": first.get("title", ""),
+                "category": first.get("category", ""),
+                "runs": runs,
+                "runs_done": len(items),
+                "pass_count": passed,
+                "pass_label": f"{passed}/{runs}",
+                "class": cls,
+                "cost_per_run": costs,
+                "cost_total": round(sum(costs), 6),
+                "failed_runs": [int(r.get("run") or 1) for r in items if not r.get("passed")],
+            }
+        )
+    out.sort(key=lambda s: (STABILITY_ORDER.index(s["class"]), s["id"]))
+    return out
+
+
+def stability_counts(stab: list[dict[str, Any]]) -> dict[str, Any]:
+    counts = {k: sum(1 for s in stab if s["class"] == k) for k in STABILITY_ORDER}
+    return {
+        **counts,
+        "scenarios": len(stab),
+        "cost_total": round(sum(float(s["cost_total"]) for s in stab), 6),
+    }
+
+
+def render_stability_md(stab: list[dict[str, Any]], runs: int) -> str:
+    """Barqarorlik jadvali — avval `stable_fail`, keyin `flaky`, oxirida `stable_pass`."""
+    c = stability_counts(stab)
+    out = [
+        f"## Barqarorlik ({runs} yugurish, har biri yangi suhbatda)",
+        "",
+        f"stable_fail: **{c['stable_fail']}** · flaky: **{c['flaky']}** · "
+        f"stable_pass: **{c['stable_pass']}** · jami narx: **${c['cost_total']:.4f}**",
+        "",
+        "| id | kategoriya | o'tdi | sinf | yiqilgan yugurish | $/yugurish | $ jami |",
+        "|---|---|--:|---|---|---|--:|",
+    ]
+    for s in stab:
+        per_run = ", ".join(f"{x:.4f}" for x in s["cost_per_run"]) or "—"
+        failed = ", ".join(f"#{n}" for n in s["failed_runs"]) or "—"
+        if s["runs_done"] < s["runs"]:
+            failed += f" (yugurdi {s['runs_done']}/{s['runs']})"
+        out.append(
+            f"| `{s['id']}` | {s['category']} | {s['pass_label']} | {s['class']} | {failed} | "
+            f"{per_run} | {s['cost_total']:.4f} |"
+        )
+    out.append("")
+    return "\n".join(out)
+
+
 # ─── hisobot ─────────────────────────────────────────────────────────────────
+
+
+def _rid(r: dict[str, Any]) -> str:
+    """Hisobotdagi senariy belgisi — `--runs` > 1 da yugurish raqami bilan (`daily-40#2`)."""
+    return f"{r['id']}#{r['run']}" if int(r.get("runs") or 1) > 1 and r.get("run") else r["id"]
 
 
 def render_md(result: dict[str, Any]) -> str:
@@ -943,6 +1055,8 @@ def render_md(result: dict[str, Any]) -> str:
         out.append("")
         out.append(f"> ⚠️ To'plam **to'liq yugurmadi**: {m['stopped_early']}")
     out.append("")
+    if result.get("stability"):
+        out.append(render_stability_md(result["stability"], int(result.get("runs") or 1)))
     out.append("## Kategoriya kesimi")
     out.append("")
     out.append("| kategoriya | senariy | o'tdi | turn | det. o'tdi | judge o'tdi | $ |")
@@ -1014,7 +1128,7 @@ def render_md(result: dict[str, Any]) -> str:
                 continue
             any_fail = True
             bad = [c for c in t.get("checks", []) if not c["ok"]]
-            out.append(f"### `{r['id']}` turn {t['n']} ({t['mode']}) — {r['title']}")
+            out.append(f"### `{_rid(r)}` turn {t['n']} ({t['mode']}) — {r['title']}")
             out.append(f"- **savol:** {t['user'][:300]}")
             out.append(f"- **tool (bajarilgan):** `{t.get('tools_executed')}`")
             if t.get("tools_blocked"):
@@ -1043,7 +1157,7 @@ def render_md(result: dict[str, Any]) -> str:
         tools = sorted({x for t in r["turns"] for x in (t.get("tools_executed") or [])})
         steps = " / ".join("→".join(t.get("steps") or []) or "—" for t in r["turns"])
         out.append(
-            f"| `{r['id']}` | {r['category']} | {len(r['turns'])} | "
+            f"| `{_rid(r)}` | {r['category']} | {len(r['turns'])} | "
             f"{'✅' if r['passed'] else '❌'} | {', '.join(tools) or '—'} | {steps} | "
             f"{float(r['cost_usd'] or 0):.4f} |"
         )
@@ -1064,8 +1178,9 @@ async def main_async(args: argparse.Namespace) -> int:
     if args.limit:
         scenarios = scenarios[: args.limit]
 
-    n_auto = sum(1 for s in scenarios for t in s.turns if t.mode not in DEEP_MODES)
-    n_deep = sum(1 for s in scenarios for t in s.turns if t.mode in DEEP_MODES)
+    runs = max(1, int(getattr(args, "runs", 1) or 1))
+    n_auto = runs * sum(1 for s in scenarios for t in s.turns if t.mode not in DEEP_MODES)
+    n_deep = runs * sum(1 for s in scenarios for t in s.turns if t.mode in DEEP_MODES)
     print(f"scenarios={len(scenarios)} auto_turns={n_auto} deep_turns={n_deep}", file=sys.stderr)
     if args.dry_run:
         for s in scenarios:
@@ -1090,7 +1205,8 @@ async def main_async(args: argparse.Namespace) -> int:
     spent = 0.0
     stopped = ""
     try:
-        for i, sc in enumerate(scenarios, 1):
+        plan = run_plan(scenarios, runs)
+        for i, (sc, run_no) in enumerate(plan, 1):
             # Turn soni byudjetning **yomon** o'lchovi: 2026-09-17 yugurishida
             # tool'lar tiklangandan keyin bitta turn $0.40 gacha chiqdi va
             # to'plam kunlik `LLM_DAILY_TOKEN_BUDGET` ni yeb qo'ydi — qolgan 38
@@ -1098,36 +1214,38 @@ async def main_async(args: argparse.Namespace) -> int:
             # Shuning uchun haqiqiy xarajat ham to'xtatadi.
             if args.max_cost_usd and spent >= args.max_cost_usd:
                 stopped = f"cost cap reached: ${spent:.4f} >= ${args.max_cost_usd}"
-                print(f"STOP: {stopped} (ran {i - 1}/{len(scenarios)})", file=sys.stderr)
+                print(f"STOP: {stopped} (ran {i - 1}/{len(plan)})", file=sys.stderr)
                 break
-            print(f"[{i}/{len(scenarios)}] {sc.id} … (${spent:.3f})", file=sys.stderr, flush=True)
+            tag = f"{sc.id}#{run_no}" if runs > 1 else sc.id
+            print(f"[{i}/{len(plan)}] {tag} … (${spent:.3f})", file=sys.stderr, flush=True)
             try:
                 row = await run_scenario(
                     api, sc, llm, pace_auto=args.pace_auto, pace_deep=args.pace_deep
                 )
-                rows.append(row)
                 spent += float(row.get("cost_usd") or 0.0)
             except Exception as exc:
-                print(f"  !! {sc.id}: {type(exc).__name__}: {exc}", file=sys.stderr)
-                rows.append(
-                    {
-                        "id": sc.id,
-                        "title": sc.title,
-                        "category": sc.category,
-                        "locale": sc.locale,
-                        "priority": sc.priority,
-                        "source": sc.source,
-                        "chat_hint": sc.chat_hint,
-                        "turns": [],
-                        "cost_usd": 0.0,
-                        "passed": False,
-                        "error": f"{type(exc).__name__}: {str(exc)[:300]}",
-                    }
-                )
+                print(f"  !! {tag}: {type(exc).__name__}: {exc}", file=sys.stderr)
+                row = {
+                    "id": sc.id,
+                    "title": sc.title,
+                    "category": sc.category,
+                    "locale": sc.locale,
+                    "priority": sc.priority,
+                    "source": sc.source,
+                    "chat_hint": sc.chat_hint,
+                    "turns": [],
+                    "cost_usd": 0.0,
+                    "passed": False,
+                    "error": f"{type(exc).__name__}: {str(exc)[:300]}",
+                }
+            row["run"] = run_no
+            row["runs"] = runs
+            rows.append(row)
     finally:
         await api.aclose()
 
     turns = [t for r in rows for t in r["turns"]]
+    stab = summarize_stability(rows, runs) if runs > 1 else []
     result = {
         "started_at": started.isoformat(timespec="seconds"),
         "finished_at": datetime.now(UTC).isoformat(timespec="seconds"),
@@ -1142,7 +1260,10 @@ async def main_async(args: argparse.Namespace) -> int:
             "turns_deep": sum(1 for t in turns if t["mode"] in DEEP_MODES),
             "cost_usd": sum(float(r["cost_usd"] or 0) for r in rows),
             "stopped_early": stopped or None,
+            **({"stability": stability_counts(stab)} if runs > 1 else {}),
         },
+        "runs": runs,
+        "stability": stab,
         "scenarios": rows,
     }
 
@@ -1178,6 +1299,12 @@ def main() -> int:
         type=float,
         default=1.0,
         help="jami xarajat shifti; oshsa qolgan senariylar yugurtirilmaydi (0 = cheksiz)",
+    )
+    p.add_argument(
+        "--runs",
+        type=int,
+        default=1,
+        help="har senariyni N marta (har gal yangi suhbat): stable_pass / flaky / stable_fail",
     )
     args = p.parse_args()
     return asyncio.run(main_async(args))
