@@ -611,6 +611,180 @@ def strip_text(state: ConvState) -> ConvState:
     return st
 
 
+# ─── so'z / chat nomi ikki ma'noliligi ("Oyga" = oy? yoki "Oy" chati?) ───────
+
+#: Chat nomi bo'la oladigan **umumiy so'zlar** (uz / ru / en). Chat sarlavhasi
+#: aynan shu so'z bo'lsa ("Oy", "Ish", "Bozor"), savoldagi so'z ikki ma'noli:
+#: jonli daily-40 "Oyga qancha xabar yozdim?" — "oy" vaqtmi, "Oy" chatimi?
+#: Ro'yxat ataylab keng emas: nom sifatida uchraydigan ot/vaqt birliklari.
+_COMMON_WORDS_RAW = """
+    oy hafta kun yil soat daqiqa bugun kecha ertaga tong kech oqshom tun vaqt
+    bahor yoz kuz qish
+    kanal guruh chat gruppa ish dars uy bozor maktab oila dost dostlar ota ona aka uka opa
+    singil bola bolalar xabar yangilik yangiliklar sport kino musiqa ovqat pul savol javob
+    kitob mashina sayohat ofis kurs universitet talaba ustoz
+    месяц неделя день год час минута сегодня вчера завтра утро вечер ночь время
+    канал группа чат работа дом семья друзья новости учеба школа деньги музыка спорт
+    month week day year hour minute today yesterday tomorrow morning evening night time
+    channel group chat work job home family friends news school money music sport
+"""
+COMMON_NAME_WORDS: frozenset[str] = frozenset(TN.uz_fold(w) for w in _COMMON_WORDS_RAW.split() if w)
+#: Vaqt birligi o'qilishi — `clarify` varianti "shu oy" ko'rinishida chiqadi.
+_TIME_READING = {
+    "oy": {"uz": "shu oy (vaqt)", "ru": "этот месяц (время)", "en": "this month (time)"},
+    "hafta": {"uz": "shu hafta (vaqt)", "ru": "эта неделя (время)", "en": "this week (time)"},
+    "kun": {"uz": "bugun (vaqt)", "ru": "сегодня (время)", "en": "today (time)"},
+    "yil": {"uz": "shu yil (vaqt)", "ru": "этот год (время)", "en": "this year (time)"},
+    "month": {"uz": "shu oy (vaqt)", "ru": "этот месяц (время)", "en": "this month (time)"},
+    "week": {"uz": "shu hafta (vaqt)", "ru": "эта неделя (время)", "en": "this week (time)"},
+    "year": {"uz": "shu yil (vaqt)", "ru": "этот год (время)", "en": "this year (time)"},
+}
+#: O'zbek kelishik / egalik qo'shimchalari — asos ≥2 belgi ("Oyga" → "oy").
+_AMBIG_SUFFIXES = (
+    "lardan", "larga", "larni", "larda", "ning", "dagi", "idan", "iga", "ida", "ini",
+    "dan", "lar", "ga", "ka", "qa", "da", "ni",
+)  # fmt: skip
+#: Egalik shakli ("oyiga", "kunida") — "har oyiga" ma'nosi; chat nomi bunday turlanmaydi.
+_POSSESSIVE_SUFFIXES = ("idan", "iga", "ida", "ini")
+#: So'zdan **oldin** kelsa oddiy so'z ekani aniq: "bu oy", "o'tgan oyda", "3 oy", "har kuni".
+WORD_BEFORE_RE = re.compile(
+    r"(?:^|\s)(?:bu|shu|joriy|o'?tgan|utgan|kelasi|keyingi|oxirgi|so'?nggi|songgi|har|necha"
+    r"|bir|ikki|uch|tort|besh|olti|yetti|sakkiz|toqqiz|on|butun|qaysi|yarim|\d+"
+    r"|этот|этом|эту|прошл\w*|следующ\w*|кажд\w*|целый|весь|сколько|\d+"
+    r"|this|last|next|every|per|each|one|a|the\s+whole)\s*$",
+    re.I,
+)
+#: So'zdan **keyin** kelsa chat ekani aniq: "Oy chatida", "Ish guruhiga", "канал Дом".
+_CHAT_AFTER_RE = re.compile(
+    r"^\s*(?:chat\w*|guruh\w*|gruppa\w*|kanal\w*|чат\w*|групп\w*|канал\w*"
+    r"|chats?|groups?|channels?)\b",
+    re.I,
+)
+_CHAT_BEFORE_RE = re.compile(r"(?:chat\w*|guruh\w*|kanal\w*|чат\w*|групп\w*|канал\w*)\s*$", re.I)
+_QUOTE_OPEN = "\"'«“‘`"
+_QUOTE_CLOSE = "\"'»”’`"
+
+
+@dataclass(slots=True)
+class Ambiguity:
+    """Savoldagi so'z = umumiy so'z **va** akkaunt chatining nomi.
+
+    `reading`: `"ask"` — tuzilma hech narsani hal qilmaydi (bitta `clarify`);
+    `"chat"` — qo'shtirnoq / "… chati" / `@nom` / tanlangan chat: o'sha chat;
+    `"word"` — "bu oy", "o'tgan oyda", "oyiga": oddiy so'z.
+    """
+
+    token: str  # savoldagi shakl ("Oyga")
+    word: str  # fold qilingan asos ("oy")
+    chat_id: int
+    title: str
+    reading: str
+    why: str = ""
+
+    def word_option(self, locale: str) -> str:
+        time = _TIME_READING.get(self.word)
+        if time:
+            return time.get(locale, time["uz"])
+        return {
+            "uz": f"oddiy so'z «{self.word}»",
+            "ru": f"обычное слово «{self.word}»",
+            "en": f"the ordinary word “{self.word}”",
+        }.get(locale, f"oddiy so'z «{self.word}»")
+
+    def chat_option(self, locale: str) -> str:
+        title = U.attr(self.title, max_chars=60)
+        return {
+            "uz": f"«{title}» chati",
+            "ru": f"чат «{title}»",
+            "en": f"the “{title}” chat",
+        }.get(locale, f"«{title}» chati")
+
+
+def _ambig_forms(folded: str) -> list[tuple[str, str]]:
+    """`(asos, qo'shimcha)` juftlari: "oyga" → [("oyga",""), ("oy","ga")]."""
+    out = [(folded, "")]
+    for suffix in _AMBIG_SUFFIXES:
+        if folded.endswith(suffix) and len(folded) - len(suffix) >= 2:
+            out.append((folded[: -len(suffix)], suffix))
+    return out
+
+
+def _chat_names(chat: Any) -> set[str]:
+    title = TN.uz_fold(str(getattr(chat, "title", "") or "")).strip()
+    title = re.sub(r"[^\w]+", " ", title).strip()
+    names = {title} if title else set()
+    uname = TN.uz_fold(str(getattr(chat, "username", "") or "")).strip().lstrip("@")
+    if uname:
+        names.add(uname)
+    return names
+
+
+def word_chat_ambiguity(
+    question: str,
+    chats: Iterable[Any],
+    *,
+    selected: Sequence[int] = (),
+    state: ConvState | None = None,
+) -> Ambiguity | None:
+    """Savoldagi so'z umumiy so'z **va** akkaunt chatining to'liq nomi bo'lsa — `Ambiguity`.
+
+    Faqat **to'liq** moslik: chat sarlavhasi (yoki `@username`) fold qilingandan
+    keyin aynan shu bitta so'z ("Oy" chati, savolda "Oyga"). Qism moslik
+    ("Oy yangiliklari") — ikki ma'nolilik emas, bu `chat_hints` ishi.
+
+    O'qilishni **tuzilma** hal qiladi (kodda): qo'shtirnoq / `@` / "… chati" /
+    tanlangan chat / holatdagi yechim → `chat`; oldidagi aniqlovchi ("bu",
+    "o'tgan", raqam, "har") yoki egalik shakli ("oyiga") → `word`. Oddiy
+    kelishik qo'shimchasi ("Oyga", "Oyda") hech narsani hal qilmaydi — `ask`.
+    """
+    raw = TN.strip_invisible(question or "")
+    if not raw.strip():
+        return None
+    by_name: dict[str, Any] = {}
+    for chat in chats:
+        for name in _chat_names(chat):
+            if name in COMMON_NAME_WORDS and name not in by_name:
+                by_name[name] = chat
+    if not by_name:
+        return None
+    for m in _WORD_RE.finditer(raw):
+        token = m.group(0).strip("'‘’ʻʼ`")
+        folded = TN.uz_fold(token)
+        for base, suffix in _ambig_forms(folded):
+            chat = by_name.get(base)
+            if chat is None:
+                continue
+            cid = int(chat.id)
+            amb = Ambiguity(
+                token=U.attr(token, max_chars=40),
+                word=base,
+                chat_id=cid,
+                title=str(getattr(chat, "title", "") or ""),
+                reading="ask",
+            )
+            before = raw[: m.start()]
+            after = raw[m.end() :]
+            whole = m.group(0)
+            opened = (before[-1:] or " ") in _QUOTE_OPEN or whole[:1] in _QUOTE_OPEN
+            closed = (after[:1] or " ") in _QUOTE_CLOSE or whole[-1:] in _QUOTE_CLOSE
+            if cid in set(selected):
+                amb.reading, amb.why = "chat", "selected chat"
+            elif state is not None and any(
+                int(v.get("chat_id") or 0) == cid for v in state.resolved_entities.values()
+            ):
+                amb.reading, amb.why = "chat", "resolved earlier in the conversation"
+            elif (opened and closed) or before.endswith("@"):
+                amb.reading, amb.why = "chat", "quoted / @name"
+            elif _CHAT_AFTER_RE.match(after) or _CHAT_BEFORE_RE.search(before):
+                amb.reading, amb.why = "chat", "named as a chat"
+            elif suffix in _POSSESSIVE_SUFFIXES:
+                amb.reading, amb.why = "word", "possessive form"
+            elif WORD_BEFORE_RE.search(before.lower()) or WORD_BEFORE_RE.search(TN.uz_fold(before)):
+                amb.reading, amb.why = "word", "determiner before the word"
+            return amb
+    return None
+
+
 def render_block(state: ConvState) -> str:
     """Planner uchun ixcham holat bloki — JSON, konvert ichida (sarlavhalar begona).
 
@@ -684,7 +858,9 @@ async def save(session_factory: Any, conversation_id: int, state: ConvState) -> 
 
 
 __all__ = [
+    "COMMON_NAME_WORDS",
     "REFERENT_RE",
+    "Ambiguity",
     "Applied",
     "ConvState",
     "apply_to_plan",
@@ -703,4 +879,5 @@ __all__ = [
     "strip_text",
     "update_after_turn",
     "window_of",
+    "word_chat_ambiguity",
 ]

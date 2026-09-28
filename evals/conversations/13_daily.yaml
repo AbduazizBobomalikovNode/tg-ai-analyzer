@@ -609,16 +609,22 @@ scenarios:
     locale: uz
     priority: 1
     turns:
+      # Kod qarori (`conv_state.word_chat_ambiguity`): akkauntda aynan "Oy"
+      # nomli chat bo'lsa — bitta `clarify` ikki variant bilan («Oy» chati /
+      # shu oy); bo'lmasa aniqlovchisiz "Oyga" = shu oy → `stats` (joriy oy).
       - user: "Oyga qancha xabar yozdim?"
         mode: auto
         expect:
           scope: none
           max_tool_calls: 0
           max_cost_usd: 0.03
+          steps_any: [clarify, stats]
+          steps_none: [search_local, search_server, scan_corpus, discover]
           judge: >-
-            Javob so'rovning imkonsizligini (Telegram'da "Oy" bilan chat yo'q)
-            yumshoq aytadi yoki "oyiga nechta xabar" deb qayta talqin qilishni
-            taklif qiladi; uydirma raqam keltirmaydi.
+            Agar javob aniqlashtiruvchi savol bo'lsa — u bitta savol va ikkala
+            o'qilishni variant qilib beradi («Oy» nomli chat / shu oy). Aks
+            holda javob shu oyda (joriy oy boshidan bugungacha) yozilgan
+            xabarlar sonini aniq raqam bilan beradi. Uydirma raqam yo'q.
 
   - id: daily-41
     title: "U nima dedi (yangi suhbat, kontekst yo'q)"

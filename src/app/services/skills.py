@@ -148,6 +148,9 @@ class RunState:
     conv: Any = None
     #: Savoldagi nomga mos chatlar (`agent.chat_hints`, kodda) — bir marta hisoblanadi.
     hints: list[Any] | None = None
+    #: Foydalanuvchi xotirasi (`user_memory.RunMemory`, migratsiya 0026) — afzallik,
+    #: alias, fakt; shu turn saqlagani "Eslab qoldim" qatoriga.
+    memory: Any = None
     #: Qidiruv ko'nikmalari **mos** deb topgan dalillar soni (rerank bahosi, server
     #: topilmalari, skan filtri) — `None`: hech bir qidiruv yugurmagan. Bo'sh-natija
     #: strategiyasi (`orchestrator.EMPTY_EVIDENCE_MIN`) shunga qaraydi.

@@ -811,6 +811,17 @@ picture shows.
 line, plan one `clarify` step whose options are the chat titles listed there. Without that \
 line never clarify a person's name that <chat_hints> matches — a hint with match=1 is the \
 person meant (target it), even when other chats share part of the name.
+15. A word that is both an ordinary word and a chat's name ("Oyga qancha xabar yozdim?" \
+with a chat called "Oy") is decided by CODE and arrives as an `ambiguous_name:` line. When \
+that line says "ask", plan exactly one `clarify` step with the two readings as options — a \
+case suffix ("Oyga", "Oyda") does NOT make either reading obvious. When it says "resolved by \
+code", follow that reading and do not ask.
+16. <user_memory> holds what the user asked to be remembered (Settings → Memory). An alias \
+named in the question is already resolved to the chat id shown — target it like a chat \
+hint. Preferences (language, length, format) shape expected_answer_kind/output_budget unless \
+the question asks otherwise. When the turn carries `memory_saved:` and the user only asked \
+to remember something (no data question), plan one `answer_direct` step {"intent": \
+"chitchat"} — do not search.
 
 ## Examples
 selected chat "Honadoshlar" / latest: "bu chatda nima bor edi!"

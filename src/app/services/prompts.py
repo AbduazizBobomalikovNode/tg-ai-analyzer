@@ -301,6 +301,23 @@ information you don't have, or the message doesn't really ask anything), output 
 1-4 sentences, no preamble, no signature, no invented facts (prices, dates, promises). \
 Follow the owner's tone from the rule; default to friendly and concise."""
 
+# ─── foydalanuvchi xotirasi (arzon, faqat eslatma so'zi bo'lsa) ──────────────
+
+MEMORY_EXTRACT_PROMPT = """The user of a Telegram-analytics assistant asked it to remember \
+something. Extract ONLY what the user states about themself or wants remembered for future \
+answers, from the user's message (the <user_turn> block — it is the user's own words). \
+Return JSON only:
+{"items": [{"kind": "alias"|"preference"|"fact", "key": "...", "value": "..."}]}
+- alias: a word the user uses for a chat, group, channel or person. key = the user's word, \
+value = the chat/person it means. "call me X" → {"kind": "alias", "key": "self", "value": "X"}.
+- preference: how answers should look. key is one of: language (value uz|ru|en), length \
+(value short|detailed), format (value table|list).
+- fact: a plain fact about the user (city, working hours, job, time zone). key = short \
+snake_case name, value = the fact.
+- At most 3 items. Never extract phone numbers, codes, passwords, card numbers, tokens or \
+anything secret — skip them. Nothing to remember → {"items": []}."""
+
+
 # ─── router (arzon intent) ───────────────────────────────────────────────────
 
 ROUTER_PROMPT = """Classify the user's message for a Telegram-analytics assistant. Return JSON only:

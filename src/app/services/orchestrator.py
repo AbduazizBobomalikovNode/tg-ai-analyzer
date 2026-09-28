@@ -36,7 +36,7 @@ import asyncio
 import json
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -54,8 +54,10 @@ from app.services import limits as LIM
 from app.services import output_formats as OF
 from app.services import search as S
 from app.services import skills as SK
+from app.services import textnorm as TN
 from app.services import timewin as TW
 from app.services import untrusted as U
+from app.services import user_memory as UM
 from app.services.prompts_deep import (
     DEEP_PLAN_PROMPT,
     DIGEST_SYNTH_NOTE,
@@ -167,15 +169,52 @@ def selected_lines(chats: list[Chat]) -> list[str]:
     ]
 
 
-def window_fact(question: str, *, tz: str, now: datetime) -> str:
-    """Savoldagi oyna — **kodda** (`timewin`), planner uchun fakt satri."""
+def window_fact(question: str, *, tz: str, now: datetime, bare_ok: bool = True) -> str:
+    """Savoldagi oyna — **kodda** (`timewin`), planner uchun fakt satri.
+
+    `bare_ok` — aniqlovchisiz "Oyga qancha xabar yozdim?" joriy davr bo'lib
+    o'qiladi (`bare_period`); so'z chat nomi ham bo'lsa (`Ambiguity`) — yo'q.
+    """
     parsed = TW.parse_window(question, tz=tz, now=now)
     if parsed is None:
+        kind = bare_period(question, tz=tz, now=now) if bare_ok else None
+        win = TW.period_window(kind, tz=tz, now=now) if kind else None
+        if win is not None:
+            return (
+                f"time_window: {kind} {TW.format_window(win)} — a bare period word without "
+                "a determiner in a count question, read by code as the current period; the "
+                "system applies it on its own"
+            )
         return "time_window: none named in the question"
     return (
         f"time_window: {parsed.kind} {TW.format_window(parsed)} — parsed by code from the "
         "question; the system applies it on its own"
     )
+
+
+#: Aniqlovchisiz davr so'zi sanoq savolida: "Oyga qancha xabar yozdim?" → shu oy.
+BARE_PERIOD_RE = re.compile(r"(?<![\w'])(oy|hafta|yil)(?:ga|da)(?![\w'])")
+BARE_COUNT_RE = re.compile(r"\b(?:qancha|nechta|necha)\b")
+_BARE_KIND = {"oy": "this_month", "hafta": "this_week", "yil": "this_year"}
+
+
+def bare_period(question: str, *, tz: str, now: datetime | None = None) -> str | None:
+    """Aniqlovchisiz davr so'zi sanoq savolida ("Oyga / haftada / yilda qancha …") → joriy davr.
+
+    Faqat sanoq savolida va `timewin` oyna topmaganda. "Har oyga", "bir oyda",
+    "necha oyda" — boshqa ma'no (o'rtacha / davomiylik), bu yerga tushmaydi.
+    """
+    if TW.parse_window(question, tz=tz, now=now) is not None:
+        return None
+    q = TW.fold(question)
+    if not BARE_COUNT_RE.search(q):
+        return None
+    m = BARE_PERIOD_RE.search(q)
+    if m is None:
+        return None
+    if CS.WORD_BEFORE_RE.search(q[: m.start()]):
+        return None
+    return _BARE_KIND[m.group(1)]
 
 
 def build_orch_prompt(
@@ -190,8 +229,14 @@ def build_orch_prompt(
     state_block: str = "",
     hint_lines: list[str] | None = None,
     collision_line: str = "",
+    ambiguity_line: str = "",
+    memory_block: str = "",
+    bare_ok: bool = True,
 ) -> str:
     """Eski planner kirishi + tanlangan chatlar, vaqt oynasi fakti va rejim qopqog'i.
+
+    `ambiguity_line` — so'z/chat nomi ikki ma'noliligi (`ambiguity_fact`),
+    `memory_block` — foydalanuvchi xotirasi (`user_memory.render_block`).
 
     Xabar **matni** yo'q. Tanlangan chat sarlavhalari ham begona ma'lumot —
     ular alohida konvertda, `neutralize` dan o'tgan. `state_block` — suhbat
@@ -218,9 +263,13 @@ def build_orch_prompt(
         )
     if state_block:
         parts.append(state_block)
+    if memory_block:
+        parts.append(memory_block)
     if collision_line:
         parts.append(collision_line)
-    parts.append(window_fact(question, tz=tz, now=now))
+    if ambiguity_line:
+        parts.append(ambiguity_line)
+    parts.append(window_fact(question, tz=tz, now=now, bare_ok=bare_ok))
     allowed = ", ".join(SK.allowed_skills(mode))
     parts.append(f"mode_ceiling: {mode} — allowed skills: {allowed}")
     return "\n".join(parts)
@@ -534,8 +583,15 @@ def parse_orch_plan(
     now: datetime,
     conv: CS.ConvState | None = None,
     hints: list[Any] | None = None,
+    ambiguity: CS.Ambiguity | None = None,
+    memory_chats: list[int] | None = None,
 ) -> OrchPlan:
     """Planner JSON → `OrchPlan`. Eski maydonlar `deep_search.parse_plan` dan o'tadi.
+
+    `ambiguity` — savoldagi so'z ham umumiy so'z, ham chat nomi
+    (`conv_state.word_chat_ambiguity`): `ask` → bitta `clarify`, `chat` → o'sha
+    chat, `word` → oddiy so'z (aniqlovchisiz davr so'zi → joriy davr).
+    `memory_chats` — xotira aliaslari yechgan chatlar (`user_memory.alias_matches`).
 
     `conv` — suhbat holati: referent ("u", "o'sha guruh") oxirgi entity
     chatiga, follow-up'da oxirgi oyna meros (`conv_state.apply_to_plan`) —
@@ -573,6 +629,33 @@ def parse_orch_plan(
         target = "selected"
     elif sel_synced:
         target = "all"
+    known_set = set(known_chats)
+    force_all = SC.force_all_chats(plan.standalone_question or question)
+    # Xotira aliaslari ("Ishxona" → chat) — **kod** yechgan (`user_memory.alias_matches`).
+    alias_ids = [c for c in (memory_chats or []) if c in known_set]
+    if alias_ids and not sel_synced and not force_all:
+        plan.chats = alias_ids + [c for c in (plan.chats or []) if c not in alias_ids]
+        target = list(plan.chats)
+        notes.append("memory: alias → " + ", ".join(f"[id:{c}]" for c in alias_ids))
+    # So'z = chat nomi: tuzilma chatni aytgan ("«Oy» chati") — o'sha chat.
+    amb = ambiguity
+    if amb is not None and amb.reading == "chat" and not sel_synced and amb.chat_id in known_set:
+        plan.chats = [amb.chat_id]
+        target = [amb.chat_id]
+        notes.append(f"guard: {amb.token!r} is the chat [id:{amb.chat_id}] ({amb.why})")
+    # "Oyga qancha xabar yozdim?" — aniqlovchisiz davr so'zi → joriy davr (kodda).
+    if (amb is None or amb.reading == "word") and not plan.window_from_question:
+        bare = bare_period(question, tz=tz, now=now)
+        win = TW.period_window(bare, tz=tz, now=now) if bare else None
+        if win is not None:
+            plan.since, plan.until = win.since, win.until
+            plan.window_from_question = True
+            plan.window_kind = str(bare)
+            plan.window_tz = win.tz
+            plan.retrieval_kind = DS.apply_retrieval_kind(
+                plan, plan.retrieval_kind, question=question
+            )
+            notes.append(f"window: bare period word → {bare}")
     applied = CS.Applied()
     if conv is not None:
         applied = CS.apply_to_plan(
@@ -621,6 +704,18 @@ def parse_orch_plan(
         raw_question=question,
     )
     notes.extend(guard_notes)
+    if (
+        amb is not None
+        and amb.reading == "ask"
+        and not sel_synced
+        and not applied.chats
+        and plan.intent_follow_up not in DS.DIRECT_FOLLOW_UPS
+    ):
+        # Kod ikki o'qilishni topdi va tuzilma hal qilmadi — planner nima desa ham,
+        # bitta savol (15-qoida): "Oyga" = oy? yoki "Oy" chati?
+        if [s.skill for s in steps] != ["clarify"]:
+            notes.append(f"guard: {amb.token!r} is a word and a chat name → clarify")
+        steps = [ambiguity_clarify(amb, CS.detect_language(question))]
     kind = data.get("expected_answer_kind")
     budget = data.get("output_budget")
     return OrchPlan(
@@ -731,6 +826,59 @@ def resolve_collision(
     return [clarify], target, {"key": key, "chat_ids": ids}
 
 
+# ─── so'z / chat nomi ikki ma'noliligi ("Oyga" — oy yoki "Oy" chati) ─────────
+
+_CLARIFY_WORD = {
+    "uz": "«{token}» deganda nimani nazarda tutyapsiz?",
+    "ru": "Что вы имеете в виду под «{token}»?",
+    "en": "What do you mean by “{token}”?",
+}
+
+
+def ambiguity_fact(amb: CS.Ambiguity | None) -> str:
+    """Planner uchun `ambiguous_name:` fakti — **kod** topgan va o'qilishi.
+
+    `ask` — tuzilma hech narsani hal qilmadi (daily-40: "Oyga" + "Oy" chati):
+    bitta `clarify`, ikkala variant bilan (15-qoida). `chat` / `word` — kod
+    hal qildi, planner shunga amal qiladi. Sarlavha begona matn — `neutralize`.
+    """
+    if amb is None:
+        return ""
+    title = U.neutralize(amb.title)[:80]
+    head = f"ambiguous_name: {U.neutralize(amb.token)[:40]!r}"
+    if amb.reading == "chat":
+        return (
+            f'{head} resolved by code → chat "{title}" [id:{amb.chat_id}] ({amb.why}) — '
+            "target that chat"
+        )
+    if amb.reading == "word":
+        return (
+            f'{head} resolved by code → the ordinary word "{amb.word}" ({amb.why}); the chat '
+            f'"{title}" is not meant'
+        )
+    return (
+        f'{head} → chat "{title}" [id:{amb.chat_id}] | the ordinary word "{amb.word}" — '
+        "computed by code, the sentence does not decide; ask ONE clarifying question with "
+        "both readings (rule 15)"
+    )
+
+
+def ambiguity_clarify(amb: CS.Ambiguity, locale: str) -> Step:
+    """Ikki o'qilishli `clarify` — variant matnlari o'zi tuzilma beradi.
+
+    "«Oy» chati" (qo'shtirnoq + "chati") va "shu oy (vaqt)" ("shu") — javob
+    sifatida qaytsa, keyingi turn'da `word_chat_ambiguity` uni **kodda** hal qiladi.
+    """
+    loc = locale if locale in _CLARIFY_WORD else "uz"
+    ask = _CLARIFY_WORD[loc].format(token=U.attr(amb.token, max_chars=40))
+    return Step(
+        "clarify",
+        {"question": ask, "options": [amb.chat_option(loc), amb.word_option(loc)]},
+        "a word of the question is also a chat's name",
+        "guard",
+    )
+
+
 def plan_task() -> Task:
     """Planner vazifasi — `ORCHESTRATOR_PLAN_TASK` (`route|search`, sukut `search`)."""
     return Task.ROUTE if get_settings().orchestrator_plan_task == "route" else Task.SEARCH
@@ -751,6 +899,9 @@ async def plan_orchestrated(
     conv: CS.ConvState | None = None,
     hint_lines: list[str] | None = None,
     hints: list[Any] | None = None,
+    ambiguity: CS.Ambiguity | None = None,
+    memory_block: str = "",
+    memory_chats: list[int] | None = None,
 ) -> OrchPlan:
     """**Bitta** planner chaqiruvi (`plan_task()`). Yiqilsa — kod sukuti bilan davom.
 
@@ -779,6 +930,9 @@ async def plan_orchestrated(
             state_block=state_block,
             hint_lines=hint_lines,
             collision_line=collision_line,
+            ambiguity_line=ambiguity_fact(ambiguity),
+            memory_block=memory_block,
+            bare_ok=ambiguity is None or ambiguity.reading == "word",
         )
 
     prompt = prompt_for(history)
@@ -813,6 +967,8 @@ async def plan_orchestrated(
         now=when,
         conv=conv,
         hints=hints,
+        ambiguity=ambiguity,
+        memory_chats=memory_chats,
     )
     out.planner_ok = ok
     return out
@@ -1095,6 +1251,81 @@ async def _load_selected(
     return [found[c] for c in ids if c in found]
 
 
+def _prepend_hint(ctx: SK.RunState, hint: Any) -> None:
+    hints = ctx_hints(ctx)
+    ctx.hints = [hint, *(h for h in hints if int(h.chat_id) != int(hint.chat_id))]
+
+
+async def _prepare_memory_and_names(ctx: SK.RunState) -> CS.Ambiguity | None:
+    """Xotira (yuklash, shu turn'dan ajratish, aliaslar) va so'z/chat nomi ikki ma'noliligi.
+
+    * til afzalligi → `ctx.locale` (sintez, yorliqlar);
+    * savolda nomlangan alias → chat maslahati **birinchi** (`chat_hints` dan
+      oldin) va `conv_state.resolved_entities` ga (referent keyin shu chat);
+    * `word_chat_ambiguity` "chat" desa — o'sha chat maslahat bo'lib qo'shiladi
+      (holatga ham tushsin: `chat_hints` 2 harfli "Oy" ni hech qachon topmaydi).
+    """
+    from app.services import agent as AG
+
+    ctx.memory = await UM.prepare(
+        ctx.session_factory,
+        ctx.meter.chat,
+        user_id=ctx.user_id,
+        conversation_id=ctx.conversation_id,
+        question=ctx.raw_question,
+    )
+    lang = ctx.memory.memory.pref("language")
+    if lang:
+        ctx.locale = lang
+    if ctx.memory.enabled:
+        ctx.memory.aliases = UM.alias_matches(
+            ctx.raw_question, ctx.memory.memory.items, list(ctx.chats_by_id.values())
+        )
+    for item, hint in reversed(ctx.memory.aliases):
+        _prepend_hint(ctx, replace(hint, score=1.0))
+        if ctx.conv is not None:
+            key = U.attr(item.key, max_chars=64)
+            ctx.conv.resolved_entities.pop(key, None)
+            ctx.conv.resolved_entities[key] = {
+                "chat_id": int(hint.chat_id),
+                "title": U.attr(str(hint.title), max_chars=120),
+                "kind": U.attr(str(hint.kind), max_chars=16),
+            }
+            ctx.conv.last_entity = key
+    await UM.touch_used(ctx.session_factory, ctx.memory, user_id=ctx.user_id)
+    amb = CS.word_chat_ambiguity(
+        ctx.raw_question,
+        ctx.chats_by_id.values(),
+        selected=ctx.selected,
+        state=ctx.conv,
+    )
+    if amb is not None and amb.reading == "ask":
+        # "Bugun" chati + "bugun qancha yozdim" — `timewin` so'zni vaqt iborasi
+        # sifatida o'qidi ("bugun", "kecha"): bu tuzilma, so'rash shart emas.
+        parsed = TW.parse_window(ctx.raw_question, tz=ctx.tz)
+        if parsed is not None and amb.word in TN.uz_fold(parsed.phrase or ""):
+            amb.reading, amb.why = "word", "time phrase"
+    if amb is not None and amb.reading == "chat":
+        chat = ctx.chats_by_id.get(amb.chat_id)
+        if chat is not None:
+            _prepend_hint(
+                ctx,
+                AG.ChatHint(
+                    chat_id=int(chat.id),
+                    title=U.attr(str(chat.title or "")) or f"chat {chat.id}",
+                    kind=str(getattr(chat.type, "value", chat.type) or ""),
+                    msgs=int(chat.synced_total or 0),
+                    last=chat.last_message_at
+                    if isinstance(chat.last_message_at, datetime)
+                    else None,
+                    score=1.0,
+                ),
+            )
+    if amb is not None:
+        log.info("orch.word_chat_ambiguity", reading=amb.reading, why=amb.why, chat_id=amb.chat_id)
+    return amb
+
+
 async def run_pipeline(
     session_factory: DS.SessionFactory,
     account_id: int,
@@ -1183,6 +1414,9 @@ async def run_pipeline(
         ctx.notes.append("selected: some context chats are not synced yet")
     # Suhbat holati (migratsiya 0024) — referent/oyna merosi va keyingi turn uchun.
     ctx.conv = await CS.load(session_factory, conversation_id)
+    # Foydalanuvchi xotirasi (0026) — byudjetdan keyin, darvozadan oldin: "meni Aziz
+    # deb chaqir" salomlashuv darvozasiga tushsa ham saqlanadi.
+    ambiguity = await _prepare_memory_and_names(ctx)
 
     # ── (a) kod darvozasi: salom / meta — planner ham chaqirilmaydi ──────────
     gate = DS.direct_intent(question, history)
@@ -1225,6 +1459,9 @@ async def run_pipeline(
                 conv=ctx.conv,
                 hint_lines=[hint_line(h) for h in ctx_hints(ctx)],
                 hints=ctx_hints(ctx),
+                ambiguity=ambiguity,
+                memory_block=UM.render_block(ctx.memory),
+                memory_chats=[int(h.chat_id) for _it, h in ctx.memory.aliases],
             )
             ctx.plan = orch.plan
             ctx.question = orch.plan.standalone_question or question
@@ -1502,7 +1739,7 @@ async def _finish_terminal(
 
     Eski `finish_direct` bilan bir xil yozuv va hodisalar.
     """
-    answer = res.answer
+    answer = with_memory_note(ctx, res.answer)
     state["answer"] = answer
     for start in range(0, len(answer), DS.TOKEN_CHUNK_CHARS):
         await DS._emit(ctx.events, "token", text=answer[start : start + DS.TOKEN_CHUNK_CHARS])
@@ -1622,7 +1859,7 @@ async def _finish_agent(
     Qamrov da'vosi yo'q: agent nimani ko'rgani tool jurnalida (`tool_calls`).
     """
     meta = ctx.agent_meta or {}
-    answer = ctx.agent_answer or _EMPTY_AGENT
+    answer = with_memory_note(ctx, ctx.agent_answer or _EMPTY_AGENT)
     full_answer = f"{answer}{steps_footer(ctx, orch.steps)}"
     state["answer"] = full_answer
     for start in range(0, len(answer), DS.TOKEN_CHUNK_CHARS):
@@ -1777,6 +2014,18 @@ MAX_STEP_NOTES = 8
 STEP_NOTE_CHARS = 300
 
 
+def _memory_pref(ctx: SK.RunState, key: str) -> str:
+    return ctx.memory.memory.pref(key) if ctx.memory is not None else ""
+
+
+def with_memory_note(ctx: SK.RunState, answer: str) -> str:
+    """Shu turn xotiraga nimadir yozgan bo'lsa — javob oxirida **bitta** qisqa qator."""
+    if ctx.memory is None or not ctx.memory.saved:
+        return answer
+    note = UM.saved_note(ctx.memory.saved, ctx.locale)
+    return f"{answer}\n\n{note}" if note else answer
+
+
 def step_notes(ctx: SK.RunState) -> list[str]:
     """Ko'nikmalar `SkillResult.notes` i (masalan `output_formats.FORMAT_NOTE`) — sintezga.
 
@@ -1856,10 +2105,15 @@ async def _finish_answer(
     if facts:
         notes.append(FACTS_SYNTH_NOTE)
     notes.extend(step_notes(ctx))
+    mem_note = UM.synth_note(ctx.memory) if ctx.memory is not None else ""
+    if mem_note:
+        notes.append(mem_note)
     notes.append(
         f"expected_answer_kind: {orch.expected_answer_kind} (steps: "
         f"{' → '.join(s.skill for s in orch.steps)})"
     )
+    if _memory_pref(ctx, "length") == "short" and orch.output_budget == "normal":
+        orch.output_budget = "short"
     budget = answer_budget(ctx, orch)
     empty = empty_result(ctx)
     if empty:
@@ -1921,6 +2175,8 @@ async def _finish_answer(
         unbacked = CMP.unbacked_numbers(answer, facts, extra_text=claims_block)
         if unbacked:
             log.warning("orch.unbacked_numbers", numbers=unbacked[:10])
+    answer = with_memory_note(ctx, answer)
+    state["answer"] = answer
     searched_chats = [
         ctx.chats_by_id[cid]
         for cid in sorted({h.chat_id for h in ctx.ranked if h.chat_id})

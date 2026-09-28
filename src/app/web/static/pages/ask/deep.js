@@ -250,6 +250,7 @@ const SKILL_STAGE = {
   chat_digest: "digest", stats: "stats", compute: "compute", window: "estimate",
   search_local: "search", reuse_prior: "search", search_server: "server",
   discover: "server", scan_corpus: "estimate", agent_tools: "tools",
+  trends: "stats", extract: "compute",
 };
 
 /**
