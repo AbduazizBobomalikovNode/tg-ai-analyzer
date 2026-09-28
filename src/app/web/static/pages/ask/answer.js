@@ -545,6 +545,8 @@ export function buildFooter(m, shell) {
     },
   }));
 
+  if (m.id && S.convId) row.appendChild(exportButton(S.convId, m.id));
+
   if (m.id) {
     row.appendChild(iconButton("refresh-cw", t("web.ask.regenerate"), {
       onclick: () => regenerate(m.id, shell),
@@ -573,6 +575,25 @@ export function buildFooter(m, shell) {
       }, label))));
   }
   return foot;
+}
+
+/**
+ * "Eksport" — jadvallar, faktlar, sitatalar va qamrov CSV / MD / JSON bo'lib.
+ * Oddiy `<a download>` GET havolasi: server egalikni cookie bo'yicha
+ * tekshiradi (`routers/export.py`), telefon raqamlari u yerda tozalanadi.
+ */
+function exportButton(convId, msgId) {
+  const base = `/api/conversations/${encodeURIComponent(convId)}/messages/${encodeURIComponent(msgId)}/export`;
+  const item = (fmt) => el("a.chip.tool", {
+    href: `${base}?format=${fmt}`,
+    download: `tgai-${convId}-${msgId}.${fmt}`,
+    rel: "noopener",
+  }, [icon("download"), el("span", null, t(`web.export.${fmt}`))]);
+  return iconButton("download", t("web.export.title"), {
+    onclick: () => openSheet(t("web.export.title"), el("div.followups", {
+      role: "group", "aria-label": t("web.export.title"),
+    }, [item("csv"), item("md"), item("json"), el("p.muted", null, t("web.export.hint"))])),
+  });
 }
 
 /* ── tarixdagi xabarlar uchun ulagichlar ──────────────────────────── */

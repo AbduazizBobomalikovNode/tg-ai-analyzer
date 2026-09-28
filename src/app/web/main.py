@@ -36,6 +36,7 @@ from app.web.routers import briefings as briefings_router
 from app.web.routers import chat as chat_router
 from app.web.routers import content as content_router
 from app.web.routers import deep as deep_router
+from app.web.routers import export as export_router
 from app.web.routers import pages as pages_router
 from app.web.routers import settings as settings_router
 from app.web.routers import stats as stats_router
@@ -119,6 +120,7 @@ def create_app() -> FastAPI:
     app.include_router(alerts_router.router)  # phase3/C
     app.include_router(briefings_router.router)  # phase3/B
     app.include_router(settings_router.router)  # ui/R1b
+    app.include_router(export_router.router)  # javob eksporti
     app.include_router(pages_router.router)
 
     @app.get("/health")

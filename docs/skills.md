@@ -163,6 +163,19 @@ tokenlari `render_table(raw_cols=…)` bilan buzilmaydi; oyna yo'lida keltirilga
 xabarlar dalilga qo'shiladi (aks holda `strip_invalid_citations` tokenni
 o'chirardi).
 
+## Eksport (`services/export.py`, `web/routers/export.py`)
+
+`GET /api/conversations/{id}/messages/{msg_id}/export?format=csv|md|json` —
+egasi (cookie; begona suhbat yoki user turn → 404), GET bo'lgani uchun
+`X-Requested-With` shart emas. Chiqadi: javobdagi GFM jadvallar va ```chart
+(yorliq × seriya), `context.facts`, `context.citations` + jadvaldagi
+tokenlar (havola `analytics.msg_link`, faqat foydalanuvchining chatlari),
+`context.coverage` skalyarlari. CSV — UTF-8 BOM, bo'limlar `[nom]` qatori
+bilan, formula in'ektsiyasi `'` bilan qochiriladi;
+`Content-Disposition: attachment; filename="tgai-<conv>-<msg>.<ext>"`.
+Telefon — o'sha `strip_phones`. UI: javob futeridagi "Eksport" tugmasi
+(`answer.js::exportButton`) varaqda CSV / MD / JSON havolalarini ochadi.
+
 ## Orkestrator bilan ma'lum chegaralar (ulagich egasi uchun)
 
 1. `apply_guards` G1/G2 (`DIRECT_FOLLOW_UPS` → `answer_direct`,
