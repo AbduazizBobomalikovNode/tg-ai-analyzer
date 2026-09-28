@@ -257,6 +257,7 @@
   "web.skill.cancel_reminder": "Предложение отмены напоминания",
   "web.skill.send_result": "Предложение отправки результата",
   "web.skill.trends": "Рост просмотров / реакций",
+  "web.skill.extract": "Извлечение ссылок / адресов / цен",
   "web.skill.automation_note": "Создаётся только после вашего подтверждения — в Telegram ничего не пишется.",
   "web.dash.actions": "Действия записи",
   "web.pending.title": "Действия, ожидающие подтверждения",

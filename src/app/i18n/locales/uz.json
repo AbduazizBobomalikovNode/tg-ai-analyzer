@@ -257,6 +257,7 @@
   "web.skill.cancel_reminder": "Eslatmani bekor qilish taklifi",
   "web.skill.send_result": "Natijani yuborish taklifi",
   "web.skill.trends": "Ko'rish / reaksiya o'sishi",
+  "web.skill.extract": "Havola / manzil / narx ajratish",
   "web.skill.automation_note": "Tasdiqlaganingizdan keyingina yaratiladi — Telegram'ga hech narsa yozilmaydi.",
   "web.dash.actions": "Yozish amallari",
   "web.pending.title": "Tasdiq kutayotgan amallar",

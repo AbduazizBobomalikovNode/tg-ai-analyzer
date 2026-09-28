@@ -32,10 +32,11 @@ NEW = {
     "cancel_reminder",
     "send_result",
     "trends",
+    "extract",
 }
 WRITES = {"create_alert", "set_briefing", "remind", "cancel_reminder", "send_result"}
 #: Begona xabar matnini ko'radi — chiqishi planner'ga tushmaydi.
-QUARANTINED = {"send_result", "trends"}
+QUARANTINED = {"send_result", "trends", "extract"}
 
 
 def test_register_adds_skills_without_touching_core() -> None:
@@ -279,7 +280,7 @@ def test_turn_found_nothing() -> None:
 def test_analysis_skills_catalog_entries() -> None:
     """`trends` / `extract`: LLM'siz (0$), yozish emas, katalogda ikki misol bilan."""
     reg = {s.name: s for s in SX.ext_skills()}
-    for name in ("trends",):
+    for name in ("trends", "extract"):
         s = reg[name]
         assert s.cost_usd == 0.0 and not s.confirm_modes and not s.terminal
         assert s.description_uz.count("→") >= 2 and s.description_en.count("→") >= 2

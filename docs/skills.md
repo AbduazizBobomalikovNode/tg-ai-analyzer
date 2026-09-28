@@ -16,6 +16,7 @@ yuklangan modulni ko'rib, hech narsani ro'yxatga olmasdi.
 | `cancel_reminder` | `job_ids` | fast | yo'q | har rejimda | ha |
 | `send_result` | `chat_id` / `chat`, `text_from` (answer/facts) | fast | **ha** | har rejimda | yo'q (o'zi to'xtaydi) |
 | `trends` | `chat_id`, `scope` (all), `period`, `metric` (views/reactions/forwards/replies), `top_n`, `compare` (no) | fast | **ha** | yo'q | yo'q |
+| `extract` | `kind` (links/addresses/prices/dates/files/mentions/all, vergul bilan), `chat_id` | fast | **ha** | yo'q | yo'q |
 
 "Tasdiq" — `Skill.confirm_modes` (katalogda "asks for confirmation"). Bu
 `agent_actions` tasdig'i: ko'nikma `needs_confirm` natijasini **qo'ymaydi**,
@@ -144,6 +145,23 @@ Chiqish: `tr_*` faktlar, top postlar jadvali (`wrap_block`: chat, sana,
 o'sish, oxirgi qiymat, sitata tokeni — xabar matni yo'q) va top postlar
 dalil sifatida (`S.Hit`, `neutralize`). Karantinda: matnni ko'radi.
 Metrika ustuni oq ro'yxatdan (`METRICS`) — SQL'ga boshqa nom tushmaydi.
+
+## `extract` (`services/extract.py`)
+
+Deterministik (regex). Manba: joriy dalil (`ctx.ranked`) yoki — dalil
+bo'lmasa — `chat_id` / reja / tanlangan chatlarning oynasi (oxirgi 7 kun
+sukut, ≤2000 xabar). Turlar: havola (+domen), manzil ("manzil:" yorlig'i,
+ko'cha/uy/mavze/tuman/mahalla, ru/en), narx (so'm/$/UZS/mln), sana/vaqt,
+fayl (`document` sanog'i — **fayl nomi saqlanmaydi**, `messages` da ustun
+yo'q; matnda tilga olingan `*.pdf` va h.k. alohida), @mention/#heshteg.
+
+**Telefon raqami hech qachon chiqmaydi**: har matn avval
+`extract.strip_phones` dan o'tadi (`[tel]`), qolgan naqshlar tozalangan
+matnda qidiriladi; raqamlar faqat sanaladi (`ex_phone_n`). Faktlar
+`ex_<kind>_n`, `ex_messages_n`, `ex_documents_n`. Jadvaldagi sitata
+tokenlari `render_table(raw_cols=…)` bilan buzilmaydi; oyna yo'lida keltirilgan
+xabarlar dalilga qo'shiladi (aks holda `strip_invalid_citations` tokenni
+o'chirardi).
 
 ## Orkestrator bilan ma'lum chegaralar (ulagich egasi uchun)
 

@@ -796,6 +796,7 @@ def ext_skills() -> tuple[Skill, ...]:
 
 def analysis_skills() -> tuple[Skill, ...]:
     """`trends` / `extract` — faqat o'qish, LLM'siz, karantinda (xabar matnini ko'radi)."""
+    from app.services import extract as EX
     from app.services import trends as TR
     from app.services.skills import Skill
 
@@ -826,6 +827,26 @@ def analysis_skills() -> tuple[Skill, ...]:
             quarantined=True,
             run=TR.run_trends,
             rail=("stats",),
+        ),
+        Skill(
+            "extract",
+            "dalildan (yoki chat oynasidan) tuzilmali ajratish, regex bilan (LLM yo'q): "
+            "kind=links|addresses|prices|dates|files|mentions|all; har element sitata bilan. "
+            "Telefon raqamlari hech qachon chiqmaydi (faqat soni). Misol: «guruhda bu hafta "
+            "tashlangan havolalar» → extract(kind=links); «ijara e'lonlaridagi narx va "
+            "manzillar» → search_local + extract(kind=prices,addresses)",
+            "structured extraction from the evidence (or a chat window) by regex, no LLM: "
+            "kind=links|addresses|prices|dates|files|mentions|all, each item cited. Phone "
+            "numbers are never output (count only). Example: 'links shared in the group this "
+            "week' → extract(kind=links); 'prices and addresses in the rent posts' → "
+            "search_local + extract(kind=prices,addresses)",
+            {"kind": "str", "chat_id": "int"},
+            0.0,
+            1.0,
+            "fast",
+            quarantined=True,
+            run=EX.run_extract,
+            rail=("compute",),
         ),
     )
 
