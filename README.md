@@ -16,6 +16,82 @@ DeepSeek API kalitini ulaysiz.
 
 **Sahifa:** [abduazizbobomalikovnode.github.io/tg-ai-analyzer/](https://abduazizbobomalikovnode.github.io/tg-ai-analyzer/)
 
+<div align="center">
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/ask-answer-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/screenshots/ask-answer-light.png">
+  <img src="docs/screenshots/ask-answer-light.png" alt="AI chat: «Bu hafta kanalda nima muhokama qilindi?» savoliga manbalar, qamrov, raqamlangan sitatalar va jadval bilan javob" width="900">
+</picture>
+
+<sub>«Bu hafta kanalda nima muhokama qilindi?» — javob manbalar, qamrov, har da'vo uchun sitata va jadval bilan.</sub>
+
+[Ko'rinish](#korinish) · [Nima qiladi](#nima-qiladi) · [Xavfsizlik](#nima-qilmaydi--texnik-jihatdan) · [Ishga tushirish](#ishga-tushirish) · [Struktura](#struktura) · [Bosqichlar](#bosqichlar)
+
+</div>
+
+## Ko'rinish
+
+> [!NOTE]
+> Barcha skrinshotlar **o'ylab topilgan demo ma'lumot** bilan olingan (alohida demo baza, Telegram va LLM'ga
+> ulanmagan). Ulardagi chatlar, xabarlar va raqamlar haqiqiy emas.
+
+### AI javoblari — natijalar
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/ask-top-posts-light.png" alt="«Eng ko'p ko'rilgan 3 ta post?» savoliga kanal, post, ko'rishlar va manba ustunli jadval, model, token, vaqt, narx va avto-baho tafsilotlari"></td>
+    <td width="50%"><img src="docs/screenshots/actions-pending.png" alt="Amallar sahifasi: agent tayyorlagan ikki yozish amali «Tasdiqlash va yuborish» yoki «Rad etish» ni kutmoqda, pastda tarix"></td>
+  </tr>
+  <tr>
+    <td align="center"><b>Raqamli javob</b><br><sub>Ko'rishlar kodda sanaladi, model faqat yozadi. Ostida: model, tokenlar, vaqt, narx, avto-baho, 👍/👎.</sub></td>
+    <td align="center"><b>Yozish — faqat tasdiq bilan</b><br><sub>Agent xabar yozsa ham hech narsa yuborilmaydi: karta chiqadi, egasi tasdiqlaydi yoki rad etadi.</sub></td>
+  </tr>
+</table>
+
+### Dashboard
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/dashboard-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/screenshots/dashboard-light.png">
+  <img src="docs/screenshots/dashboard-light.png" alt="Dashboard: savollar, xarajat, javob tezligi va sifat kartalari, kunlik grafiklar, modellar va eng faol chatlar kesimi, «Ko'rib chiqish kerak» ro'yxati" width="900">
+</picture>
+
+<sub>30 kun: savollar, xarajat va kunlik byudjet, javob vaqti (median va eng sekin 5%), foydalanuvchi bahosi va
+avto-baho, model va chat kesimlari, ko'rib chiqish kerak bo'lgan javoblar. Grafiklar kutubxonasiz SVG.</sub>
+
+### Chatlar, bugun va alertlar
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/chats-list.png" alt="Chatlar ro'yxati va «Startap yangiliklari» kanali: postlar, ko'rishlar, reaksiyalar, ulashishlar va top postlar"></td>
+    <td width="50%"><img src="docs/screenshots/chat-detail.png" alt="«Toshkent IT hamjamiyati» guruhi sahifasi: statistika va faollik"></td>
+  </tr>
+  <tr>
+    <td align="center"><b>Kanal statistikasi</b><br><sub>Ko'rishlar, reaksiyalar, ulashishlar, davrda qo'shilgan ko'rishlar (snapshot) va top postlar.</sub></td>
+    <td align="center"><b>Guruh sahifasi</b><br><sub>Sinxron holati, faollik va guruh bo'yicha ko'rsatkichlar.</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/today.png" alt="«Bugun» sahifasi: kunlik briefing, alert lentasi, tezkor savollar va kutayotgan amallar"></td>
+    <td width="50%"><img src="docs/screenshots/alerts.png" alt="Alertlar: kalit so'z va ma'no bo'yicha qoidalar, chat, ostona va tanaffus sozlamalari"></td>
+  </tr>
+  <tr>
+    <td align="center"><b>Bugun</b><br><sub>Kunlik briefing, alert lentasi, tezkor savollar va bugungi xarajat — bitta sahifada.</sub></td>
+    <td align="center"><b>Alertlar</b><br><sub>Kalit so'z yoki ma'no (semantik) qoidasi, chat bo'yicha, tanaffus bilan. Xabar boshqaruv botiga keladi.</sub></td>
+  </tr>
+</table>
+
+### Telefonda
+
+<table>
+  <tr>
+    <td width="30%"><img src="docs/screenshots/mobile-ask.png" alt="Telefonda AI chat javobi: manbalar, qamrov va jadval"></td>
+    <td width="30%"><img src="docs/screenshots/mobile-dashboard.png" alt="Telefonda dashboard, qorong'i mavzu"></td>
+    <td valign="middle">Interfeys 320px'dan boshlab moslashadi: pastki tab-bar, sidebar drawer, jadval va diagrammalar
+    gorizontal scroll bilan. Light va dark mavzu.</td>
+  </tr>
+</table>
+
 ## Texnologiyalar
 
 | Qatlam | Stack |
