@@ -1,0 +1,185 @@
+{% extends "_shell.html" %}
+{% import "_macros.html" as m %}
+{% set nav_current = "ask" %}
+{% set pane = "content" %}
+{% block title %}{{ t('web.ask.title') }} · {{ t('web.title') }}{% endblock %}
+{% block body_class %}page-ask{% endblock %}
+
+{# ask.html — AI suhbat yuzasi (ui/R2b).
+   Sahifa **qobiq**: bir dona xabar ham serverda chizilmaydi. Hamma narsa
+   `/api` dan keladi va `static/pages/ask/*.js` chizadi — javob matni faqat
+   `md()` orqali, qolgan har bir satr `el()`/`textContent` bilan.
+
+   Desktop: rail | suhbatlar (pane-list) | tred (pane-content).
+   Mobil: faqat tred; suhbatlar ro'yxati varaqqa (`#conv-sheet`) ko'chadi —
+   DOM tugunining o'zi ko'chiriladi, ikkinchi nusxa chizilmaydi. #}
+
+{% block topbar %}
+<header class="topbar-v2 ask-topbar">
+  <button type="button" class="icon-btn-v2 only-mobile" id="btn-convs"
+          aria-label="{{ t('web.ask.conversations') }}" aria-haspopup="dialog">{{ m.icon("list") }}</button>
+  <h1 class="topbar-h1" id="conv-title">{{ t('web.ask.title') }}</h1>
+  <span class="spacer"></span>
+  <span class="ctx-summary" id="ctx-summary" hidden></span>
+  <button type="button" class="icon-btn-v2" id="btn-actions-open"
+          aria-label="{{ t('web.ask.pending') }}" hidden>
+    {{ m.icon("check-check") }}<span class="nav-badge" id="actions-badge" hidden>0</span>
+  </button>
+  <button type="button" class="icon-btn-v2" data-cmdk-open
+          aria-label="{{ t('web.cmd.open') }}">{{ m.icon("search") }}</button>
+  <button type="button" class="icon-btn-v2" id="btn-conv-menu"
+          aria-label="{{ t('web.ask.conv_menu') }}" aria-haspopup="dialog">{{ m.icon("more-horizontal") }}</button>
+</header>
+{% endblock %}
+
+{% block pane_list %}
+<aside class="pane-list ask-convs" id="convs-pane" aria-label="{{ t('web.ask.conversations') }}">
+  <div class="convs-head">
+    <label class="field-icon">
+      {{ m.icon("search") }}
+      <input type="search" id="conv-search" autocomplete="off" spellcheck="false"
+             placeholder="{{ t('web.ask.search_conversations') }}"
+             aria-label="{{ t('web.ask.search_conversations') }}">
+    </label>
+    <button type="button" class="icon-btn-v2" id="btn-new-conv"
+            aria-label="{{ t('web.ask.new') }}" title="{{ t('web.ask.new') }}">{{ m.icon("plus") }}</button>
+  </div>
+  <ul class="conv-list" id="conv-list" aria-label="{{ t('web.ask.conversations') }}"></ul>
+  <div class="convs-foot">
+    <label class="field-inline" for="account-select">{{ m.icon("database") }}
+      <span class="sr-only">{{ t('web.ask.account') }}</span>
+      <select id="account-select" aria-label="{{ t('web.ask.account') }}"></select>
+    </label>
+  </div>
+</aside>
+{% endblock %}
+
+{% block pane_content %}
+<div class="pane-content ask-pane">
+  <div class="thread-scroll" id="thread-scroll">
+    <div class="thread" id="thread" aria-live="off">
+      <div class="thread-top" id="thread-top" hidden>
+        <button type="button" class="btn ghost small" id="btn-earlier">{{ t('web.ask.load_earlier') }}</button>
+      </div>
+      {% call m.empty_state("sparkles", t('web.ask.empty_title'), t('web.ask.empty_text'), "ask-empty") %}
+      <div class="empty-actions" id="suggests">
+        <button type="button" class="chip suggest">{{ t('web.chat.suggest_1') }}</button>
+        <button type="button" class="chip suggest">{{ t('web.chat.suggest_2') }}</button>
+        <button type="button" class="chip suggest">{{ t('web.chat.suggest_3') }}</button>
+      </div>
+      {% endcall %}
+    </div>
+  </div>
+
+  <div class="banners" id="banners" role="status" aria-live="polite"></div>
+
+  <form class="composer-v2" id="composer" autocomplete="off">
+    <div class="ctx-chips" id="ctx-chips"></div>
+    <div class="composer-box">
+      <textarea id="ask-input" rows="1" enterkeyhint="send"
+                placeholder="{{ t('web.ask.placeholder') }}"
+                aria-label="{{ t('web.ask.placeholder') }}"></textarea>
+      <div class="composer-tools">
+        <button type="button" class="chip tool" id="btn-pick-chats" aria-haspopup="dialog">
+          {{ m.icon("layers") }}<span>{{ t('web.ask.context') }}</span>
+        </button>
+        {# Rejim tanlagich — eski bitta "deep" pilyulasi o'rniga uchta bosqich.
+           `fast` oddiy oqim (`/messages/stream`), `deep`/`exhaustive` —
+           `/api/deep/stream` (`mode` tanada). Tanlov brauzerda saqlanadi
+           (`prefs.ALLOWED` da bunday kalit yo'q — `state.js` ga qarang). #}
+        <div class="segment mode-seg" id="mode-picker" role="radiogroup"
+             aria-label="{{ t('web.ask.mode') }}">
+          <button type="button" role="radio" data-mode="fast" aria-checked="true"
+                  title="{{ t('web.ask.mode_fast_desc') }} · {{ t('web.ask.mode_fast_cost') }}">{{ t('web.ask.mode_fast') }}</button>
+          <button type="button" role="radio" data-mode="deep" aria-checked="false"
+                  title="{{ t('web.ask.mode_deep_desc') }} · {{ t('web.ask.mode_deep_cost') }}">{{ t('web.ask.mode_deep') }}</button>
+          <button type="button" role="radio" data-mode="exhaustive" aria-checked="false"
+                  title="{{ t('web.ask.mode_exhaustive_desc') }} · {{ t('web.ask.mode_exhaustive_cost') }}">{{ t('web.ask.mode_exhaustive') }}</button>
+        </div>
+        <button type="button" class="chip tool" id="btn-expert" aria-haspopup="dialog"
+                aria-label="{{ t('web.ask.expert') }}">{{ m.icon("sliders-horizontal") }}</button>
+        <span class="spacer"></span>
+        <button type="submit" class="btn primary send-btn" id="btn-send"
+                aria-label="{{ t('web.ask.send') }}">{{ m.icon("send") }}<span>{{ t('web.ask.send') }}</span></button>
+        <button type="button" class="btn danger send-btn" id="btn-stop" hidden
+                aria-label="{{ t('web.ask.stop') }}">{{ m.icon("x") }}<span>{{ t('web.ask.stop') }}</span></button>
+      </div>
+      <p class="mode-hint" id="mode-hint"></p>
+    </div>
+  </form>
+</div>
+
+{# Baho kartasi — `estimate` hodisasi bo'yicha to'ldiriladi va bosqich
+   chizig'ining birinchi elementi bo'lib qoladi. Shablonda turishi ataylab:
+   matnlar serverda tarjima qilinadi, JS faqat `cloneNode` + `textContent`
+   qiladi (`innerHTML` yo'q). `exhaustive` tasdiqsiz yuborilganda server
+   `estimate` + `done {needs_confirm:true}` qaytaradi — o'shanda
+   `[data-est-confirm]` ochiladi. #}
+<template id="tpl-estimate">
+  <div class="estimate-card" role="group" aria-label="{{ t('web.ask.est_title') }}">
+    <div class="est-head">{{ m.icon("activity") }}<b>{{ t('web.ask.est_title') }}</b></div>
+    <p class="est-line" data-est-line></p>
+    <div class="est-confirm" data-est-confirm hidden>
+      <p class="est-warn">{{ t('web.ask.est_confirm') }}</p>
+      <div class="est-actions">
+        <button type="button" class="btn primary small" data-est-start>{{ t('web.ask.est_start') }}</button>
+        <button type="button" class="btn ghost small" data-est-fallback>{{ t('web.ask.est_fallback') }}</button>
+      </div>
+    </div>
+  </div>
+</template>
+
+{# Umumiy varaq: chat tanlash, expert, sitata, lightbox, TOC, amallar.
+   Bitta konteyner — `panels.js` mazmunini almashtiradi (fokus tuzog'i bilan). #}
+<div class="sheet" id="ask-sheet" hidden>
+  <div class="sheet-box" role="dialog" aria-modal="true" aria-labelledby="ask-sheet-title">
+    <div class="sheet-grab" aria-hidden="true"></div>
+    <div class="sheet-head">
+      <b id="ask-sheet-title"></b>
+      <button type="button" class="icon-btn-v2" id="ask-sheet-close"
+              aria-label="{{ t('web.close') }}">{{ m.icon("x") }}</button>
+    </div>
+    <div class="sheet-body" id="ask-sheet-body"></div>
+  </div>
+</div>
+
+{# Mobil suhbatlar varag'i — `#convs-pane` shu yerga ko'chiriladi. #}
+<div class="sheet" id="conv-sheet" hidden>
+  <div class="sheet-box" role="dialog" aria-modal="true" aria-label="{{ t('web.ask.conversations') }}">
+    <div class="sheet-grab" aria-hidden="true"></div>
+    <div class="sheet-body" id="conv-sheet-body"></div>
+  </div>
+</div>
+{% endblock %}
+
+{% block head %}{{ super() }}
+<link rel="stylesheet" href="{{ asset('css/pages/ask.css') }}">
+<link rel="modulepreload" href="{{ asset('pages/ask.js') }}">
+<link rel="modulepreload" href="/static/pages/ask/state.js">
+<link rel="modulepreload" href="/static/pages/ask/messages.js">
+{% endblock %}
+
+{% block scripts %}{{ super() }}
+<script type="module">
+  import { initAsk } from "{{ asset('pages/ask.js') }}";
+  initAsk({
+    conversationId: {{ conversation_id | int }},
+    contextDefault: {{ context_default | int }},
+    contextMax: {{ context_max | int }},
+  });
+
+  // Composer balandligini `--composer-h` ga yozadi (`document.body`) —
+  // xabarlar ro'yxati (`css/pages/ask.css` `.thread`) shu bilan pastki
+  // padding oladi, aks holda oxirgi qator composer ostida "qolib"
+  // ko'rinadi (kontekst chiplari/hint matni bilan composer balandligi
+  // o'zgarganda ham to'g'ri qoladi).
+  const composerEl = document.getElementById("composer");
+  if (composerEl && typeof ResizeObserver !== "undefined") {
+    const setComposerHeight = () => {
+      document.body.style.setProperty("--composer-h", `${composerEl.offsetHeight}px`);
+    };
+    new ResizeObserver(setComposerHeight).observe(composerEl);
+    setComposerHeight();
+  }
+</script>
+{% endblock %}

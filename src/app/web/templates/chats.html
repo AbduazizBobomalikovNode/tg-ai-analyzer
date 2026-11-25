@@ -1,0 +1,89 @@
+{% extends "_shell.html" %}
+{% import "_macros.html" as m %}
+
+{# chats.html — `/chats` (R2-A).
+
+   Desktop: ro'yxat paneli (`pane_list`) + kontent paneli (o'rgatuvchi bo'sh
+   holat). Mobil: faqat ro'yxat (`pane="list"`, `pages.py` beradi); qatorga
+   bosilganda `/chats/{id}` ga **push** bo'ladi, ya'ni orqaga qaytish
+   brauzer tarixi orqali ishlaydi.
+
+   Markup bu yerda minimal: qatorlar `static/pages/chats.js` da
+   `lib/dom.js::el()` bilan quriladi — chat sarlavhasi begona matn va u
+   hech qachon `innerHTML` ga tushmaydi. #}
+
+{% block title %}{{ t('web.chats.title') }} · {{ t('web.title') }}{% endblock %}
+{% block body_class %}page-chats{% endblock %}
+
+{% block head %}
+  {{ super() }}
+  <link rel="stylesheet" href="{{ asset('css/pages/chats.css') }}">
+  <link rel="modulepreload" href="{{ asset('pages/chats.js') }}">
+  {% block page_head %}{% endblock %}
+{% endblock %}
+
+{% block pane_list %}
+<aside class="pane-list chats-pane" id="chats-pane" aria-label="{{ t('web.chats.title') }}">
+
+  <div class="chats-head">
+    <div class="chats-head-top">
+      <h1>{{ t('web.chats.title') }}</h1>
+      <button type="button" class="icon-btn-v2" id="chats-sync-all"
+              aria-label="{{ t('web.sync.title') }}" title="{{ t('web.sync.title') }}">
+        {{ m.icon("refresh-cw") }}
+      </button>
+    </div>
+
+    {# Akkaunt almashtirgich — bittadan ko'p akkaunt bo'lsagina ko'rsatiladi #}
+    <div class="chats-account" id="chats-account" hidden>
+      <label class="sr-only" for="chats-account-select">{{ t('web.chats.account') }}</label>
+      <select id="chats-account-select"></select>
+    </div>
+
+    <div class="chats-search">
+      {{ m.icon("search") }}
+      <input id="chats-search" type="search" autocomplete="off" spellcheck="false"
+             placeholder="{{ t('web.chats.search') }}" aria-label="{{ t('web.chats.search') }}"
+             aria-controls="chat-rows">
+      <span class="chats-kbd" aria-hidden="true">/</span>
+    </div>
+
+    <div class="chats-filters">
+      <div class="segment" id="chats-type" role="radiogroup" aria-label="{{ t('web.chats.filter_type') }}">
+        <button type="button" role="radio" data-type="" aria-checked="true">{{ t('web.chats.filter_all') }}</button>
+        <button type="button" role="radio" data-type="channel" aria-checked="false">{{ t('web.chats.filter_channels') }}</button>
+        <button type="button" role="radio" data-type="group" aria-checked="false">{{ t('web.chats.filter_groups') }}</button>
+        <button type="button" role="radio" data-type="private" aria-checked="false">{{ t('web.chats.filter_private') }}</button>
+      </div>
+      <button type="button" class="chip-toggle" id="chats-unsynced" aria-pressed="false">
+        {{ m.icon("wifi-off") }}{{ t('web.chats.unsynced') }}
+      </button>
+    </div>
+  </div>
+
+  <div id="chats-banner"></div>
+
+  {{ m.skeleton_rows(8) }}
+
+  <ul class="chat-rows" id="chat-rows" aria-label="{{ t('web.chats.title') }}"></ul>
+  <div id="chats-sentinel" aria-hidden="true"></div>
+  <div id="chats-selbar"></div>
+</aside>
+{% endblock %}
+
+{% block pane_content %}
+<div class="pane-content scrolls" id="chats-content">
+  {% call m.empty_state("messages-square", t('web.chats.empty_title'), t('web.chats.empty_text'), "chats-empty") %}
+    <div class="suggest-chips" id="chats-suggestions"></div>
+  {% endcall %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+  {{ super() }}
+  <script type="module">
+    import { initChats } from "{{ asset('pages/chats.js') }}";
+    initChats({ selectedId: {{ selected_id | default(0) | int }} });
+  </script>
+  {% block page_scripts %}{% endblock %}
+{% endblock %}

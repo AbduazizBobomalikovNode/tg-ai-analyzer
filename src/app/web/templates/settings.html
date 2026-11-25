@@ -1,0 +1,313 @@
+{% extends "_shell.html" %}
+{% import "_macros.html" as m %}
+{% set nav_current = "settings" %}
+{% block title %}{{ t('web.settings.title') }} · {{ t('web.title') }}{% endblock %}
+{% block body_class %}page-settings{% endblock %}
+
+{% block head %}{{ super() }}
+  <link rel="stylesheet" href="{{ asset('css/pages/settings.css') }}">
+{% endblock %}
+
+{% block topbar %}
+<header class="topbar-v2">
+  <span class="topbar-h1">{{ t('web.settings.title') }}</span>
+  <span class="spacer"></span>
+  <button type="button" class="icon-btn-v2" data-theme-toggle aria-label="{{ t('web.theme.title') }}">{{ m.icon("monitor") }}</button>
+</header>
+{% endblock %}
+
+{# Bo'lim qobig'i `_macros.html::set_section` da — child shablonning top-level
+   makrosi blok ichidan ko'rinmasligi mumkin, import qilingani esa har doim. #}
+
+{% block pane_content %}
+<div class="pane-content scrolls">
+<div class="pane-inner page">
+
+  <div class="page-head">
+    <div>
+      <h1 class="page-title">{{ t('web.settings.title') }}</h1>
+      <p class="page-sub">{{ t('web.settings.subtitle') }}</p>
+    </div>
+  </div>
+
+  <div class="set-layout">
+    <nav class="set-nav" aria-label="{{ t('web.settings.title') }}">
+      <a href="#sec-profile">{{ m.icon("user") }}{{ t('web.settings.sec_profile') }}</a>
+      <a href="#sec-appearance">{{ m.icon("sun") }}{{ t('web.settings.sec_appearance') }}</a>
+      <a href="#sec-ai">{{ m.icon("sparkles") }}{{ t('web.settings.sec_ai') }}</a>
+      <a href="#sec-budget">{{ m.icon("activity") }}{{ t('web.budget.title') }}</a>
+      <a href="#sec-memory">{{ m.icon("brain") }}{{ t('web.memory.title') }}</a>
+      <a href="#sec-write">{{ m.icon("send") }}{{ t('web.settings.sec_write') }}</a>
+      <a href="#sec-autoreply">{{ m.icon("message-circle") }}{{ t('web.ar.title') }}</a>
+      <a href="#sec-briefing">{{ m.icon("inbox") }}{{ t('web.settings.sec_briefing') }}</a>
+      <a href="#sec-privacy">{{ m.icon("shield-check") }}{{ t('web.settings.sec_privacy') }}</a>
+    </nav>
+
+    <div class="set-sections">
+
+      {% call m.set_section("sec-profile", "user", t('web.settings.sec_profile')) %}
+        <div class="field">
+          <span>{{ t('web.settings.display_name') }}</span>
+          <input type="text" id="set-name" readonly>
+          <span class="field-note">{{ t('web.settings.display_name_note') }}</span>
+        </div>
+        <div id="set-accounts"></div>
+        <div class="form-actions">
+          <a class="btn" id="set-add-account" href="/onboarding" hidden>{{ m.icon("plus") }} {{ t('web.settings.add_account') }}</a>
+        </div>
+      {% endcall %}
+
+      {% call m.set_section("sec-appearance", "sun", t('web.settings.sec_appearance')) %}
+        <div class="field">
+          <span>{{ t('web.theme.title') }}</span>
+          <div class="segment" id="set-theme" role="tablist" aria-label="{{ t('web.theme.title') }}">
+            <button type="button" role="tab" data-mode="system" aria-selected="true">{{ t('web.theme.system') }}</button>
+            <button type="button" role="tab" data-mode="light" aria-selected="false">{{ t('web.theme.light') }}</button>
+            <button type="button" role="tab" data-mode="dark" aria-selected="false">{{ t('web.theme.dark') }}</button>
+          </div>
+        </div>
+        <div class="field">
+          <span>{{ t('web.settings.density') }}</span>
+          <div class="segment" id="set-density" role="tablist" aria-label="{{ t('web.settings.density') }}">
+            <button type="button" role="tab" data-density="comfortable" aria-selected="true">{{ t('web.settings.density_comfortable') }}</button>
+            <button type="button" role="tab" data-density="compact" aria-selected="false">{{ t('web.settings.density_compact') }}</button>
+          </div>
+        </div>
+        <div class="field">
+          <span>{{ t('web.lang') }}</span>
+          <div class="segment" id="set-lang" role="tablist" aria-label="{{ t('web.lang') }}">
+            {% for l in langs %}
+            <button type="button" role="tab" data-lang="{{ l }}" aria-selected="{{ 'true' if l == lang else 'false' }}">{{ l|upper }}</button>
+            {% endfor %}
+          </div>
+        </div>
+      {% endcall %}
+
+      {% call m.set_section("sec-ai", "sparkles", t('web.settings.sec_ai')) %}
+        <div class="fields two">
+          <label class="field">
+            <span>{{ t('web.chat.mode') }}</span>
+            <select id="set-mode">
+              <option value="auto">{{ t('web.chat.mode_auto') }}</option>
+              <option value="agent">{{ t('web.chat.mode_agent') }}</option>
+              <option value="direct">{{ t('web.chat.mode_direct') }}</option>
+              <option value="deep">{{ t('web.chat.deep') }}</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>{{ t('web.chat.strategy') }}</span>
+            <select id="set-strategy">
+              <option value="auto">{{ t('web.chat.strategy_auto') }}</option>
+              <option value="recent">{{ t('web.chat.strategy_recent') }}</option>
+              <option value="search">{{ t('web.chat.strategy_search') }}</option>
+              <option value="window">{{ t('web.chat.strategy_window') }}</option>
+            </select>
+          </label>
+          <div class="field">
+            <span>{{ t('web.chat.deep') }}</span>
+            <div class="field-row">
+              <button type="button" class="switch" id="set-deep" role="switch" aria-checked="false"
+                      aria-label="{{ t('web.chat.deep') }}"></button>
+              <span class="field-note">{{ t('web.settings.deep_note') }}</span>
+            </div>
+          </div>
+          <div class="field">
+            <span>{{ t('web.settings.context_limit') }}</span>
+            <div class="readonly-kv">
+              <div><span>{{ t('web.chat.context_last', n=context_default) }}</span></div>
+              <div><span>{{ t('web.settings.context_max') }}</span><b>{{ context_max }}</b></div>
+            </div>
+          </div>
+        </div>
+        <div class="readonly-kv" id="set-system"></div>
+      {% endcall %}
+
+      {# Kunlik byudjet — foydalanuvchi bo'yicha (barcha akkauntlar uchun umumiy).
+         API: GET/PUT /api/settings/budget, POST/DELETE /api/settings/budget/boost. #}
+      {% call m.set_section("sec-budget", "activity", t('web.budget.title')) %}
+        <p class="set-note">{{ t('web.budget.shared_note') }}</p>
+        <div class="bud-usage" id="bud-usage" aria-live="polite">{{ m.skeleton_rows(2) }}</div>
+        <form class="fields two" id="bud-form" autocomplete="off" novalidate>
+          <label class="field">
+            <span>{{ t('web.budget.tokens') }}</span>
+            <input type="number" id="bud-tokens" min="0" max="1000000000" step="1" inputmode="numeric">
+          </label>
+          <label class="field">
+            <span>{{ t('web.budget.usd') }}</span>
+            <input type="number" id="bud-usd" min="0" max="1000" step="0.01" inputmode="decimal">
+          </label>
+          <p class="field-note field wide" id="bud-defaults"></p>
+          <div class="form-actions field wide">
+            <button type="submit" class="btn primary">{{ t('web.budget.save') }}</button>
+            <button type="button" class="btn ghost" id="bud-reset">{{ t('web.budget.reset') }}</button>
+            <span class="field-note" id="bud-note" aria-live="polite"></span>
+          </div>
+        </form>
+        <div class="bud-boost">
+          <div class="bud-boost-head">
+            <b>{{ t('web.budget.boost_title') }}</b>
+            <span class="field-note" id="bud-boost-window"></span>
+          </div>
+          <div id="bud-boost-active" hidden></div>
+          <div class="chips" id="bud-chips">
+            <button type="button" class="chip-btn" data-tokens="1000000">+1M token</button>
+            <button type="button" class="chip-btn" data-usd="5">+$5</button>
+          </div>
+          <form class="bud-boost-custom" id="bud-boost-form" autocomplete="off" novalidate>
+            <input type="number" id="bud-boost-tokens" min="0" max="1000000000" step="1" inputmode="numeric"
+                   placeholder="{{ t('web.budget.boost_tokens_ph') }}" aria-label="{{ t('web.budget.boost_tokens_ph') }}">
+            <input type="number" id="bud-boost-usd" min="0" max="1000" step="0.01" inputmode="decimal"
+                   placeholder="{{ t('web.budget.boost_usd_ph') }}" aria-label="{{ t('web.budget.boost_usd_ph') }}">
+            <button type="submit" class="btn">{{ m.icon("plus") }} {{ t('web.budget.boost_add') }}</button>
+          </form>
+        </div>
+      {% endcall %}
+
+      {# Foydalanuvchi xotirasi (0026) — sukut bo'yicha yoqiq, har yozuv shu yerda
+         ko'rinadi va o'chiriladi. API: GET/DELETE /api/settings/memory,
+         PATCH/DELETE /api/settings/memory/{id}, PUT /api/settings/memory/toggle. #}
+      {% call m.set_section("sec-memory", "brain", t('web.memory.title')) %}
+        <p class="set-note">{{ t('web.memory.note') }}</p>
+        <div class="field">
+          <span>{{ t('web.memory.enabled') }}</span>
+          <div class="field-row">
+            <button type="button" class="switch" id="mem-enabled" role="switch" aria-checked="true"
+                    aria-label="{{ t('web.memory.enabled') }}"></button>
+            <span class="field-note" id="mem-count" aria-live="polite"></span>
+          </div>
+        </div>
+        <div class="mem-list" id="mem-list" aria-live="polite">{{ m.skeleton_rows(2) }}</div>
+        <div class="form-actions">
+          <button type="button" class="btn ghost" id="mem-clear" hidden>{{ m.icon("trash-2") }} {{ t('web.memory.clear') }}</button>
+        </div>
+        <p class="set-note">{{ t('web.memory.never') }}</p>
+      {% endcall %}
+
+      {% call m.set_section("sec-write", "send", t('web.settings.sec_write')) %}
+        <p class="set-note">{{ t('web.settings.write_note') }}</p>
+        <div class="chat-modes" id="set-write-modes">{{ m.skeleton_rows(4) }}</div>
+      {% endcall %}
+
+      {% call m.set_section("sec-autoreply", "message-circle", t('web.ar.title')) %}
+        <label class="field">
+          <span>{{ t('web.settings.autoreply_chat') }}</span>
+          <select id="ar-chat"></select>
+        </label>
+        <form class="fields two" id="ar-form" autocomplete="off">
+          <div class="field">
+            <span>{{ t('web.ar.enabled') }}</span>
+            <div class="field-row">
+              <button type="button" class="switch" id="ar-enabled" role="switch" aria-checked="false"
+                      aria-label="{{ t('web.ar.enabled') }}"></button>
+            </div>
+          </div>
+          <label class="field">
+            <span>{{ t('web.ar.trigger') }}</span>
+            <select id="ar-trigger">
+              <option value="questions">{{ t('web.ar.trig_questions') }}</option>
+              <option value="mentions">{{ t('web.ar.trig_mentions') }}</option>
+              <option value="keywords">{{ t('web.ar.trig_keywords') }}</option>
+              <option value="all">{{ t('web.ar.trig_all') }}</option>
+            </select>
+          </label>
+          <label class="field wide">
+            <span>{{ t('web.ar.keywords') }}</span>
+            <input type="text" id="ar-keywords" maxlength="1000">
+          </label>
+          <label class="field wide">
+            <span>{{ t('web.ar.instructions') }}</span>
+            <textarea id="ar-instructions" maxlength="4000" rows="3"
+                      placeholder="{{ t('web.ar.instructions_ph') }}"></textarea>
+          </label>
+          <label class="field">
+            <span>{{ t('web.ar.max_per_hour') }}</span>
+            <input type="number" id="ar-max" min="1" max="60" value="5">
+          </label>
+          <label class="field">
+            <span>{{ t('web.ar.quiet') }}</span>
+            <div class="field-row">
+              <input type="number" id="ar-qfrom" min="0" max="23" placeholder="0">
+              <input type="number" id="ar-qto" min="0" max="23" placeholder="7">
+            </div>
+          </label>
+          <div class="form-actions field wide">
+            <button type="submit" class="btn primary">{{ t('web.ar.save') }}</button>
+            <span class="field-note" id="ar-note" aria-live="polite"></span>
+          </div>
+        </form>
+        <p class="set-note">{{ t('web.ar.note') }}</p>
+      {% endcall %}
+
+      {% call m.set_section("sec-briefing", "inbox", t('web.settings.sec_briefing')) %}
+        <form class="fields two" id="brief-form" autocomplete="off">
+          <div class="field">
+            <span>{{ t('web.brief.enabled') }}</span>
+            <div class="field-row">
+              <button type="button" class="switch" id="b-enabled" role="switch" aria-checked="false"
+                      aria-label="{{ t('web.brief.enabled') }}"></button>
+            </div>
+          </div>
+          <label class="field">
+            <span>{{ t('web.brief.hour') }}</span>
+            <input type="number" id="b-hour" min="0" max="23" value="8">
+          </label>
+          <label class="field">
+            <span>{{ t('web.brief.tz') }}</span>
+            <select id="b-tz"></select>
+          </label>
+          <label class="field">
+            <span>{{ t('web.brief.quiet_from') }}</span>
+            <input type="time" id="b-qfrom">
+          </label>
+          <label class="field">
+            <span>{{ t('web.brief.quiet_to') }}</span>
+            <input type="time" id="b-qto">
+          </label>
+          <div class="field wide">
+            <span>{{ t('web.settings.briefing_chats') }}</span>
+            <div class="chat-modes" id="b-chats"></div>
+            <span class="field-note">{{ t('web.settings.briefing_chats_note') }}</span>
+          </div>
+          <div class="form-actions field wide">
+            <button type="submit" class="btn primary">{{ t('web.brief.save') }}</button>
+            <span class="field-note" id="brief-note" aria-live="polite"></span>
+          </div>
+        </form>
+        <p class="set-note">{{ t('web.brief.quiet_note') }}</p>
+      {% endcall %}
+
+      {% call m.set_section("sec-privacy", "shield-check", t('web.settings.sec_privacy')) %}
+        <ul class="consent-list">
+          <li class="yes">{{ m.icon("check") }}<span>{{ t('web.settings.privacy_read') }}</span></li>
+          <li class="no">{{ m.icon("x") }}<span>{{ t('web.settings.privacy_media') }}</span></li>
+          <li class="no">{{ m.icon("x") }}<span>{{ t('web.settings.privacy_phone') }}</span></li>
+          <li class="no">{{ m.icon("x") }}<span>{{ t('web.settings.privacy_delete') }}</span></li>
+        </ul>
+        {# L5: chiqish — alohida destruktiv qator (til/mavzu ro'yxatiga
+           aralashtirilgan mute'langan yorliq emas). #}
+        <button type="button" class="row-item is-danger" id="set-logout">{{ m.icon("log-out") }}{{ t('web.chat.logout') }}</button>
+      {% endcall %}
+
+    </div>
+  </div>
+
+</div>
+</div>
+
+{# ── Akkauntni uzish tasdig'i ── #}
+<div class="sheet" id="unlink-sheet" hidden>
+  <div class="sheet-box" role="dialog" aria-modal="true" aria-labelledby="unlink-title">
+    <div class="sheet-grab" aria-hidden="true"></div>
+    <h2 class="sheet-title" id="unlink-title">{{ t('web.settings.unlink_title') }}</h2>
+    <p class="set-note" id="unlink-text">{{ t('web.settings.unlink_text') }}</p>
+    <div class="form-actions" style="padding: var(--s-3) 0">
+      <button type="button" class="btn" id="unlink-yes">{{ t('web.settings.unlink') }}</button>
+      <button type="button" class="btn ghost" data-sheet-cancel>{{ t('web.alerts.cancel') }}</button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}{{ super() }}
+<script type="module" src="{{ asset('pages/settings.js') }}"></script>
+{% endblock %}

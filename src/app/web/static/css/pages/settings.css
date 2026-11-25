@@ -1,0 +1,119 @@
+/* pages/settings.css — `/settings`.
+ *
+ * Mobil: bo'limlar akkordeon (`<details>`), har birida `id` anchor.
+ * Desktop (>=861px): chapda sub-nav, o'ngda barcha bo'limlar ochiq holda
+ * (`<details open>` majburlanadi) — `docs/ui-v2.md` § 3.6.
+ */
+
+.set-layout { display: grid; gap: var(--s-4); align-items: start; }
+
+.set-nav { display: none; }
+
+.set-sections { display: grid; gap: var(--s-3); min-inline-size: 0; }
+
+.set-section {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg, 16px);
+  overflow: clip;
+}
+.set-section > summary {
+  display: flex; align-items: center; gap: var(--s-3);
+  padding: var(--s-3) var(--s-4); min-block-size: var(--tap);
+  cursor: pointer; font-weight: 700; font-size: var(--fs-md);
+  list-style: none;
+}
+.set-section > summary::-webkit-details-marker { display: none; }
+.set-section > summary .icon { color: var(--muted); }
+.set-section > summary .spacer { flex: 1 1 auto; }
+.set-section > summary .chev { transition: transform var(--t-hover) var(--ease); }
+.set-section[open] > summary .chev { transform: rotate(180deg); }
+.set-body { padding: 0 var(--s-4) var(--s-4); display: grid; gap: var(--s-3); }
+.set-note { font-size: var(--fs-sm); color: var(--muted); line-height: var(--lh-body); margin: 0; }
+
+.acct-card { display: grid; gap: var(--s-2); }
+.acct-top { display: flex; align-items: center; gap: var(--s-3); }
+
+.readonly-kv { display: grid; gap: var(--s-1); font-size: var(--fs-sm); }
+.readonly-kv > div { display: flex; justify-content: space-between; gap: var(--s-4); }
+.readonly-kv b { font-variant-numeric: tabular-nums; }
+
+.chat-modes { display: grid; gap: var(--s-1); max-block-size: 420px; overflow: auto; }
+.chat-modes .row-item select { inline-size: auto; min-inline-size: 160px; }
+
+/* L5: "Chiqish" — Maxfiylik bo'limidagi to'liq kengliqdagi destruktiv qator. */
+#set-logout { inline-size: 100%; }
+
+.tz-list { max-block-size: 0; overflow: hidden; }
+
+/* ── Byudjet ─────────────────────────────────────────────────────────── */
+.bud-usage { display: grid; gap: var(--s-3); }
+/* `.field-note` global uslubi faqat `.field` ichida — karta izohlari ham shunday ko'rinsin. */
+#sec-budget .field-note { font-size: var(--fs-xs); color: var(--faint); line-height: var(--lh-body); margin: 0; }
+.bud-meter { display: grid; gap: var(--s-1); }
+.bud-meter-top { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s-3); flex-wrap: wrap; }
+.bud-meter-top span { font-size: var(--fs-sm); color: var(--muted); }
+.bud-meter-top b { font-variant-numeric: tabular-nums; font-size: var(--fs-md); }
+.bud-meter .progress { block-size: 8px; }
+.bud-meter .progress > i.is-warn { background: var(--warn-text); }
+.bud-meter .progress > i.is-hot { background: var(--danger); }
+.bud-status { display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap; font-size: var(--fs-sm); }
+.bud-alert {
+  display: flex; align-items: flex-start; gap: var(--s-2);
+  padding: var(--s-2) var(--s-3); border-radius: var(--r-md, 12px);
+  background: var(--danger-soft); color: var(--danger-ink);
+  font-size: var(--fs-sm); line-height: var(--lh-body);
+}
+.bud-alert .icon { flex: none; margin-block-start: 2px; }
+.bud-boost {
+  display: grid; gap: var(--s-2);
+  border-block-start: 1px solid var(--border-soft); padding-block-start: var(--s-3);
+}
+.bud-boost-head { display: flex; align-items: baseline; gap: var(--s-2); flex-wrap: wrap; }
+.bud-boost-active {
+  display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap;
+  padding: var(--s-2) var(--s-3); border-radius: var(--r-md, 12px);
+  background: var(--ok-soft); font-size: var(--fs-sm);
+}
+.bud-boost-active span { flex: 1 1 200px; min-inline-size: 0; }
+.bud-boost-custom { display: flex; gap: var(--s-2); flex-wrap: wrap; align-items: stretch; }
+.bud-boost-custom input { flex: 1 1 120px; min-inline-size: 0; inline-size: auto; }
+.bud-boost-custom .btn { flex: none; }
+
+/* ── Xotira (0026) ───────────────────────────────────────────────────── */
+.mem-list { display: grid; gap: var(--s-1); max-block-size: 480px; overflow: auto; }
+.mem-list.is-disabled { opacity: .6; }
+.mem-row { align-items: center; gap: var(--s-3); }
+.mem-row.is-off .row-title { color: var(--muted); }
+.mem-row .row-body { min-inline-size: 0; }
+.mem-row .row-title { overflow-wrap: anywhere; }
+.mem-kind { flex: none; min-inline-size: 72px; justify-content: center; text-transform: lowercase; }
+.mem-alias { color: var(--accent-text); background: var(--accent-soft); border-color: transparent; }
+.mem-preference { color: var(--ok); background: var(--ok-soft); border-color: transparent; }
+.mem-fact { color: var(--muted); background: var(--panel-3); border-color: transparent; }
+.mem-eq { color: var(--muted); }
+.mem-val { font-weight: 600; }
+.mem-meta { display: flex; flex-wrap: wrap; gap: var(--s-2); align-items: center; }
+.mem-actions { display: flex; align-items: center; gap: var(--s-2); flex: none; }
+@media (max-width: 520px) {
+  .mem-row { flex-wrap: wrap; }
+  .mem-row .row-body { flex: 1 1 calc(100% - 90px); }
+  .mem-actions { margin-inline-start: auto; }
+}
+
+@media (min-width: 861px) {
+  .set-layout { grid-template-columns: 220px minmax(0, 1fr); }
+  .set-nav {
+    display: grid; gap: 2px; align-content: start;
+    position: sticky; inset-block-start: var(--s-2);
+  }
+  .set-nav a {
+    display: flex; align-items: center; gap: var(--s-2);
+    padding: var(--s-2) var(--s-3); border-radius: var(--r-md, 12px);
+    color: var(--muted); font-size: var(--fs-sm); font-weight: 600;
+    text-decoration: none; min-block-size: 38px;
+  }
+  .set-nav a:hover { background: var(--panel-3); color: var(--text); }
+  .set-nav a[aria-current="true"] { background: var(--accent-soft); color: var(--accent-text); }
+  .set-section > summary .chev { display: none; }
+}

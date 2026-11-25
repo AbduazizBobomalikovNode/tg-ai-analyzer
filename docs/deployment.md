@@ -16,7 +16,8 @@ make up          # postgres, redis, migrate (alembic upgrade head), bot, api, wo
 docker compose run --rm bot python -m app.main check   # config, LLM marshruti, DB, Redis
 make logs
 ```
-Web: `http://localhost:8080` → `/login` → telefon → kod → `/chat`.
+Web: `http://localhost:8080` → `/login` → QR (yoki telefon → kod) →
+`/onboarding` → `/today`.
 
 ## Servislar
 | Servis | Buyruq | Eslatma |
@@ -31,6 +32,11 @@ Web: `http://localhost:8080` → `/login` → telefon → kod → `/chat`.
 rate, kontekst limitlari, auto-eval, sample), `AGENT_MAX_ITERATIONS`,
 `AGENT_TOOL_RESULT_TOKENS`, `WRITE_PROPOSAL_TTL_HOURS`, `WRITE_RATE_PER_HOUR`,
 `EMBED_ENABLED`, `DEFAULT_WRITE_MODE`, `MAX_ACCOUNTS`, `ALLOWED_USER_IDS`.
+LLM xarajati: `GEMINI_THINKING_LEVEL_ROUTE|SEARCH|TOOLS|DEEP` (vazifa bo'yicha
+fikrlash darajasi, default `minimal`/`low`/`low`/`low`) va `LLM_FLEX_BACKGROUND`
+(default `true` — worker digest'lari, hafta tugunlari, briefing va judge Gemini
+Flex tier'ida: yarim narx, 1-15 daq kechikish; `false` = hammasi standart).
+Batafsil — `docs/llm.md`.
 To'liq ro'yxat va izohlar — `.env.example`.
 
 ## Kuzatuv (8-bosqich)
@@ -46,6 +52,10 @@ To'liq ro'yxat va izohlar — `.env.example`.
 * Log'lar structlog, hodisa nomlari `modul.hodisa`: `ingest.sync_done`,
   `worker.snapshot.done`, `agent.done`, `chat.answer`, `write.proposed/executed/
   blocked`, `llm.fallback`, `mtproto.blocked`.
+* `llm.chat` har chaqiruvda `tokens_in/out/thinking/cached`, `thinking_level` va
+  `tier` ni yozadi (token sonlari maskalanmaydi); `llm.flex_fallback` — Flex
+  429/503 dan keyin standart tier'da qayta urildi; `llm.flex_unsupported` — SDK
+  Flex'ni bilmaydi (worker startupida tekshiriladi).
 * Dashboard `/dashboard`: token/xarajat/latency/sifat, ingestion holati, amallar.
 * Muhim signallar: `mtproto.blocked` (guardrail ishladi — kim/nima), FloodWait
   (`worker.sync_account.paused`), `pool.err.session_revoked` (akkaunt qayta login).
@@ -54,6 +64,30 @@ To'liq ro'yxat va izohlar — `.env.example`.
 Postgres — odatiy dump. `MASTER_KEY_B64` — secret manager'da; yo'qolsa
 session'lar tiklanmaydi. Rotatsiya: `crypto.envelope.rewrap_dek` bilan DEK'lar
 qayta wrap (skript kerak bo'lsa 8-bosqichda).
+
+## Compose izolyatsiyasi
+
+`docker-compose.yml` dagi har servisning `env_file: .env` yo'li **fayl joylashgan
+katalogga nisbatan** (loyiha ildizi) yechiladi, `-p`/`--env-file` bayrog'iga
+emas. Shuning uchun `docker compose -p other --env-file other.env up` faqat
+loyiha nomini va Compose CLI o'zi o'qiydigan `.env`ni (masalan `${POSTGRES_USER}`
+kabi interpolatsiya uchun) almashtiradi — har servisning **konteyner ichidagi**
+muhiti hali ham asosiy `.env` dan keladi, chunki `env_file: .env` yozuvi
+o'zgarmaydi. Alohida (smoke/staging) stack kerak bo'lsa, override compose
+faylida shu servis uchun `env_file: !override [boshqa/.env]` bilan yo'lni
+almashtiring va nomlar to'qnashmasin uchun `volumes`/`ports`ni ham alohida
+belgilang (masalan boshqa host port va boshqa named volume).
+
+## Dockerfile qatlamlari
+
+`Dockerfile` bog'liqliklarni (`pip install -e .`, ~170 MB — `lingua` eng
+kattasi) `src` dan **oldin** o'rnatadi: `pyproject.toml` + soxta
+`src/app/__init__.py` bilan (hatchling editable qurilishga paket katalogi
+borligini talab qiladi). Shu tufayli faqat `src` o'zgarganda bu qatlam
+Docker keshidan **CACHED** qaytadi va qayta build ~1 daqiqadan tez bo'ladi;
+bog'liqlik ro'yxati (`pyproject.toml`) o'zgarsa hammasi qayta o'rnatiladi.
+`COPY src ./src` dan keyingi `pip install --no-deps -e .` faqat editable
+yozuvni haqiqiy manbaga yangilaydi — bog'liqlik qayta yechilmaydi.
 
 ## Ma'lum cheklovlar
 `api` va `worker` bir xil session'ni ishlatadi (bir host/egress IP'da muammo yo'q);

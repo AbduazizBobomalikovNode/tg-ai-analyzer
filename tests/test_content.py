@@ -83,8 +83,14 @@ async def test_generate_image_writes_file_and_meta(data_dir: Any) -> None:
     assert info.url == f"/api/images/{info.id}" and info.mime == "image/png"
     assert (data_dir / "images" / f"{info.id}.png").read_bytes() == PNG
     assert llm.prompts == ["a cat. Style: flat"]
-    (row,) = db.added
+    row = next(o for o in db.added if type(o).__name__ == "GeneratedImage")
     assert row.user_id == 1 and row.prompt == "a cat" and row.size_bytes == len(PNG)
+    # Rasm xarajati kunlik byudjet yo'liga ham tushadi (`limits.daily_usage`
+    # faqat `conversation_messages` ni ko'radi) — "Images" suhbati + usage qatori.
+    usage = next(o for o in db.added if type(o).__name__ == "ConversationMessage")
+    assert usage.task == "image" and usage.tokens_out == IMG.IMAGE_OUTPUT_TOKENS
+    conv = next(o for o in db.added if type(o).__name__ == "Conversation")
+    assert conv.title == IMG.IMAGE_CONVERSATION
 
 
 async def test_generate_image_limits(data_dir: Any, monkeypatch: pytest.MonkeyPatch) -> None:

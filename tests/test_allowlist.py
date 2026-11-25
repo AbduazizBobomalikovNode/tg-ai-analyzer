@@ -11,6 +11,7 @@ from app.mtproto.allowlist import (
     ALLOWED,
     AUTH,
     DENIED,
+    READ,
     RpcBlocked,
     auth_window,
     check_request,
@@ -82,6 +83,13 @@ def test_destructive_requests_blocked(module: str, name: str) -> None:
         check_request(fake_request(module, name))
 
 
+def test_messages_delete_topic_history_denied() -> None:
+    """messages.DeleteTopicHistoryRequest — channels.* bilan bir xil, DENIED'ga qo'shildi."""
+    assert "messages.DeleteTopicHistoryRequest" in DENIED
+    with pytest.raises(RpcBlocked, match="qora ro'yxatda"):
+        check_request(fake_request("messages", "DeleteTopicHistoryRequest"))
+
+
 def test_unknown_request_blocked_by_default() -> None:
     with pytest.raises(RpcBlocked, match="deny-by-default"):
         check_request(fake_request("messages", "SomeBrandNewRequest"))
@@ -101,6 +109,90 @@ def test_unknown_request_blocked_by_default() -> None:
 )
 def test_business_requests_allowed(module: str, name: str) -> None:
     assert check_request(fake_request(module, name))
+
+
+# ─── qamrov kengaytmasi (1-bosqich, arxitektura v2 §8) ───────────────────────
+
+
+NEW_READ_METHODS = [
+    ("messages", "GetSearchResultsCalendarRequest"),
+    ("messages", "GetSearchResultsPositionsRequest"),
+    ("messages", "GetSavedDialogsRequest"),
+    ("messages", "GetSavedHistoryRequest"),
+    ("messages", "GetUnreadMentionsRequest"),
+    ("messages", "GetUnreadReactionsRequest"),
+    ("messages", "GetForumTopicsRequest"),
+    ("messages", "GetForumTopicsByIDRequest"),
+    ("channels", "GetForumTopicsRequest"),
+    ("channels", "GetForumTopicsByIDRequest"),
+    ("channels", "GetChannelRecommendationsRequest"),
+    ("channels", "CheckSearchPostsFloodRequest"),
+    ("channels", "SearchPostsRequest"),
+    ("stats", "GetMessagePublicForwardsRequest"),
+]
+
+
+@pytest.mark.parametrize(("module", "name"), NEW_READ_METHODS)
+def test_new_read_methods_are_allowed_and_not_writes(module: str, name: str) -> None:
+    key = f"{module}.{name}"
+    assert check_request(fake_request(module, name)) == key
+    assert not is_write(key), f"{key} o'qish bo'lishi kerak"
+
+
+def test_search_posts_sibling_payment_method_stays_denied() -> None:
+    """Stars sarflash — moliyaviy amal: `channels.SearchPosts` qo'shildi, pul yo'li YO'Q."""
+    assert "payments.SendStarsFormRequest" in DENIED
+    assert "payments.SendPaymentFormRequest" in DENIED
+    with pytest.raises(RpcBlocked, match="qora ro'yxatda"):
+        check_request(fake_request("payments", "SendStarsFormRequest"))
+
+
+def test_read_mentions_is_still_a_write() -> None:
+    """`GetUnreadMentions` (o'qish) bilan `ReadMentions` (belgilash) chalkashmasin."""
+    assert is_write("messages.ReadMentionsRequest")
+    assert not is_write("messages.GetUnreadMentionsRequest")
+    assert "messages.ReadMentionsRequest" not in READ
+
+
+def test_new_methods_exist_in_the_installed_telethon() -> None:
+    """Allowlist'dagi nom haqiqiy TL klassiga mos kelishi kerak (telethon>=1.44)."""
+    pytest.importorskip("telethon.tl.functions")
+    from telethon.tl import functions as tlf
+
+    required = [
+        ("messages", "GetSearchResultsCalendarRequest"),
+        ("messages", "GetSearchResultsPositionsRequest"),
+        ("messages", "GetSavedDialogsRequest"),
+        ("messages", "GetSavedHistoryRequest"),
+        ("messages", "GetUnreadMentionsRequest"),
+        ("messages", "GetUnreadReactionsRequest"),
+        ("channels", "GetChannelRecommendationsRequest"),
+        ("channels", "CheckSearchPostsFloodRequest"),
+        ("channels", "SearchPostsRequest"),
+        ("stats", "GetMessagePublicForwardsRequest"),
+    ]
+    for module, name in required:
+        cls = getattr(getattr(tlf, module), name, None)
+        assert cls is not None, f"{module}.{name} — telethon'da yo'q (pin: telethon>=1.44)"
+        assert request_key(cls.__new__(cls)) in ALLOWED
+
+    # Forum topiclari 1.44+ da `messages.*` ga ko'chdi — ikkala nom ham ruxsat etilgan
+    forum = getattr(tlf.messages, "GetForumTopicsRequest", None) or getattr(
+        tlf.channels, "GetForumTopicsRequest", None
+    )
+    assert forum is not None
+    assert request_key(forum.__new__(forum)) in ALLOWED
+
+
+def test_search_posts_has_no_paid_parameter_forced() -> None:
+    """`allow_paid_stars` ixtiyoriy bo'lib qolsin — tool uni hech qachon bermaydi."""
+    pytest.importorskip("telethon.tl.functions")
+    import inspect
+
+    from telethon.tl.functions.channels import SearchPostsRequest
+
+    params = inspect.signature(SearchPostsRequest.__init__).parameters
+    assert params["allow_paid_stars"].default is None
 
 
 # ─── auth oynasi ─────────────────────────────────────────────────────────────
@@ -150,3 +242,33 @@ def test_with_real_telethon_classes() -> None:
     with pytest.raises(RpcBlocked):
         check_request(m.DeleteMessagesRequest.__new__(m.DeleteMessagesRequest))
     assert tl is not None
+
+
+# ─── ui/R1a: chat profil rasmi ───────────────────────────────────────────────
+
+
+def test_upload_getfile_is_read_only() -> None:
+    """`upload.GetFile` — O'QISH: bayt oqimini oladi, hech narsa o'zgartirmaydi.
+
+    Profil rasmi uchun kerak (`services/avatars.py`). **Xabar mediasini**
+    yuklashga ruxsat emas: siyosat kodda qo'riqlanadi —
+    `tests/test_avatars.py::test_no_other_module_downloads_files`.
+    """
+    key = check_request(fake_request("upload", "GetFileRequest"))
+    assert key == "upload.GetFileRequest"
+    assert key in READ and not is_write(key)
+
+
+def test_upload_getfile_exists_in_telethon() -> None:
+    pytest.importorskip("telethon.tl.functions")
+    from telethon.tl.functions.upload import GetFileRequest
+
+    assert request_key(GetFileRequest.__new__(GetFileRequest)) in ALLOWED
+
+
+def test_profile_photo_upload_stays_denied() -> None:
+    """O'qish qo'shildi, yozish yo'q: profil rasmini **almashtirish** bloklangan."""
+    assert "photos.UploadProfilePhotoRequest" in DENIED
+    assert "photos.DeletePhotosRequest" in DENIED
+    with pytest.raises(RpcBlocked, match="qora ro'yxatda"):
+        check_request(fake_request("photos", "UploadProfilePhotoRequest"))

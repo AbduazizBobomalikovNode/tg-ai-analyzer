@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}{{ t('web.onboarding.title') }} · {{ t('web.title') }}{% endblock %}
+{% block body_class %}page-onboarding{% endblock %}
+
+{% block head %}
+  <link rel="stylesheet" href="{{ asset('css/pages/onboarding.css') }}">
+{% endblock %}
+
+{% block content %}
+<a class="skip-link" href="#main-content">{{ t('web.a11y.skip') }}</a>
+<main class="onb" id="main-content">
+
+  <div class="brand">
+    <div class="brand-logo" aria-hidden="true">{{ m.icon("sparkles") }}</div>
+    <div>
+      <div class="brand-name">{{ t('web.title') }}</div>
+      <div class="brand-sub">{{ t('web.onboarding.title') }}</div>
+    </div>
+    {{ m.lang_switch(t, langs, lang) }}
+    <button type="button" class="icon-btn-v2" data-theme-toggle aria-label="{{ t('web.theme.title') }}">{{ m.icon("monitor") }}</button>
+  </div>
+
+  <div class="onb-steps" id="onb-steps" role="progressbar" aria-valuemin="1" aria-valuemax="4" aria-valuenow="1"
+       aria-label="{{ t('web.onboarding.progress') }}">
+    <i></i><i></i><i></i><i></i>
+  </div>
+
+  {# ── 1. QR / kirish ── #}
+  <section class="onb-step card-v2" id="onb-1" aria-labelledby="onb-1-h">
+    <h2 id="onb-1-h">{{ t('web.onboarding.s1_title') }}</h2>
+    <p>{{ t('web.onboarding.s1_text') }}</p>
+    <div class="onb-qr">
+      <img id="onb-qr-img" alt="{{ t('web.login.qr_alt') }}" width="220" height="220" hidden>
+      <span class="muted small" id="onb-qr-hint">{{ t('web.login.qr_waiting') }}</span>
+    </div>
+    <ol class="qr-steps">
+      <li>{{ t('web.login.qr_step1') }}</li>
+      <li>{{ t('web.login.qr_step2') }}</li>
+      <li>{{ t('web.login.qr_step3') }}</li>
+    </ol>
+    <div class="onb-nav">
+      <a class="btn ghost" href="/login">{{ t('web.onboarding.use_phone') }}</a>
+      <span class="spacer"></span>
+      <button type="button" class="btn" id="onb-qr-retry">{{ m.icon("refresh-cw") }} {{ t('web.onboarding.qr_retry') }}</button>
+      <button type="button" class="btn link" data-onb-skip>{{ t('web.onboarding.skip') }}</button>
+    </div>
+  </section>
+
+  {# ── 2. Nimani o'qiymiz ── #}
+  <section class="onb-step card-v2" id="onb-2" aria-labelledby="onb-2-h" hidden>
+    <h2 id="onb-2-h">{{ t('web.onboarding.s2_title') }}</h2>
+    <p>{{ t('web.onboarding.s2_text') }}</p>
+    <ul class="consent-list">
+      <li class="yes">{{ m.icon("check") }}<span>{{ t('web.onboarding.s2_read') }}</span></li>
+      <li class="yes">{{ m.icon("check") }}<span>{{ t('web.onboarding.s2_photo') }}</span></li>
+      <li class="no">{{ m.icon("x") }}<span>{{ t('web.onboarding.s2_media') }}</span></li>
+      <li class="no">{{ m.icon("x") }}<span>{{ t('web.onboarding.s2_phone') }}</span></li>
+      <li class="no">{{ m.icon("x") }}<span>{{ t('web.onboarding.s2_write') }}</span></li>
+    </ul>
+    <div class="onb-nav">
+      <button type="button" class="btn link" data-onb-skip>{{ t('web.onboarding.skip') }}</button>
+      <span class="spacer"></span>
+      <button type="button" class="btn primary" data-onb-next="3">{{ t('web.onboarding.agree') }}</button>
+    </div>
+  </section>
+
+  {# ── 3. Sync ── #}
+  <section class="onb-step card-v2" id="onb-3" aria-labelledby="onb-3-h" hidden>
+    <h2 id="onb-3-h">{{ t('web.onboarding.s3_title') }}</h2>
+    <p>{{ t('web.onboarding.s3_text') }}</p>
+    <div class="onb-counts" id="onb-counts"></div>
+    <div class="onb-sync-rows" id="onb-sync-rows"></div>
+    <div class="onb-nav">
+      <button type="button" class="btn link" data-onb-skip>{{ t('web.onboarding.skip') }}</button>
+      <span class="muted small" id="onb-sync-state"></span>
+      <span class="spacer"></span>
+      <button type="button" class="btn primary" data-onb-next="4">{{ t('web.onboarding.start_now') }}</button>
+    </div>
+  </section>
+
+  {# ── 4. Birinchi savollar ── #}
+  <section class="onb-step card-v2" id="onb-4" aria-labelledby="onb-4-h" hidden>
+    <h2 id="onb-4-h">{{ t('web.onboarding.s4_title') }}</h2>
+    <p>{{ t('web.onboarding.s4_text') }}</p>
+    <div class="onb-questions" id="onb-questions"></div>
+    <div class="onb-nav">
+      <span class="spacer"></span>
+      <button type="button" class="btn ghost" id="onb-finish">{{ t('web.onboarding.finish') }}</button>
+    </div>
+  </section>
+
+  {{ m.toast_root() }}
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script type="module" src="{{ asset('pages/onboarding.js') }}"></script>
+{% endblock %}

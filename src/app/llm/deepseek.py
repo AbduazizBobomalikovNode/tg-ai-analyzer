@@ -4,14 +4,18 @@
 kichik (chat + tool calling), SDK versiya o'zgarishlariga bog'lanish esa
 ortiqcha.
 
-Modellar:
-  * `deepseek-chat`     — V3 avlod. Function calling BOR.
-  * `deepseek-reasoner` — R1 avlod. Reasoning kuchli, lekin **function calling
-    yo'q**. Shuning uchun `capabilities()` da TOOLS berilmaydi va router
-    tool kerak bo'lgan vazifada uni tanlamaydi.
+Modellar (V4 avlod — API `/models` faqat shu ikkitasini beradi):
+  * `deepseek-v4-flash` — arzon, tez. ROUTE/SEARCH/TOOLS uchun.
+  * `deepseek-v4-pro`   — kuchliroq, ~3x qimmat. DEEP uchun.
+  Ikkalasida ham **function calling BOR** va `temperature` qabul qilinadi
+  (jonli API'da tekshirilgan).
 
-Kontekst 64K — Gemini'ning 1M'iga nisbatan kichik. "Butun chat tarixini
-kontekstga tashlash" strategiyasi DeepSeek'da ishlamaydi, retrieval majburiy.
+Eski `deepseek-chat` / `deepseek-reasoner` nomlari alias sifatida ishlaydi,
+lekin API ikkalasini ham **v4-flash** ga yo'naltiradi — ya'ni `reasoner` deb
+so'rash kuchliroq model bermaydi. Konkret v4 nomini yozing.
+
+Kontekst 1M, chiqish 384K gacha. Baribir `search.select_context` byudjeti
+orqali o'ting: "butun tarixni promptga tashlash" narx jihatidan mantiqsiz.
 
 Caching: DeepSeek avtomatik disk-cache ishlatadi (`prompt_cache_hit_tokens`),
 boshqariladigan cache API yo'q — `EXPLICIT_CACHE` e'lon qilinmaydi.
@@ -20,6 +24,7 @@ boshqariladigan cache API yo'q — `EXPLICIT_CACHE` e'lon qilinmaydi.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 import httpx
@@ -41,7 +46,12 @@ from app.logging import get_logger
 
 log = get_logger(__name__)
 
-_TOOL_CAPABLE = frozenset({"deepseek-chat"})
+# V4 avlodda ikkalasi ham function calling'ni qo'llaydi va `temperature` ni
+# qabul qiladi (jonli API'da tekshirilgan). Eski nomlar alias sifatida qoladi.
+_TOOL_CAPABLE = frozenset({"deepseek-chat", "deepseek-v4-flash", "deepseek-v4-pro"})
+# V4 kontekst 1M (>= 200k chegara). Eski aliaslar alohida qoldirilgan: ular
+# qaysi modelga tushishi API tomonidan hal qilinadi, va'da bermaymiz.
+_LONG_CONTEXT = frozenset({"deepseek-v4-flash", "deepseek-v4-pro"})
 _REASONER = frozenset({"deepseek-reasoner"})
 
 
@@ -72,7 +82,9 @@ class DeepSeekProvider(BaseProvider):
         caps = {Capability.CHAT, Capability.JSON_MODE}
         if model in _TOOL_CAPABLE:
             caps.add(Capability.TOOLS)
-        # EMBED / IMAGE_GEN / LONG_CONTEXT / EXPLICIT_CACHE — DeepSeek'da yo'q
+        if model in _LONG_CONTEXT:
+            caps.add(Capability.LONG_CONTEXT)
+        # EMBED / IMAGE_GEN / EXPLICIT_CACHE — DeepSeek'da yo'q
         return frozenset(caps)
 
     # ── chat ─────────────────────────────────────────────────────────────────
@@ -86,6 +98,8 @@ class DeepSeekProvider(BaseProvider):
         temperature: float = 0.7,
         max_tokens: int | None = None,
         json_mode: bool = False,
+        thinking_level: str | None = None,
+        service_tier: str | None = None,
     ) -> ChatResult:
         needed = [Capability.CHAT]
         if tools:
@@ -174,6 +188,22 @@ def _to_openai_tool(t: ToolSpec) -> dict[str, Any]:
     }
 
 
+# V4 uzun tool-transkriptdan keyin (`tools=None` bo'lgan yakuniy turnda ham)
+# o'zining ichki tool-call razmetkasini **matn kanalida** chiqarib yuboradi:
+#   <U+FF5C U+FF5C DSML U+FF5C U+FF5C tool_calls> ... invoke name="..."
+# `finish_reason` shunda ham "stop". Razmetka boshlangan joydan keyingi hamma
+# narsa — texnik axlat, foydalanuvchiga korsatilmaydi.
+# U+FF5C = FULLWIDTH VERTICAL LINE; escape bilan yozilgan (ruff RUF001).
+_DSML_RE = re.compile("\\s*<[\\uff5c|]{1,2}\\s*DSML.*", re.DOTALL)
+
+
+def _strip_tool_markup(text: str) -> str:
+    cleaned = _DSML_RE.sub("", text)
+    if cleaned != text:
+        log.warning("llm.tool_markup_leaked", provider="deepseek", dropped=len(text) - len(cleaned))
+    return cleaned
+
+
 def _parse_chat(data: dict[str, Any], *, model: str) -> ChatResult:
     choices = data.get("choices") or []
     if not choices:
@@ -197,7 +227,7 @@ def _parse_chat(data: dict[str, Any], *, model: str) -> ChatResult:
 
     u = data.get("usage") or {}
     return ChatResult(
-        text=message.get("content") or "",
+        text=_strip_tool_markup(message.get("content") or ""),
         tool_calls=tool_calls,
         model=data.get("model") or model,
         provider="deepseek",

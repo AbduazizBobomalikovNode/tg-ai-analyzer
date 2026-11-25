@@ -1,0 +1,39 @@
+/* pages/alerts.css — `/alerts`: qoidalar kartalari + hodisa lentasi. */
+
+.rule-list { display: grid; gap: var(--s-3); }
+
+.rule-card { display: grid; gap: var(--s-2); }
+.rule-top { display: flex; align-items: center; gap: var(--s-3); }
+.rule-ico {
+  flex: none; display: grid; place-items: center;
+  inline-size: 38px; block-size: 38px; border-radius: var(--r-md, 12px);
+  background: var(--accent-soft); color: var(--accent-text);
+}
+.rule-card.is-off { opacity: .6; }
+.rule-card.is-off .rule-ico { background: var(--panel-3); color: var(--muted); }
+.rule-name { font-weight: 700; font-size: var(--fs-md); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rule-pattern {
+  font-size: var(--fs-sm); color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.rule-facts { display: flex; gap: var(--s-2); flex-wrap: wrap; align-items: center; }
+.rule-btns { display: flex; gap: var(--s-2); flex-wrap: wrap; }
+
+/* ── Sheet ichidagi forma ────────────────────────────────────────────── */
+.alert-form { display: grid; gap: var(--s-3); }
+.alert-form .sheet-title { margin: 0; font-size: var(--fs-lg); font-weight: 700; }
+.alert-sheet .sheet-box { padding-inline: var(--s-4); }
+.semantic-only[hidden] { display: none !important; }
+
+/* ── Hodisa lentasi ──────────────────────────────────────────────────── */
+.event-group { display: grid; gap: var(--s-1); }
+.event-group + .event-group { margin-block-start: var(--s-4); }
+.event-group > h3 {
+  margin: 0; font-size: var(--fs-xs); font-weight: 700;
+  letter-spacing: .08em; text-transform: uppercase; color: var(--faint);
+}
+.event-item { align-items: flex-start; }
+.event-text {
+  font-size: var(--fs-sm); line-height: var(--lh-body); white-space: normal;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}

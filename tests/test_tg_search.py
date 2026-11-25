@@ -1,0 +1,1410 @@
+"""Telegram server tool'lari: qidiruv, kalendar, forum, saqlangan, kashfiyot.
+
+Qo'riqlaydi:
+  * hammasi `READ_TOOLS` da va yozish registry'siga tushmagan;
+  * ishlatiladigan TL metodlar allowlist'da ruxsat etilgan va destruktiv emas;
+  * bucket shiftlari va `TG_SEARCH_RATE_PER_MINUTE=0` (o'chirish) ishlaydi;
+  * FloodWait retry qilinmaydi — modelga matn sifatida qaytadi;
+  * `channels.SearchPosts` HECH QACHON `allow_paid_stars` bilan yuborilmaydi
+    va bepul kvota tugaganda umuman chaqirilmaydi (Stars — moliyaviy amal);
+  * telefon raqami hech qayerda chiqmaydi.
+
+Real Telegram chaqiruvi yo'q — klientlar soxta (`_Client`).
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+from telethon import errors as tg_errors
+from telethon.tl import types as tlt
+
+from app.config import get_settings
+from app.mtproto import allowlist as A
+from app.mtproto.ratelimit import BUCKETS, BucketSpec, MethodBuckets
+from app.services import tg_search as TS
+from app.services import tools as T
+
+
+def _ctx(account_id: int = 1) -> T.ToolContext:
+    return T.ToolContext(session=None, account_id=account_id)  # type: ignore[arg-type]
+
+
+# ─── soxta TL obyektlari ─────────────────────────────────────────────────────
+
+
+def _msg(
+    mid: int,
+    text: str = "salom",
+    *,
+    user_id: int | None = 1,
+    channel_id: int | None = 100,
+) -> Any:
+    return SimpleNamespace(
+        id=mid,
+        date=datetime(2026, 8, 18, 12, 0, tzinfo=UTC),
+        message=text,
+        media=None,
+        from_id=SimpleNamespace(user_id=user_id) if user_id else None,
+        peer_id=SimpleNamespace(channel_id=channel_id) if channel_id else None,
+    )
+
+
+def _entity(
+    ident: int,
+    *,
+    title: str | None = None,
+    first: str | None = None,
+    username: str | None = None,
+    **extra: Any,
+) -> Any:
+    return SimpleNamespace(
+        id=ident, title=title, first_name=first, last_name=None, username=username, **extra
+    )
+
+
+def _messages(
+    msgs: list[Any], *, users: list[Any] | None = None, chats: list[Any] | None = None
+) -> Any:
+    return SimpleNamespace(
+        messages=list(msgs), users=list(users or []), chats=list(chats or []), count=len(msgs)
+    )
+
+
+class _Client:
+    """`client(request)` ni yozib oladi; `get_messages`/`get_participants` ham bor."""
+
+    def __init__(
+        self,
+        replies: dict[str, Any] | None = None,
+        *,
+        raise_: Exception | None = None,
+        msgs: list[Any] | None = None,
+    ) -> None:
+        self.replies = dict(replies or {})
+        self.raise_ = raise_
+        self.requests: list[Any] = []
+        self.calls: list[dict[str, Any]] = []  # get_messages/get_participants
+        self.msgs = msgs or []
+
+    @property
+    def seen(self) -> list[str]:
+        return [type(r).__name__ for r in self.requests]
+
+    async def __call__(self, request: Any) -> Any:
+        self.requests.append(request)
+        if self.raise_ is not None:
+            raise self.raise_
+        reply = self.replies.get(type(request).__name__)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply if reply is not None else _messages([])
+
+    async def get_messages(self, peer: Any, **kw: Any) -> list[Any]:
+        self.calls.append({"peer": peer, **kw})
+        if self.raise_ is not None:
+            raise self.raise_
+        return self.msgs
+
+
+def _req(client: _Client, name: str) -> Any:
+    return next(r for r in client.requests if type(r).__name__ == name)
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Har test toza, saxiy bucket'lar bilan boshlansin (jitter o'chiq)."""
+    monkeypatch.setenv("TG_SEARCH_RATE_PER_MINUTE", "10")
+    get_settings.cache_clear()
+    monkeypatch.setattr(T, "_buckets", _buckets(50))
+    yield
+    get_settings.cache_clear()
+
+
+def _buckets(rate: int, burst: int | None = None) -> MethodBuckets:
+    specs = {
+        name: BucketSpec(name, rate, burst if burst is not None else rate)
+        for name in BUCKETS  # yangi bucket qo'shilsa test helperi ortda qolmasin
+    }
+    return MethodBuckets(specs, jitter=0.0)
+
+
+def _patch_pool(monkeypatch: pytest.MonkeyPatch, client: _Client, chat: Any = None) -> None:
+    import app.mtproto.pool as P
+
+    async def get(account_id: int) -> Any:
+        return client
+
+    async def input_peer(account_id: int, peer_id: int) -> Any:
+        return f"peer:{peer_id}"
+
+    monkeypatch.setattr(P.pool, "get", get)
+    monkeypatch.setattr(P.pool, "input_peer", input_peer)
+    if chat is not None:
+
+        async def resolve(ctx: Any, args: Any) -> Any:
+            return chat
+
+        monkeypatch.setattr(T, "_resolve_chat", resolve)
+
+
+def _chat(**kw: Any) -> Any:
+    base = {"id": 1, "tg_peer_id": 555, "title": "IELTS", "type": "channel", "username": "ielts"}
+    return SimpleNamespace(**{**base, **kw})
+
+
+# ─── registry / invariantlar ─────────────────────────────────────────────────
+
+
+SERVER_TOOLS = (
+    "search_telegram",
+    "search_global",
+    "search_calendar",
+    "list_forum_topics",
+    "saved_messages_search",
+    "discover_channels",
+)
+
+
+def test_tools_are_registered_and_read_only() -> None:
+    from app.services import write_tools as W
+
+    for name in SERVER_TOOLS:
+        assert name in T.READ_TOOLS
+        assert name not in W.WRITE_TOOL_NAMES
+
+
+def test_used_tl_methods_are_allowed_reads() -> None:
+    """Qidiruv/kashfiyot metodlari ruxsat etilgan va yozish deb belgilanmagan."""
+    for method in (
+        "messages.SearchRequest",
+        "messages.SearchGlobalRequest",
+        "messages.GetSearchResultsCalendarRequest",
+        "messages.GetForumTopicsRequest",
+        "channels.GetChannelRecommendationsRequest",
+        "channels.CheckSearchPostsFloodRequest",
+        "channels.SearchPostsRequest",
+        "contacts.ResolveUsernameRequest",
+    ):
+        assert method in A.ALLOWED
+        assert method not in A.DENIED
+        assert not A.is_write(method)
+
+
+def test_every_new_tool_is_described_in_the_agent_prompt() -> None:
+    from app.services import prompts as P
+
+    for name in SERVER_TOOLS:
+        assert name in P.AGENT_SYSTEM_PROMPT
+
+
+# ─── xatti-harakat: qidiruv ──────────────────────────────────────────────────
+
+
+async def test_search_global_lists_chat_per_hit(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _Client(
+        {
+            "SearchGlobalRequest": _messages(
+                [_msg(7, "promo post", channel_id=100), _msg(9, "narx", channel_id=200)],
+                users=[_entity(1, first="Ali")],
+                chats=[_entity(100, title="IELTS"), _entity(200, title="Zuhal")],
+            )
+        }
+    )
+    _patch_pool(monkeypatch, client)
+
+    res = await T.search_global(_ctx(), {"query": "promo", "limit": 5})
+
+    assert res.ok and res.meta["source"] == "telegram"
+    assert res.meta["hits"] == 2
+    assert 'in "IELTS"' in res.text and 'in "Zuhal"' in res.text
+    assert "#7" in res.text and "Ali" in res.text
+    req = _req(client, "SearchGlobalRequest")
+    assert req.q == "promo" and req.limit == 5
+    assert req.broadcasts_only is None and req.folder_id is None
+
+
+async def test_search_telegram_scopes_to_one_chat(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _Client({"SearchRequest": _messages([_msg(3)], users=[_entity(1, first="Ali")])})
+    _patch_pool(monkeypatch, client, chat=_chat())
+
+    res = await T.search_telegram(_ctx(), {"query": "salom"})
+
+    assert res.ok and 'chat="IELTS"' in res.text
+    assert _req(client, "SearchRequest").peer == "peer:555"
+
+
+async def test_limit_is_capped(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _Client()
+    _patch_pool(monkeypatch, client)
+    await T.search_global(_ctx(), {"query": "x", "limit": 9_999})
+    assert _req(client, "SearchGlobalRequest").limit == T.TG_SEARCH_LIMIT_MAX
+
+
+async def test_empty_query_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _Client()
+    _patch_pool(monkeypatch, client)
+    res = await T.search_global(_ctx(), {"query": "   "})
+    assert not res.ok and "query" in res.text
+    assert not client.requests  # so'rov umuman yuborilmagan
+
+
+async def test_flood_wait_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    err = tg_errors.FloodWaitError(request=None)
+    err.seconds = 42
+    client = _Client(raise_=err)
+    _patch_pool(monkeypatch, client)
+
+    res = await T.search_global(_ctx(), {"query": "x"})
+
+    assert not res.ok and "flood_wait 42s" in res.text
+    assert len(client.requests) == 1  # bitta urinish, retry yo'q
+
+
+async def test_rate_limit_blocks_before_rpc(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(T, "_buckets", _buckets(2, burst=2))
+    client = _Client()
+    _patch_pool(monkeypatch, client)
+
+    for _ in range(2):
+        assert (await T.search_global(_ctx(), {"query": "x"})).ok
+    blocked = await T.search_global(_ctx(), {"query": "x"})
+
+    assert not blocked.ok and "rate_limited:search" in blocked.text
+    assert "search_messages" in blocked.text  # modelga lokal yo'l ko'rsatiladi
+    assert len(client.requests) == 2  # uchinchisi MTProto'ga umuman bormadi
+
+
+async def test_buckets_are_independent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Qidiruv kvotasi tugasa ham tarix o'qish ishlashi kerak."""
+    monkeypatch.setattr(T, "_buckets", _buckets(1, burst=1))
+    client = _Client(msgs=[])
+    _patch_pool(monkeypatch, client, chat=_chat())
+
+    assert (await T.search_global(_ctx(), {"query": "x"})).ok
+    assert "rate_limited:search" in (await T.search_global(_ctx(), {"query": "x"})).text
+    # `history` bucket'i alohida — bu chaqiruv serverga boradi
+    assert await T.list_scheduled_messages(_ctx(), {"chat": "IELTS"}) is not None
+    assert client.calls and client.calls[0]["scheduled"] is True
+
+
+async def test_scheduled_messages_respect_the_history_bucket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(T, "_buckets", _buckets(0, burst=0))
+    client = _Client(msgs=[])
+    _patch_pool(monkeypatch, client, chat=_chat())
+
+    res = await T.list_scheduled_messages(_ctx(), {"chat": "IELTS"})
+
+    assert not res.ok and "rate_limited:history" in res.text
+    assert not client.calls  # shift MTProto'dan oldin ishladi
+
+
+async def test_disabled_by_zero_rate(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TG_SEARCH_RATE_PER_MINUTE", "0")
+    get_settings.cache_clear()
+    client = _Client()
+    _patch_pool(monkeypatch, client)
+
+    res = await T.search_global(_ctx(), {"query": "x"})
+
+    assert not res.ok and "disabled" in res.text
+    assert not client.requests
+
+
+async def test_missing_entity_cache_falls_back_to_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Javobda entity kelmasa `user:<id>` / `chat:<id>` — "—" emas, RPC ham yo'q."""
+    client = _Client(
+        {"SearchGlobalRequest": _messages([_msg(5, "salom", user_id=777, channel_id=123)])}
+    )
+    _patch_pool(monkeypatch, client)
+
+    res = await T.search_global(_ctx(), {"query": "salom"})
+
+    assert "user:777" in res.text and 'in "chat:123"' in res.text
+
+
+# ─── yangi qidiruv parametrlari ──────────────────────────────────────────────
+
+
+async def test_search_telegram_narrowing_params(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _Client({"SearchRequest": _messages([_msg(3)])})
+    _patch_pool(monkeypatch, client, chat=_chat())
+
+    res = await T.search_telegram(
+        _ctx(),
+        {
+            "chat": "IELTS",
+            "query": "narx",
+            "topic_id": 42,
+            "filter": "url",
+            "since": "2026-01-01",
+            "until": "2026-02-01",
+            "from_user": "777",
+        },
+    )
+
+    assert res.ok
+    req = _req(client, "SearchRequest")
+    assert req.top_msg_id == 42
+    assert isinstance(req.filter, tlt.InputMessagesFilterUrl)
+    assert req.min_date == datetime(2026, 1, 1, tzinfo=UTC)
+    assert req.max_date == datetime(2026, 2, 1, 23, 59, 59, tzinfo=UTC)
+    assert req.from_id == "peer:555"  # lokal chat orqali yechildi (resolve kerak emas)
+    assert "since=2026-01-01" in res.text and "filter=url" in res.text
+
+
+async def test_search_global_scope_and_archived(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _Client()
+    _patch_pool(monkeypatch, client)
+
+    await T.search_global(_ctx(), {"query": "x", "scope": "channels", "archived": True})
+
+    req = _req(client, "SearchGlobalRequest")
+    assert req.broadcasts_only is True and req.groups_only is None
+    assert req.folder_id == 1
+
+
+async def test_bad_filter_scope_and_date_are_explained(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _Client()
+    _patch_pool(monkeypatch, client)
+
+    for args, needle in (
+        ({"query": "x", "filter": "stickers"}, "unknown filter"),
+        ({"query": "x", "scope": "planets"}, "unknown scope"),
+        ({"query": "x", "since": "yesterday"}, "ISO date"),
+    ):
+        res = await T.search_global(_ctx(), args)
+        assert not res.ok and needle in res.text
+    assert not client.requests
+
+
+async def test_from_user_username_uses_the_resolve_bucket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lokal DB'da yo'q @username → ResolveUsername, alohida bucket ostida."""
+    client = _Client(
+        {
+            "ResolveUsernameRequest": SimpleNamespace(
+                users=[tlt.User(id=9, first_name="Nurbek", access_hash=7)], chats=[]
+            ),
+            "SearchRequest": _messages([_msg(3)]),
+        }
+    )
+    _patch_pool(monkeypatch, client)
+
+    async def resolve(ctx: Any, args: Any) -> Any:
+        return _chat() if args.get("chat") == "IELTS" else None
+
+    monkeypatch.setattr(T, "_resolve_chat", resolve)
+
+    res = await T.search_telegram(
+        _ctx(), {"chat": "IELTS", "query": "narx", "from_user": "@nurbek"}
+    )
+
+    assert res.ok and "ResolveUsernameRequest" in client.seen
+    assert isinstance(_req(client, "SearchRequest").from_id, tlt.InputPeerUser)
+
+    # resolve bucket'i bo'sh bo'lsa — tushunarli matn, RPC yo'q
+    monkeypatch.setattr(T, "_buckets", _buckets(0, burst=0))
+    blocked = await T.search_telegram(
+        _ctx(), {"chat": "IELTS", "query": "narx", "from_user": "@nurbek"}
+    )
+    assert not blocked.ok and "rate_limited" in blocked.text
+
+
+# ─── search_calendar ─────────────────────────────────────────────────────────
+
+
+def _period(day: int, count: int) -> Any:
+    return SimpleNamespace(
+        date=datetime(2026, 3, day, tzinfo=UTC), count=count, min_msg_id=1, max_msg_id=9
+    )
+
+
+async def test_search_calendar_returns_per_day_counts(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _Client(
+        {
+            "GetSearchResultsCalendarRequest": SimpleNamespace(
+                count=15, periods=[_period(1, 3), _period(9, 12)], messages=[], chats=[], users=[]
+            )
+        }
+    )
+    _patch_pool(monkeypatch, client, chat=_chat())
+
+    res = await T.search_calendar(_ctx(), {"chat": "IELTS", "filter": "photo"})
+
+    assert res.ok and res.meta["days"] == 2
+    lines = [ln for ln in res.text.splitlines() if ln.startswith("2026-")]
+    assert lines == ["2026-03-09  12", "2026-03-01  3"]  # yangisidan eskisiga
+    assert isinstance(
+        _req(client, "GetSearchResultsCalendarRequest").filter, tlt.InputMessagesFilterPhotos
+    )
+
+
+async def test_search_calendar_without_query_or_filter_is_explained(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _Client()
+    _patch_pool(monkeypatch, client, chat=_chat())
+
+    res = await T.search_calendar(_ctx(), {"chat": "IELTS"})
+
+    assert not res.ok and "filter" in res.text
+    assert not client.requests  # Telegram rad etadigan so'rov yuborilmadi
+
+
+# ─── list_forum_topics ───────────────────────────────────────────────────────
+
+
+def _topic(tid: int, title: str, *, unread: int = 0) -> Any:
+    return SimpleNamespace(
+        id=tid, title=title, top_message=tid * 10, unread_count=unread, closed=False, pinned=False
+    )
+
+
+async def test_list_forum_topics(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _Client(
+        {
+            "GetForumTopicsRequest": SimpleNamespace(
+                count=2,
+                topics=[_topic(1, "General"), _topic(7, "Narxlar", unread=3)],
+                messages=[],
+                chats=[],
+                users=[],
+                pts=1,
+            )
+        }
+    )
+    _patch_pool(monkeypatch, client, chat=_chat(type="supergroup"))
+
+    res = await T.list_forum_topics(_ctx(), {"chat": "IELTS"})
+
+    assert res.ok and res.meta["n"] == 2
+    assert 'topic_id=7 "Narxlar" top_msg=#70 unread=3' in res.text
+    assert "topic_id" in res.text and "search_telegram" in res.text
+
+
+async def test_list_forum_topics_non_forum_is_explained(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _Client({"GetForumTopicsRequest": tg_errors.ChannelForumMissingError(request=None)})
+    _patch_pool(monkeypatch, client, chat=_chat())
+
+    res = await T.list_forum_topics(_ctx(), {"chat": "IELTS"})
+
+    assert not res.ok and "not a forum" in res.text
+
+
+# ─── saved_messages_search ───────────────────────────────────────────────────
+
+
+async def test_saved_messages_search_targets_self(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _Client({"SearchRequest": _messages([_msg(4, "eslatma")])})
+    _patch_pool(monkeypatch, client)
+
+    res = await T.saved_messages_search(_ctx(), {"query": "eslatma"})
+
+    assert res.ok and "Saved Messages" in res.text
+    req = _req(client, "SearchRequest")
+    assert isinstance(req.peer, tlt.InputPeerSelf)
+    assert req.saved_peer_id is None  # oddiy Saved Messages qidiruvi
+
+
+# ─── discover_channels — Stars hech qachon sarflanmaydi ──────────────────────
+
+
+def _flood(*, remains: int, free: bool = False, wait_till: int | None = None) -> Any:
+    return SimpleNamespace(
+        total_daily=5, remains=remains, stars_amount=100, query_is_free=free, wait_till=wait_till
+    )
+
+
+async def test_discover_channels_never_offers_stars(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _Client(
+        {
+            "CheckSearchPostsFloodRequest": _flood(remains=3),
+            "SearchPostsRequest": _messages(
+                [_msg(11, "post matni", channel_id=100)],
+                chats=[_entity(100, title="IELTS", username="ielts")],
+            ),
+        }
+    )
+    _patch_pool(monkeypatch, client)
+
+    res = await T.discover_channels(_ctx(), {"query": "ielts"})
+
+    assert res.ok and "#11" in res.text
+    assert "https://t.me/ielts/11" in res.text
+    posts = _req(client, "SearchPostsRequest")
+    assert posts.query == "ielts"
+    assert getattr(posts, "allow_paid_stars", None) is None  # PULLIK yo'l yopiq
+    assert client.seen.index("CheckSearchPostsFloodRequest") < client.seen.index(
+        "SearchPostsRequest"
+    )  # avval kvota, keyin qidiruv
+
+
+async def test_discover_channels_stops_when_free_quota_is_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _Client({"CheckSearchPostsFloodRequest": _flood(remains=0, wait_till=1_800_000_000)})
+    _patch_pool(monkeypatch, client)
+
+    res = await T.discover_channels(_ctx(), {"query": "ielts"})
+
+    assert res.ok
+    assert "not spending Stars" in res.text and "remains=0" in res.text
+    assert "SearchPostsRequest" not in client.seen  # umuman chaqirilmadi
+
+
+async def test_discover_channels_hashtag_still_works_without_quota(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _Client(
+        {
+            "CheckSearchPostsFloodRequest": _flood(remains=0),
+            "SearchPostsRequest": _messages([_msg(12, "hashtag post")]),
+        }
+    )
+    _patch_pool(monkeypatch, client)
+
+    res = await T.discover_channels(_ctx(), {"query": "#ielts"})
+
+    assert res.ok and "hashtag" in res.text
+    posts = _req(client, "SearchPostsRequest")
+    assert posts.hashtag == "ielts" and posts.query is None
+    assert getattr(posts, "allow_paid_stars", None) is None
+
+
+# ─── Premium'siz kashfiyot: nom bo'yicha + kanal ichida messages.Search ──────
+
+
+class PremiumAccountRequiredError(Exception):
+    """Telethon xatosining nusxasi — aniqlash sinf **nomi** bo'yicha ketadi."""
+
+
+def _key(request: Any) -> str:
+    mod = (getattr(type(request), "__module__", "") or "").rsplit(".", 1)[-1]
+    return f"{mod}.{type(request).__name__}"
+
+
+class _NsClient(_Client):
+    """`contacts.Search` va `messages.Search` bir xil sinf nomida — kalit modul bilan."""
+
+    async def __call__(self, request: Any) -> Any:
+        self.requests.append(request)
+        if self.raise_ is not None:
+            raise self.raise_
+        reply = self.replies.get(_key(request), self.replies.get(type(request).__name__))
+        if isinstance(reply, Exception):
+            raise reply
+        return reply if reply is not None else _messages([])
+
+    @property
+    def ns(self) -> list[str]:
+        return [_key(r) for r in self.requests]
+
+    def first(self, key: str) -> Any:
+        return next(r for r in self.requests if _key(r) == key)
+
+
+def _chan(ident: int, username: str, title: str, *, access_hash: int | None = 7, **kw: Any) -> Any:
+    base = {"broadcast": True, "megagroup": False, "participants_count": 500}
+    return SimpleNamespace(
+        id=ident, title=title, username=username, access_hash=access_hash, **{**base, **kw}
+    )
+
+
+@pytest.fixture(autouse=True)
+def _forget_premium(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Premium holati jarayon xotirasida — testlar orasida oqib ketmasin.
+
+    `TS._redis` ham **standart holda** xato ko'taradigan soxta funksiyaga
+    almashtiriladi: aks holda `.env`dagi haqiqiy Redis'ga (butun suit bilan
+    baham ko'rilgan, 7 kunlik TTL) `tg:premium_missing:1` kabi kalitlar
+    yozilib qolardi va keyingi testlar/yugurishlar shu qoldiqdan
+    "premium_required" deb noto'g'ri javob olardi. Redis'ni **haqiqatan**
+    tekshiradigan testlar buni o'z `fake_redis_ts` bilan ustidan bosadi.
+    """
+    monkeypatch.setattr(TS, "PREMIUM_MISSING", set())
+
+    async def _no_redis() -> Any:
+        raise RuntimeError("redis disabled in this test by default")
+
+    monkeypatch.setattr(TS, "_redis", _no_redis)
+
+
+async def test_discover_by_name_reads_public_channels(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`contacts.Search` → topilgan kanalda `messages.Search`, natija tashqi."""
+    client = _NsClient(
+        {
+            "contacts.SearchRequest": _messages(
+                [], chats=[_chan(100, "ielts", "IELTS"), _chan(200, "mine", "Mening kanalim")]
+            ),
+            "messages.SearchRequest": _messages(
+                [_msg(11, "post matni", channel_id=100)],
+                chats=[_entity(100, title="IELTS", username="ielts")],
+            ),
+        }
+    )
+    _patch_pool(monkeypatch, client)
+
+    out = await TS.server_discover_by_name(1, "ielts", known_peer_ids={200})
+
+    assert out.searched == ["ielts"]  # lokal `chats` dagi kanal tashlandi
+    assert [h.link for h in out.hits] == ["https://t.me/ielts/11"]
+    assert all(h.chat_id is None for h in out.hits)  # tashqi — saqlanmaydi
+    assert [h.peer_kind for h in out.hits] == ["channel"]
+    assert client.ns.count("messages.SearchRequest") == 1
+    assert out.calls == 2 and out.mode == "by name"
+    peer = client.first("messages.SearchRequest").peer
+    assert isinstance(peer, tlt.InputPeerChannel)
+    assert (peer.channel_id, peer.access_hash) == (100, 7)  # access hash javobdan
+    assert "@ielts" in (out.note or "")
+
+
+async def test_discover_by_name_caps_the_number_of_channels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chans = [_chan(100 + i, f"c{i}", f"Kanal {i}") for i in range(5)]
+    client = _NsClient({"contacts.SearchRequest": _messages([], chats=chans)})
+    _patch_pool(monkeypatch, client)
+
+    out = await TS.server_discover_by_name(1, "ielts", known_peer_ids=set())
+
+    assert client.ns.count("messages.SearchRequest") == TS.DISCOVER_NAME_TOP_K == 3
+    assert len(out.channels) == 5 and len(out.searched) == 3
+
+
+async def test_discover_by_name_skips_private_and_local_channels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _NsClient(
+        {
+            "contacts.SearchRequest": _messages(
+                [],
+                chats=[
+                    _chan(100, "", "Yopiq kanal"),  # username yo'q — o'qib bo'lmaydi
+                    _chan(101, "nohash", "Hash yo'q", access_hash=None),
+                    _chan(102, "local", "Lokal"),  # allaqachon bizda
+                ],
+            )
+        }
+    )
+    _patch_pool(monkeypatch, client)
+
+    out = await TS.server_discover_by_name(1, "ielts", known_peer_ids={102})
+
+    assert "messages.SearchRequest" not in client.ns
+    assert out.searched == [] and out.calls == 1
+    assert "already in your chats" in (out.note or "")
+
+
+async def test_discover_by_name_flood_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    err = tg_errors.FloodWaitError(request=None)
+    err.seconds = 30
+    client = _NsClient({"contacts.SearchRequest": err})
+    _patch_pool(monkeypatch, client)
+
+    out = await TS.server_discover_by_name(1, "ielts", known_peer_ids=set())
+
+    assert client.ns == ["contacts.SearchRequest"]  # bitta urinish, retry yo'q
+    assert out.hits == [] and "flood_wait 30s" in (out.error_text or "")
+    assert "no retry" in (out.note or "")
+
+
+class _ByQueryClient(_NsClient):
+    """`contacts.Search` javobi so'rov matniga (`request.q`) qarab farqlanadi.
+
+    `_NsClient` bitta statik javob beradi — ikki xil nom so'rovini (`queries`)
+    alohida tekshirish uchun har chaqiruv o'z javobini olishi kerak.
+    """
+
+    def __init__(self, contacts_by_query: dict[str, Any], posts_reply: Any) -> None:
+        super().__init__({})
+        self.contacts_by_query = contacts_by_query
+        self.posts_reply = posts_reply
+
+    async def __call__(self, request: Any) -> Any:
+        self.requests.append(request)
+        if _key(request) == "contacts.SearchRequest":
+            return self.contacts_by_query.get(request.q, _messages([]))
+        return self.posts_reply
+
+
+async def test_discover_by_name_merges_two_name_queries(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ikkala nom so'rovi ham `contacts.Search`ga boradi, kanallar id bo'yicha birlashadi."""
+    chan_a = _chan(100, "ai_uz", "AI Uzbekistan")  # ikkala so'rovda ham topiladi
+    chan_b = _chan(200, "itpark_uz", "IT Park")
+    client = _ByQueryClient(
+        contacts_by_query={
+            "IT ta'lim": _messages([], chats=[chan_a]),
+            "O'zbekiston": _messages([], chats=[chan_a, chan_b]),
+        },
+        posts_reply=_messages(
+            [_msg(1, "post", channel_id=100)],
+            chats=[_entity(100, title="AI Uzbekistan", username="ai_uz")],
+        ),
+    )
+    _patch_pool(monkeypatch, client)
+
+    out = await TS.server_discover_by_name(
+        1,
+        queries=["IT ta'lim", "O'zbekiston"],
+        topic_query="IT ta'lim O'zbekistonda",
+        top_k=1,
+        known_peer_ids=set(),
+    )
+
+    assert client.ns.count("contacts.SearchRequest") == 2
+    assert out.name_queries == ["IT ta'lim", "O'zbekiston"]
+    assert {c["id"] for c in out.channels} == {100, 200}
+    # chan_a ikkala so'rovda ham topilgan → ustuvor, top_k=1 shuni tanlaydi.
+    assert out.searched == ["ai_uz"]
+    assert client.first("messages.SearchRequest").q == "IT ta'lim O'zbekistonda"
+
+
+async def test_discover_by_name_sends_both_queries_even_when_the_first_is_full(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Jonli regressiya: to'la birinchi so'rov ikkinchisini **bekor qilmaydi**.
+
+    `global-04` da birinchi nom so'rovi joy nomi ("O'zbekiston") edi va u
+    `candidates` ga har doim to'ladi (yuzlab kanalda shu so'z bor) — eski
+    "birinchisi to'la bo'lsa to'xta" qoidasi mavzu so'rovini ("IT ta'lim")
+    **hech qachon** yubormasdi. Byudjet `escalate` da hisoblanadi, bu yerda
+    emas.
+    """
+    chans = [_chan(100 + i, f"c{i}", f"Kanal {i}") for i in range(TS.DISCOVER_NAME_CANDIDATES)]
+    client = _ByQueryClient(
+        contacts_by_query={
+            "first": _messages([], chats=chans),
+            "second": _messages([], chats=[_chan(900, "second_ch", "Ikkinchi")]),
+        },
+        posts_reply=_messages([]),
+    )
+    _patch_pool(monkeypatch, client)
+
+    out = await TS.server_discover_by_name(
+        1, queries=["first", "second"], topic_query="topic", known_peer_ids=set()
+    )
+
+    assert client.ns.count("contacts.SearchRequest") == 2
+    assert out.name_queries == ["first", "second"]
+    assert 900 in {c["id"] for c in out.channels}
+
+
+class _ByPeerClient(_NsClient):
+    """`contacts.Search` so'rov matniga, `messages.Search` esa **peer**ga qarab.
+
+    Jonli `global-04` ni uchidan-uchiga o'ynash uchun: har nom so'rovi o'z
+    kanallarini beradi, har kanal esa o'z postlarini (yoki bo'shini).
+    """
+
+    def __init__(
+        self,
+        contacts_by_query: dict[str, Any],
+        posts_by_peer: dict[tuple[int, str], Any],
+    ) -> None:
+        super().__init__({})
+        self.contacts_by_query = contacts_by_query
+        self.posts_by_peer = posts_by_peer
+
+    async def __call__(self, request: Any) -> Any:
+        self.requests.append(request)
+        if _key(request) == "contacts.SearchRequest":
+            return self.contacts_by_query.get(request.q, _messages([]))
+        peer = getattr(request, "peer", None)
+        channel_id = int(getattr(peer, "channel_id", 0) or 0)
+        return self.posts_by_peer.get((channel_id, request.q), _messages([]))
+
+
+def _post_in(channel_id: int, username: str, mid: int) -> Any:
+    return _messages(
+        [_msg(mid, "IT ta'lim haqida post", channel_id=channel_id)],
+        chats=[_entity(channel_id, title=username, username=username)],
+    )
+
+
+async def test_discover_by_name_live_case_topical_channels_win(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Jonli `global-04`: mavzu so'rovi 3 ta kichik kanal, joy nomi 1 ta gigant.
+
+    Kutilgan: ikkala `contacts.Search` ham yuboriladi, mavzu **birinchi**,
+    tanlov `top_k=3` da **2 mavzu + 1 joy** bo'ladi (round-robin) — gigant
+    kanal a'zolar soni bilan mavzu kanallarini siqib chiqarmaydi.
+    """
+    topical = [
+        _chan(101, "ittechuz", "IT Tech Uz", participants_count=500),
+        _chan(102, "ITtalim_uz", "IT ta'lim", participants_count=300),
+        _chan(103, "kafolattalim_uz", "Kafolat ta'lim", participants_count=200),
+    ]
+    generic = _chan(
+        900, "uzbekistan_news", "O'zbekiston yangiliklari", participants_count=2_000_000
+    )
+    queries = TS.discover_name_queries(["IT ta'lim O'zbekistonda"], ["O'zbekiston", "IT ta'lim"])
+    assert queries == ["IT ta'lim", "O'zbekiston"]  # mavzu birinchi
+
+    client = _ByPeerClient(
+        contacts_by_query={
+            "IT ta'lim": _messages([], chats=topical),
+            "O'zbekiston": _messages([], chats=[generic]),
+        },
+        posts_by_peer={(101, "IT ta'lim O'zbekistonda"): _post_in(101, "ittechuz", 11)},
+    )
+    _patch_pool(monkeypatch, client)
+
+    out = await TS.server_discover_by_name(
+        1,
+        queries=queries,
+        topic_query="IT ta'lim O'zbekistonda",
+        top_k=3,
+        known_peer_ids=set(),
+    )
+
+    assert [r.q for r in client.requests if _key(r) == "contacts.SearchRequest"] == [
+        "IT ta'lim",
+        "O'zbekiston",
+    ]
+    # 2 mavzu + 1 joy; uchinchi mavzu kanali `top_k` ga sig'madi.
+    assert out.searched == ["ittechuz", "uzbekistan_news", "ITtalim_uz"]
+    assert "kafolattalim_uz" not in out.searched
+    assert [h.link for h in out.hits] == ["https://t.me/ittechuz/11"]
+    assert all(h.chat_id is None for h in out.hits)  # tashqi
+
+
+async def test_discover_by_name_retries_zero_hit_channel_with_the_short_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mavzu iborasi 0 bersa — **shu** kanalda qisqa mavzu nomi bilan bir marta."""
+    client = _ByPeerClient(
+        contacts_by_query={"IT ta'lim": _messages([], chats=[_chan(101, "ittechuz", "IT Tech")])},
+        posts_by_peer={(101, "IT ta'lim"): _post_in(101, "ittechuz", 12)},
+    )
+    _patch_pool(monkeypatch, client)
+
+    out = await TS.server_discover_by_name(
+        1,
+        queries=["IT ta'lim"],
+        topic_query="IT ta'lim O'zbekistonda qanday rivojlanyapti",
+        top_k=1,
+        known_peer_ids=set(),
+    )
+
+    searches = [r.q for r in client.requests if _key(r) == "messages.SearchRequest"]
+    assert searches == ["IT ta'lim O'zbekistonda qanday rivojlanyapti", "IT ta'lim"]
+    assert [h.link for h in out.hits] == ["https://t.me/ittechuz/12"]
+
+
+async def test_discover_by_name_retry_respects_the_call_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`max_calls` (escalate'ning `allow` i) tugagan bo'lsa qayta urinish yo'q."""
+    client = _ByPeerClient(
+        contacts_by_query={"IT ta'lim": _messages([], chats=[_chan(101, "ittechuz", "IT Tech")])},
+        posts_by_peer={(101, "IT ta'lim"): _post_in(101, "ittechuz", 12)},
+    )
+    _patch_pool(monkeypatch, client)
+
+    out = await TS.server_discover_by_name(
+        1,
+        queries=["IT ta'lim"],
+        topic_query="IT ta'lim O'zbekistonda",
+        top_k=1,
+        max_calls=2,  # 1 nom so'rovi + 1 kanal — qayta urinishga joy yo'q
+        known_peer_ids=set(),
+    )
+
+    assert client.ns.count("messages.SearchRequest") == 1
+    assert out.calls == 2 and out.hits == []
+
+
+async def test_discover_by_name_backward_compatible_single_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Eski chaqiruv shakli (`query=` bitta satr) ham nom, ham mavzu bo'lib ishlaydi."""
+    client = _NsClient(
+        {
+            "contacts.SearchRequest": _messages([], chats=[_chan(100, "ielts", "IELTS")]),
+            "messages.SearchRequest": _messages(
+                [_msg(11, "post matni", channel_id=100)],
+                chats=[_entity(100, title="IELTS", username="ielts")],
+            ),
+        }
+    )
+    _patch_pool(monkeypatch, client)
+
+    out = await TS.server_discover_by_name(1, "ielts", known_peer_ids=set())
+
+    assert out.name_queries == ["ielts"]
+    assert client.first("messages.SearchRequest").q == "ielts"
+    assert out.hits
+
+
+async def test_discover_channels_falls_back_when_premium_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`PremiumAccountRequiredError` → tekin nom yo'li (jonli `global-04`)."""
+    client = _NsClient(
+        {
+            "channels.CheckSearchPostsFloodRequest": PremiumAccountRequiredError(),
+            "contacts.SearchRequest": _messages([], chats=[_chan(100, "ielts", "IELTS")]),
+            "messages.SearchRequest": _messages(
+                [_msg(11, "post matni", channel_id=100)],
+                chats=[_entity(100, title="IELTS", username="ielts")],
+            ),
+        }
+    )
+    _patch_pool(monkeypatch, client)
+
+    async def no_local(account_id: int) -> set[int]:
+        return set()
+
+    monkeypatch.setattr(TS, "local_peer_ids", no_local)
+
+    res = await T.discover_channels(_ctx(), {"query": "ielts"})
+
+    assert res.ok and "Premium" in res.text
+    assert "https://t.me/ielts/11" in res.text
+    assert client.ns.count("contacts.SearchRequest") == 1
+    assert client.ns.count("messages.SearchRequest") == 1
+    assert "channels.SearchPostsRequest" not in client.ns  # Premium yo'q — yuborilmadi
+
+
+async def test_premium_state_is_remembered_per_account(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bir marta bilingan Premium yo'qligi qayta so'ralmaydi (RPC ham, token ham)."""
+    client = _NsClient({"channels.CheckSearchPostsFloodRequest": PremiumAccountRequiredError()})
+    _patch_pool(monkeypatch, client)
+
+    first = await TS.server_discover(1, "ielts")
+    second = await TS.server_discover(1, "ielts")
+
+    assert first.note_code == second.note_code == "premium_required"
+    assert first.calls == 1 and second.calls == 0
+    assert client.ns == ["channels.CheckSearchPostsFloodRequest"]  # ikkinchi marta yo'q
+
+
+# ─── Premium yo'qligi Redis'da (7 kun) — sovuq jarayon ham probe qilmasin ────
+
+
+class _FakeRedis:
+    """Xotiradagi Redis o'rnini bosuvchi (TTL yozib boriladi, lekin kutilmaydi)."""
+
+    def __init__(self, store: dict[str, str] | None = None) -> None:
+        self.store = store if store is not None else {}
+        self.ttls: dict[str, int] = {}
+        self.closed = 0
+
+    async def get(self, key: str) -> bytes | None:
+        raw = self.store.get(key)
+        return raw.encode("utf-8") if raw is not None else None
+
+    async def set(self, key: str, value: str, *, ex: int | None = None) -> None:
+        self.store[key] = value
+        if ex is not None:
+            self.ttls[key] = ex
+
+    async def aclose(self) -> None:
+        self.closed += 1
+
+
+@pytest.fixture
+def fake_redis_ts(monkeypatch: pytest.MonkeyPatch) -> _FakeRedis:
+    redis = _FakeRedis()
+
+    async def _redis() -> Any:
+        return redis
+
+    monkeypatch.setattr(TS, "_redis", _redis)
+    return redis
+
+
+async def test_discover_skips_probe_when_flag_is_in_redis(
+    monkeypatch: pytest.MonkeyPatch, fake_redis_ts: _FakeRedis
+) -> None:
+    """Sovuq jarayon (xotirada bo'sh) — Redis'dagi bayroq probe'ni to'xtatadi."""
+    fake_redis_ts.store[TS._premium_missing_key(1)] = "1"
+    client = _NsClient({})
+    _patch_pool(monkeypatch, client)
+
+    out = await TS.server_discover(1, "ielts")
+
+    assert out.calls == 0 and out.note_code == "premium_required"
+    assert client.ns == []  # RPC umuman yuborilmadi
+    assert 1 in TS.PREMIUM_MISSING  # tez yo'lga ham keshlandi
+
+
+async def test_discover_falls_back_to_probing_when_redis_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Redis o'qishda xato — **fail-open**: probe baribir bajariladi."""
+
+    async def boom() -> Any:
+        raise RuntimeError("no redis")
+
+    monkeypatch.setattr(TS, "_redis", boom)
+    client = _NsClient(
+        {"channels.CheckSearchPostsFloodRequest": SimpleNamespace(query_is_free=True, remains=0)}
+    )
+    _patch_pool(monkeypatch, client)
+
+    out = await TS.server_discover(1, "ielts")
+
+    assert out.note_code != "premium_required"
+    assert "channels.CheckSearchPostsFloodRequest" in client.ns  # probe chaqirildi
+
+
+async def test_premium_error_writes_redis_flag_with_ttl(
+    monkeypatch: pytest.MonkeyPatch, fake_redis_ts: _FakeRedis
+) -> None:
+    """`PremiumAccountRequiredError` → Redis'ga 7 kunlik bayroq yoziladi."""
+    client = _NsClient({"channels.CheckSearchPostsFloodRequest": PremiumAccountRequiredError()})
+    _patch_pool(monkeypatch, client)
+
+    out = await TS.server_discover(1, "ielts")
+
+    key = TS._premium_missing_key(1)
+    assert out.note_code == "premium_required"
+    assert fake_redis_ts.store[key] == "1"
+    assert fake_redis_ts.ttls[key] == TS.PREMIUM_MISSING_TTL_S == 7 * 24 * 3600
+
+
+async def test_discover_channels_similar_to(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _Client(
+        {
+            "GetChannelRecommendationsRequest": SimpleNamespace(
+                chats=[
+                    _entity(
+                        200,
+                        title="IELTS Pro",
+                        username="ieltspro",
+                        participants_count=1234,
+                        phone="+998901234567",
+                    )
+                ],
+                users=[],
+            )
+        }
+    )
+    _patch_pool(monkeypatch, client)
+
+    async def input_peer(account_id: int, peer_id: int) -> Any:
+        return tlt.InputPeerChannel(channel_id=peer_id, access_hash=5)
+
+    import app.mtproto.pool as P
+
+    monkeypatch.setattr(P.pool, "input_peer", input_peer)
+
+    async def resolve(ctx: Any, args: Any) -> Any:
+        return _chat()
+
+    monkeypatch.setattr(T, "_resolve_chat", resolve)
+
+    res = await T.discover_channels(_ctx(), {"similar_to": "@ielts"})
+
+    assert res.ok and "@ieltspro — IELTS Pro members=1234" in res.text
+    assert "998901234567" not in res.text  # telefon hech qachon chiqmaydi
+    assert isinstance(_req(client, "GetChannelRecommendationsRequest").channel, tlt.InputChannel)
+    assert "SearchPostsRequest" not in client.seen
+
+
+# ─── a'zolar ro'yxati ────────────────────────────────────────────────────────
+
+
+def _user(uid: int, uname: str | None, first: str, **flags: Any) -> Any:
+    return SimpleNamespace(
+        id=uid,
+        username=uname,
+        first_name=first,
+        last_name=None,
+        bot=flags.get("bot", False),
+        deleted=flags.get("deleted", False),
+        is_self=flags.get("is_self", False),
+        phone="+998901234567",  # ATAYLAB: natijaga tushmasligi tekshiriladi
+    )
+
+
+class _MembersClient(_Client):
+    def __init__(self, users: list[Any] | None = None, raise_: Exception | None = None) -> None:
+        super().__init__(raise_=raise_)
+        self.users = users or []
+
+    async def get_participants(self, peer: Any, **kw: Any) -> Any:
+        self.calls.append({"peer": peer, **kw})
+        if self.raise_ is not None:
+            raise self.raise_
+        out = list(self.users)
+        return _TotalList(out, len(out))  # Telethon ro'yxat + `.total` qaytaradi
+
+
+class _TotalList(list):  # type: ignore[type-arg]
+    def __init__(self, items: list[Any], total: int) -> None:
+        super().__init__(items)
+        self.total = total
+
+
+def _patch_members_pool(monkeypatch: pytest.MonkeyPatch, client: Any, chat: Any = None) -> None:
+    import app.mtproto.pool as P
+
+    async def get(account_id: int) -> Any:
+        return client
+
+    async def input_peer(account_id: int, peer_id: int) -> Any:
+        return f"peer:{peer_id}"
+
+    async def resolve(ctx: Any, args: Any) -> Any:
+        return chat or SimpleNamespace(id=1, tg_peer_id=42, title="Blog", type="channel")
+
+    monkeypatch.setattr(P.pool, "get", get)
+    monkeypatch.setattr(P.pool, "input_peer", input_peer)
+    monkeypatch.setattr(T, "_resolve_chat", resolve)
+
+
+def test_list_members_is_registered_and_read_only() -> None:
+    assert "list_members" in T.READ_TOOLS
+    from app.services import write_tools as W
+
+    assert "list_members" not in W.WRITE_TOOL_NAMES
+    assert "channels.GetParticipantsRequest" in A.ALLOWED
+    assert not A.is_write("channels.GetParticipantsRequest")
+
+
+async def test_list_members_never_leaks_phone(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _MembersClient([_user(1, "ali", "Ali"), _user(2, None, "Vali", bot=True)])
+    _patch_members_pool(monkeypatch, client)
+
+    res = await T.list_members(_ctx(), {"chat": "Blog"})
+
+    assert res.ok and res.meta["n"] == 2
+    assert "998901234567" not in res.text  # telefon hech qachon chiqmaydi
+    assert "@ali — Ali" in res.text
+    assert "id:2 — Vali [bot]" in res.text
+    assert "members=2 of 2" in res.text
+
+
+async def test_list_members_private_chat_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    chat = SimpleNamespace(id=9, tg_peer_id=7, title="Firuz", type="private")
+    client = _MembersClient([])
+    _patch_members_pool(monkeypatch, client, chat=chat)
+
+    res = await T.list_members(_ctx(), {"chat": "Firuz"})
+
+    assert not res.ok and "private" in res.text
+    assert not client.calls  # MTProto'ga umuman borilmadi
+
+
+async def test_list_members_admin_required(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _MembersClient(raise_=tg_errors.ChatAdminRequiredError(request=None))
+    _patch_members_pool(monkeypatch, client)
+
+    res = await T.list_members(_ctx(), {"chat": "Blog"})
+
+    assert not res.ok and "admin rights required" in res.text
+
+
+async def test_list_members_limit_capped(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _MembersClient([])
+    _patch_members_pool(monkeypatch, client)
+    await T.list_members(_ctx(), {"chat": "Blog", "limit": 10_000})
+    assert client.calls[0]["limit"] == T.MEMBERS_LIMIT_MAX
+
+
+# ─── profil / kontekst tool'lari ─────────────────────────────────────────────
+
+
+class _TLClient(_Client):
+    """`client(request)` ni so'rov turi nomi bo'yicha javobga bog'laydi."""
+
+    def __init__(self, replies: dict[str, Any]) -> None:
+        super().__init__(replies)
+
+
+def _patch_peer(monkeypatch: pytest.MonkeyPatch, client: Any, peer: Any, chat: Any) -> None:
+    import app.mtproto.pool as P
+
+    async def get(account_id: int) -> Any:
+        return client
+
+    async def input_peer(account_id: int, peer_id: int) -> Any:
+        return peer
+
+    async def resolve(ctx: Any, args: Any) -> Any:
+        return chat
+
+    monkeypatch.setattr(P.pool, "get", get)
+    monkeypatch.setattr(P.pool, "input_peer", input_peer)
+    monkeypatch.setattr(T, "_resolve_chat", resolve)
+
+
+def test_profile_tools_registered_and_read_only() -> None:
+    from app.services import write_tools as W
+
+    for name in ("get_chat_info", "get_user_info", "get_reactions", "get_post_comments"):
+        assert name in T.READ_TOOLS
+        assert name not in W.WRITE_TOOL_NAMES
+    for method in (
+        "channels.GetFullChannelRequest",
+        "messages.GetFullChatRequest",
+        "users.GetFullUserRequest",
+        "messages.GetMessageReactionsListRequest",
+        "messages.GetRepliesRequest",
+        "messages.GetSearchCountersRequest",
+    ):
+        assert method in A.ALLOWED and not A.is_write(method)
+
+
+async def test_get_chat_info_rejects_private(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _TLClient({})
+    chat = SimpleNamespace(id=1, tg_peer_id=5, title="Firuz", type="private", username=None)
+    _patch_peer(monkeypatch, client, tlt.InputPeerUser(user_id=5, access_hash=0), chat)
+
+    res = await T.get_chat_info(_ctx(), {"chat": "Firuz"})
+
+    assert not res.ok and "get_user_info" in res.text
+    assert not client.seen  # noto'g'ri TL metod umuman yuborilmadi
+
+
+async def test_get_user_info_rejects_group(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _TLClient({})
+    chat = SimpleNamespace(id=1, tg_peer_id=5, title="Blog", type="channel", username=None)
+    _patch_peer(monkeypatch, client, tlt.InputPeerChannel(channel_id=5, access_hash=0), chat)
+
+    res = await T.get_user_info(_ctx(), {"chat": "Blog"})
+
+    assert not res.ok and "get_chat_info" in res.text
+    assert not client.seen
+
+
+async def test_get_user_info_never_leaks_phone(monkeypatch: pytest.MonkeyPatch) -> None:
+    user = _user(5, "firuz", "Firuz")
+    full = SimpleNamespace(id=5, about="1986", common_chats_count=3, blocked=False)
+    client = _TLClient({"GetFullUserRequest": SimpleNamespace(full_user=full, users=[user])})
+    chat = SimpleNamespace(id=1, tg_peer_id=5, title="Firuz", type="private", username=None)
+    _patch_peer(monkeypatch, client, tlt.InputPeerUser(user_id=5, access_hash=0), chat)
+
+    res = await T.get_user_info(_ctx(), {"chat": "Firuz"})
+
+    assert res.ok and "@firuz — Firuz" in res.text
+    assert "common_chats=3" in res.text and "bio: 1986" in res.text
+    assert "998901234567" not in res.text
+
+
+async def test_get_reactions_broadcast_message_is_explained(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Telegram kanalda kim bosganini bermaydi — model tushunadigan xabar qaytadi."""
+    err = tg_errors.BroadcastForbiddenError(request=None)
+    client = _TLClient({"GetMessageReactionsListRequest": err})
+    chat = SimpleNamespace(id=1, tg_peer_id=5, title="Blog", type="channel", username=None)
+    _patch_peer(monkeypatch, client, tlt.InputPeerChannel(channel_id=5, access_hash=0), chat)
+
+    res = await T.get_reactions(_ctx(), {"chat": "Blog", "message_id": 17})
+
+    assert not res.ok and "get_chat_stats" in res.text
+
+
+async def test_message_id_is_required(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _TLClient({})
+    chat = SimpleNamespace(id=1, tg_peer_id=5, title="Blog", type="channel", username=None)
+    _patch_peer(monkeypatch, client, tlt.InputPeerChannel(channel_id=5, access_hash=0), chat)
+
+    for tool in (T.get_reactions, T.get_post_comments):
+        res = await tool(_ctx(), {"chat": "Blog"})
+        assert not res.ok and "message_id" in res.text
+    assert not client.seen
+
+
+# ─── havolalar va bo'sh so'rov (conv-20260918-111653) ────────────────────────
+#
+# Jonli yugurishda server topilmalari **havolasiz** qator bo'lib berilardi
+# (`_hit_line(..., with_link=False)`), model esa havolani o'zi yasardi:
+# `https://t.me/c/<lokal DB id>/<msg>` — bunday URL mavjud emas. `ServerHit`
+# da haqiqiy havola allaqachon bor, shuning uchun u har doim chiqadi.
+
+
+def _hit(**kw: Any) -> Any:
+    from app.services import tg_search as TS
+
+    base = {
+        "tg_msg_id": 7,
+        "tg_peer_id": 100,
+        "date": datetime(2026, 8, 18, 12, 0, tzinfo=UTC),
+        "sender": "Ali",
+        "text": "promo post",
+        "chat_title": "IELTS",
+        "chat_id": 3830,  # lokal DB id — javobga ham, havolaga ham tushmaydi
+        "link": "https://t.me/ielts/7",
+    }
+    return TS.ServerHit(**{**base, **kw})
+
+
+def test_hit_line_carries_the_real_link_and_never_the_db_id() -> None:
+    line = T._hit_line(_hit(), with_chat=True)
+    assert "https://t.me/ielts/7" in line
+    assert "3830" not in line, "lokal DB id modelga havola sifatida ko'rinmaydi"
+
+
+def test_rendered_server_hits_are_linked_by_default() -> None:
+    from app.services import tg_search as TS
+
+    opts = {"q": "promo", "filter_name": "", "limit": 5, "min_date": None, "max_date": None}
+    res = T._render_hits(TS.ServerHits(hits=[_hit()], calls=1), opts, 'chat="IELTS"')
+
+    assert res.ok and "https://t.me/ielts/7" in res.text
+    assert "3830" not in res.text
+
+
+async def test_search_global_hits_come_back_with_links(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _Client(
+        {
+            "SearchGlobalRequest": _messages(
+                [_msg(7, "promo post", channel_id=100)],
+                users=[_entity(1, first="Ali")],
+                chats=[_entity(100, title="IELTS", username="ielts")],
+            )
+        }
+    )
+    _patch_pool(monkeypatch, client)
+
+    res = await T.search_global(_ctx(), {"query": "promo"})
+
+    assert "https://t.me/ielts/7" in res.text
+
+
+async def test_search_telegram_accepts_an_empty_query_with_from_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ "Shu odam nima yozdi" — so'zsiz so'rov `from_id` bilan ma'noli."""
+    client = _Client({"SearchRequest": _messages([_msg(3)], users=[_entity(1, first="Ali")])})
+    _patch_pool(monkeypatch, client, chat=_chat())
+
+    res = await T.search_telegram(_ctx(), {"query": "", "from_user": "@ali"})
+
+    assert res.ok, res.text
+    req = _req(client, "SearchRequest")
+    assert req.q == "" and req.from_id is not None
+    assert 'query=""' not in res.text and "from=@ali" in res.text
+
+
+async def test_search_telegram_accepts_an_empty_query_with_a_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _Client({"SearchRequest": _messages([_msg(3)], users=[_entity(1, first="Ali")])})
+    _patch_pool(monkeypatch, client, chat=_chat())
+
+    res = await T.search_telegram(_ctx(), {"filter": "url"})
+
+    assert res.ok and _req(client, "SearchRequest").q == ""
+
+
+async def test_empty_query_without_any_narrowing_is_still_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _Client()
+    _patch_pool(monkeypatch, client, chat=_chat())
+    res = await T.search_telegram(_ctx(), {"query": "  "})
+    assert not res.ok and "query" in res.text
+    assert not client.requests

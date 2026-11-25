@@ -1,0 +1,608 @@
+/* css/pages/ask.css — `/ask` sahifasi.
+ *
+ * Qoidalar:
+ *   * token'lardan tashqari qattiq rang yo'q (`css/tokens.css`);
+ *   * tred o'lchovi `--measure` (68ch) — o'qish uchun eng qulay kenglik;
+ *   * composer pastda `--pad-bottom` (`max(safe-area, --kb)`) bilan —
+ *     mobil klaviatura ochilganda ostida qolmaydi;
+ *   * oqim **yakuniy tartibga** yozadi, shuning uchun bu yerda hech qanday
+ *     "tugagach joyini o'zgartir" qoidasi yo'q.
+ */
+
+/* `--composer-h` — composer'ning real balandligi (`templates/ask.html`
+   `ResizeObserver` orqali `document.body`ga yozadi). Shu yerdagi qiymat
+   faqat JS ishga tushmaguncha (yoki `ResizeObserver` yo'q muhitda) zaxira —
+   composer bir qatorli holatiga yaqin. */
+.page-ask { --list-w: 300px; --composer-h: 150px; }
+
+/* ══ Chip — bu sahifadagi asosiy boshqaruv shakli ══════════════════
+   `.chip-btn` (components.css) dan farqi: chip bu yerda ham tugma, ham
+   yorliq bo'lishi mumkin (kontekst chipi, klaster, taklif), shuning uchun
+   `span` ham, `button` ham bir xil ko'rinadi. Sahifaga chegaralangan. */
+.page-ask .chip {
+  display: inline-flex; align-items: center; gap: var(--s-1);
+  min-block-size: 28px; padding: 0 var(--s-3);
+  font: inherit; font-size: var(--fs-sm); line-height: 1;
+  color: var(--text); background: var(--panel-2);
+  border: 1px solid var(--border); border-radius: var(--r-full, 999px);
+  cursor: default;
+}
+.page-ask button.chip { cursor: pointer; }
+.page-ask button.chip:hover { background: var(--panel-3); border-color: var(--border-strong); }
+.page-ask .chip.ghost { background: none; color: var(--muted); }
+.page-ask .chip.tiny { min-block-size: 22px; padding: 0 var(--s-2); font-size: var(--fs-xs); }
+.page-ask .chip .icon { inline-size: 15px; block-size: 15px; flex: none; }
+.page-ask .chip .avatar { --avatar-size: 20px; }
+
+/* ══ Top bar ═══════════════════════════════════════════════════════ */
+.ask-topbar .ctx-summary {
+  font-size: var(--fs-xs); color: var(--muted);
+  padding: 2px var(--s-2); border: 1px solid var(--border); border-radius: var(--r-full, 999px);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-inline-size: 30ch;
+}
+.only-mobile { display: none; }
+
+/* ══ Suhbatlar paneli ══════════════════════════════════════════════ */
+.ask-convs { gap: 0; }
+.convs-head {
+  flex: none; display: flex; align-items: center; gap: var(--s-2);
+  padding: var(--s-3); border-block-end: 1px solid var(--border-soft);
+}
+.field-icon {
+  flex: 1 1 auto; display: flex; align-items: center; gap: var(--s-2);
+  min-inline-size: 0; padding: 0 var(--s-2);
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--r-md, 12px);
+}
+.field-icon .icon { color: var(--muted); flex: none; }
+.field-icon input {
+  flex: 1 1 auto; min-inline-size: 0; min-block-size: 36px;
+  border: 0; background: none; color: var(--text); font-size: var(--fs-sm);
+}
+.field-icon input:focus { outline: none; }
+.field-inline { display: flex; align-items: center; gap: var(--s-2); min-inline-size: 0; }
+/* L4: uzun akkaunt nomi ro'yxat panelida kesilib chiqib ketardi — endi
+   qisqaradi (ellipsis), to'liq nom `title` (`pages/ask/conversations.js`
+   `sel.title`ni to'ldiradi) orqali hover'da ko'rinadi. */
+.field-inline select {
+  flex: 1 1 auto; min-inline-size: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.conv-list { flex: 1 1 auto; overflow: auto; margin: 0; padding: var(--s-2); list-style: none; }
+.conv-empty { padding: var(--s-4); color: var(--muted); font-size: var(--fs-sm); text-align: center; }
+/* L6: `.conv-act` tugmalari (nomlash/o'chirish) faqat hoverda ko'rinadi,
+   lekin eski versiyada `flex: none` bo'lgani uchun **har doim** `--tap`
+   (44px) x2 joy band qilardi — sarlavha shu tufayli qatorning ~60%
+   kengligida kesilib, o'ng tarafda bo'sh joy qolardi. Endi `.conv-actions`
+   qatordan chiqarilib (`position:absolute`), `.conv-open` butun kenglikni
+   oladi; amallar faqat hoverda **ustidan** chiqadi, fon `--row-bg` orqali
+   qator holatiga mos keladi (ostidagi matnni to'liq yopadi). */
+.conv-row {
+  position: relative;
+  display: flex; align-items: center; gap: var(--s-1);
+  border-radius: var(--r-md, 12px);
+  --row-bg: transparent;
+}
+.conv-row:hover { --row-bg: var(--panel-2); background: var(--row-bg); }
+.conv-row.is-active { --row-bg: var(--accent-soft); background: var(--row-bg); }
+.conv-row.is-active .conv-title { color: var(--accent-text); font-weight: 600; }
+.conv-open {
+  flex: 1 1 auto; min-inline-size: 0; display: grid; gap: 2px;
+  padding: var(--s-2); border: 0; background: none; color: inherit;
+  text-align: start; cursor: pointer;
+}
+.conv-title {
+  display: block; font-size: var(--fs-sm); line-height: var(--lh-tight);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.conv-meta { font-size: var(--fs-xs); color: var(--faint); }
+.conv-actions {
+  position: absolute; inset-block: 0; inset-inline-end: var(--s-1);
+  display: flex; align-items: center; gap: var(--s-1);
+  border-radius: var(--r-md, 12px);
+  background: var(--row-bg);
+  opacity: 0; pointer-events: none;
+  transition: opacity var(--t-hover) var(--ease);
+}
+.conv-row:hover .conv-actions, .conv-row:focus-within .conv-actions { opacity: 1; pointer-events: auto; }
+.conv-act { flex: none; }
+.conv-act.danger:hover { color: var(--danger); }
+.conv-rename {
+  inline-size: 100%; min-block-size: 30px; font-size: var(--fs-sm);
+  border: 1px solid var(--accent); border-radius: var(--r-sm, 8px);
+  background: var(--panel); color: var(--text); padding: 0 var(--s-2);
+}
+.convs-foot { flex: none; padding: var(--s-3); border-block-start: 1px solid var(--border-soft); }
+
+/* ══ Tred ══════════════════════════════════════════════════════════ */
+.ask-pane { position: relative; min-block-size: 0; }
+/* `scroll-padding-block-end` — dastur (`scrollIntoView`/anchor) composer
+   ostiga tushib qolmasin, `--composer-h` orqali (pastda, `.thread` ham
+   shu bilan). */
+.thread-scroll {
+  flex: 1 1 auto; overflow: auto; overscroll-behavior: contain;
+  scroll-padding-block-end: var(--composer-h);
+}
+.thread {
+  /* 88ch — jadval/kod/chart uchun joy (pastda, `.msg-a .answer`); oddiy
+     matn hamon 68ch (`--measure`) da qoladi. Pane torroq bo'lsa (300px
+     ro'yxat + 64px rail dan qolgani) `min(100%, …)` uni siqadi. */
+  inline-size: 100%; max-inline-size: min(100%, 88ch); margin-inline: auto;
+  /* Pastki padding composer balandligiga teng — oxirgi xabar composer
+     ostida "qolib" ko'rinmasin (L177: mobilda ayniqsa sezilardi). */
+  padding: var(--s-5) var(--s-4) calc(var(--composer-h) + var(--s-4));
+  display: flex; flex-direction: column; gap: var(--s-5);
+}
+.thread-top { display: flex; justify-content: center; }
+
+/* Foydalanuvchi savoli — o'ngda pufak, matn oddiy (md emas) */
+.msg-u { display: flex; flex-direction: column; align-items: flex-end; gap: var(--s-1); }
+.msg-u .bubble {
+  max-inline-size: 85%;
+  padding: var(--s-3) var(--s-4); border-radius: var(--r-lg, 16px);
+  background: var(--bubble-user); color: var(--bubble-user-ink);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  font-size: var(--fs-md); line-height: var(--lh-body);
+}
+
+/* Assistent javobi — chapda, ramkasiz blok */
+.msg-a { display: flex; flex-direction: column; gap: var(--s-3); position: relative; }
+/* Javob tipografiyasi: 68ch o'lchov (`--measure`, `.thread` da), 16px/1.65.
+   Sarlavha shkalasi, jadval/kod/callout/details uslublari `components.css`
+   dagi `md-*` blokida — bu yerda faqat javob kontekstidagi tuzatishlar. */
+.msg-a .answer {
+  font-size: var(--fs-md); line-height: var(--lh-answer);
+  overflow-wrap: anywhere;
+  /* `text-wrap: pretty` — oxirgi qatorda yolg'iz so'z qolmasin (Baseline 2024) */
+  text-wrap: pretty;
+}
+.msg-a .answer p { margin-block: var(--s-3); }
+.msg-a .answer > :first-child { margin-block-start: 0; }
+.msg-a .answer > :last-child { margin-block-end: 0; }
+/* Ketma-ket sarlavhalar orasida ikki marta joy bo'lmasin */
+.msg-a .answer .md-h + .md-h { margin-block-start: var(--s-3); }
+.answer-error { display: flex; align-items: center; gap: var(--s-2); color: var(--danger); font-size: var(--fs-sm); }
+/* `done.truncated_answer` — model chegarasida to'xtagan javob (xato emas). */
+.answer-truncated {
+  display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap;
+  color: var(--warn-text); font-size: var(--fs-sm);
+  margin-block: var(--s-2);
+}
+.answer-truncated .icon { inline-size: 15px; block-size: 15px; flex: none; }
+
+/* Javob konteyneri (`.thread`) 88ch gacha kengaydi, lekin oddiy matn
+   (paragraf, sarlavha, ro'yxat, callout) o'qish uchun 68ch (`--measure`)
+   da qolishi kerak — aks holda qator juda uzun bo'lib ko'zni charchatadi.
+   Jadval/kod/diagramma/chart esa qamrov kengroq bo'lishidan foyda ko'radi
+   (uch ustunli jadval 68ch'da har doim gorizontal scroll qilardi, L177). */
+.msg-a .answer > * { max-inline-size: var(--measure); }
+.msg-a .answer > .md-table-wrap,
+.msg-a .answer > .md-table-tools,
+.msg-a .answer > figure.md-code,
+.msg-a .answer > figure.md-chart,
+.msg-a .answer > figure.md-mermaid {
+  max-inline-size: none;
+}
+
+/* >=900px'da bu bloklar konteynerdan ham kengroq "bleed" qiladi — matn
+   68ch da qolgani uchun jadval/kod xira ko'rinmasin. Faqat keng ekranda —
+   mobilda chetlar allaqachon tor. */
+@media (min-width: 900px) {
+  .msg-a .answer > .md-table-wrap,
+  .msg-a .answer > .md-table-tools,
+  .msg-a .answer > figure.md-code,
+  .msg-a .answer > figure.md-chart,
+  .msg-a .answer > figure.md-mermaid {
+    margin-inline: calc(var(--s-5) * -1);
+    inline-size: calc(100% + var(--s-5) * 2);
+  }
+}
+
+.ctx-line {
+  display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap;
+  font-size: var(--fs-xs); color: var(--muted);
+}
+.ctx-line .icon { inline-size: 14px; block-size: 14px; }
+
+/* Kod bloki — nusxa tugmasi */
+.msg-a pre { position: relative; }
+.code-copy { position: absolute; inset-block-start: var(--s-2); inset-inline-end: var(--s-2); opacity: 0; }
+.msg-a pre:hover .code-copy, .msg-a pre:focus-within .code-copy { opacity: 1; }
+
+/* Jadval — o'z scroll konteynerida, birinchi ustun yopishqoq.
+   `.table-wrap` global sinf (app.css), shuning uchun qoidalar javob bloki
+   ichiga chegaralangan — boshqa sahifalardagi jadvallar o'zgarmaydi. */
+.msg-a .table-wrap { overflow-x: auto; max-inline-size: 100%; }
+.msg-a .table-wrap table { min-inline-size: max-content; }
+.msg-a .table-wrap th:first-child, .msg-a .table-wrap td:first-child {
+  position: sticky; inset-inline-start: 0; z-index: 1;
+  background: var(--panel);
+}
+/* Yopishqoq ustun zebra qatorda ham qator rangida ko'rinsin, aks holda
+   u "boshqa jadvaldan kelgan" ustunga o'xshab qoladi. */
+.msg-a .md-table tbody tr:nth-child(even) td:first-child {
+  background: color-mix(in oklab, var(--panel-2) 65%, var(--panel));
+}
+.msg-a .md-table thead th:first-child { background: var(--panel-3); z-index: 3; }
+/* Bitta ustunli jadvalda yopishqoqlik keraksiz (va soya chizadi) */
+.msg-a .md-table tr > :first-child:last-child { position: static; }
+
+/* ══ Bosqich chizig'i (oddiy oqim) ════════════════════════════════ */
+.status-strip {
+  display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap;
+  font-size: var(--fs-sm); color: var(--muted);
+}
+.status-strip.is-failed { color: var(--danger); }
+.status-tools { display: inline-flex; gap: var(--s-1); flex-wrap: wrap; }
+
+/* ══ Deep paneli ═══════════════════════════════════════════════════ */
+.deep-panel {
+  display: grid; gap: var(--s-3);
+  padding: var(--s-3); border: 1px solid var(--border-soft); border-radius: var(--r-lg, 16px);
+  background: var(--panel-2);
+  /* `.deep-panel` flex item bo'lib (`.msg-a`) va o'zi grid konteyner —
+     grid/flex item default `min-width:auto` (content-based) tufayli
+     ichidagi bironta bola (masalan manbalar tasmasi) kartani kengaytirib
+     yuborishi mumkin edi. `min-inline-size: 0` shu default'ni bekor qiladi,
+     `max-inline-size: 100%` esa kartani ota konteynerdan kengaytirmaydi. */
+  min-inline-size: 0; max-inline-size: 100%;
+}
+.stage-rail { display: grid; gap: var(--s-2); margin: 0; padding: 0; list-style: none; }
+.stage-rail .stage-item {
+  display: flex; align-items: center; gap: var(--s-2);
+  font-size: var(--fs-sm); color: var(--muted);
+}
+.stage-rail .stage-item::before {
+  content: ""; inline-size: 8px; block-size: 8px; border-radius: 50%;
+  background: var(--stage-idle); flex: none;
+}
+.stage-rail .stage-item[data-state="active"] { color: var(--text); }
+.stage-rail .stage-item[data-state="active"]::before { background: var(--stage-active); }
+.stage-rail .stage-item[data-state="done"]::before { background: var(--stage-done); }
+.stage-rail .stage-item[data-state="failed"] { color: var(--stage-failed); }
+.stage-rail .stage-item[data-state="failed"]::before { background: var(--stage-failed); }
+.stage-rail .stage-item .icon { inline-size: 15px; block-size: 15px; flex: none; }
+.stage-body { display: flex; align-items: baseline; gap: var(--s-2); min-inline-size: 0; flex-wrap: wrap; }
+.stage-detail { font-size: var(--fs-xs); color: var(--faint); }
+.stage-item.is-collapsed .stage-detail { opacity: .7; }
+
+.plan-card { display: grid; gap: var(--s-2); }
+.plan-head { display: flex; align-items: center; gap: var(--s-2); font-size: var(--fs-sm); }
+.plan-chips, .cluster-chips, .followups { display: flex; flex-wrap: wrap; gap: var(--s-2); }
+.plan-facts { font-size: var(--fs-xs); color: var(--muted); }
+
+.chip.cluster[aria-pressed="true"] { background: var(--peer, var(--accent-soft)); color: var(--peer-ink, var(--accent-text)); }
+.chip.cluster b { margin-inline-start: var(--s-1); opacity: .75; }
+
+/* Manbalar tasmasi — keng ekranda karta ichida o'raladi (scroll shart
+   emas), tor ekranda (<=640px) bitta qatorli scroll-snap lentaga aylanadi
+   (pastda, mobil bo'lim). `.sources-wrap` (`.deep-panel`ning grid katakchasi)
+   va `.source-strip-wrap` — ikkalasi ham grid/flex bola, default
+   `min-width:auto` tufayli ichidagi chiplar (ayniqsa uzun sarlavhali,
+   ko'p chatli javoblarda) kartadan tashqariga chiqib ketardi (UI audit:
+   karta o'ng chegarasi ~790px'da, chiplar ~1150px'gacha davom etardi).
+   `min-inline-size: 0` bu default'ni bekor qiladi, `max-inline-size: 100%`
+   esa ularni kartadan kengaytirmaydi. */
+.sources-wrap, .source-strip-wrap {
+  min-inline-size: 0; max-inline-size: 100%;
+}
+.source-strip-head { font-size: var(--fs-xs); color: var(--muted); margin-block-end: var(--s-1); }
+.source-strip {
+  display: flex; flex-wrap: wrap; gap: var(--s-2);
+  min-inline-size: 0; max-inline-size: 100%;
+  padding-block-end: var(--s-1);
+}
+.source-card {
+  flex: none;
+  display: flex; align-items: center; gap: var(--s-2);
+  max-inline-size: 240px; padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--border); border-radius: var(--r-full, 999px);
+  background: var(--panel); color: var(--text); cursor: pointer;
+  font-size: var(--fs-sm);
+}
+.source-card[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
+.source-title { min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.source-count { flex: none; font-size: var(--fs-xs); color: var(--muted); }
+
+/* Tor ekran (<=640px) — o'rash o'rniga bitta qatorli scroll-snap lenta,
+   `.stage-rail`ning mobil uslubi bilan bir xil naqsh (L456 dagi
+   `@media (max-width: 860px)` bloki). */
+@media (max-width: 640px) {
+  .source-strip {
+    flex-wrap: nowrap; overflow-x: auto;
+    scroll-snap-type: x proximity;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+  }
+  .source-card { scroll-snap-align: start; }
+}
+
+/* Qamrov */
+.cov-box { font-size: var(--fs-sm); }
+.cov-box > summary {
+  display: flex; align-items: center; gap: var(--s-2);
+  cursor: pointer; color: var(--muted); list-style: none;
+}
+.cov-box > summary::-webkit-details-marker { display: none; }
+.cov-rows { display: grid; gap: var(--s-2); padding-block-start: var(--s-2); }
+.cov-bar { display: grid; grid-template-columns: minmax(0, 1fr) 2fr auto; gap: var(--s-2); align-items: center; font-size: var(--fs-xs); }
+.cov-bar-track { block-size: 6px; border-radius: 3px; background: var(--panel-3); overflow: hidden; }
+.cov-bar-track i { display: block; block-size: 100%; background: var(--stage-done); }
+.cov-gap { display: flex; align-items: center; gap: var(--s-2); font-size: var(--fs-xs); color: var(--warn-text); flex-wrap: wrap; }
+.cov-gap-title { min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cov-gap .icon { inline-size: 14px; block-size: 14px; flex: none; }
+.cov-facts { font-size: var(--fs-xs); color: var(--muted); }
+
+/* ══ Sitata chiplari ══════════════════════════════════════════════ */
+.cite-chip {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-inline-size: 16px; block-size: 16px; padding: 0 4px; margin-inline-start: 2px;
+  font-size: 10px; line-height: 1; vertical-align: super;
+  border: 1px solid var(--cite-border); border-radius: var(--r-full, 999px);
+  background: var(--cite-bg); color: var(--cite); cursor: pointer;
+  transition: opacity var(--t-hover) var(--ease, ease);
+}
+.cite-chip:hover, .cite-chip:focus-visible { background: var(--cite); color: var(--panel); }
+.cite-chip.is-dim { opacity: .3; }
+
+.cite-pop {
+  position: fixed; z-index: var(--z-sheet);
+  max-inline-size: min(360px, calc(100vw - 16px));
+  padding: var(--s-3); border: 1px solid var(--border); border-radius: var(--r-md, 12px);
+  background: var(--panel); box-shadow: var(--sh-3);
+}
+.cite-card { display: grid; gap: var(--s-2); }
+.cite-card-head { display: flex; align-items: center; gap: var(--s-2); font-size: var(--fs-sm); }
+.cite-card-title { min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.cite-card-text {
+  margin: 0; font-size: var(--fs-sm); line-height: var(--lh-body); color: var(--text);
+  display: -webkit-box; -webkit-line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden;
+}
+
+/* ══ Javob futeri ═════════════════════════════════════════════════ */
+.foot-inner { display: grid; gap: var(--s-2); }
+.answer-actions { display: flex; align-items: center; gap: var(--s-1); flex-wrap: wrap; }
+.rate { display: inline-flex; gap: 2px; }
+.rate-btn[aria-pressed="true"] { color: var(--accent-text); background: var(--accent-soft); }
+.meta-box { font-size: var(--fs-xs); color: var(--faint); }
+.meta-box > summary { display: flex; align-items: center; gap: var(--s-1); cursor: pointer; list-style: none; }
+.meta-box > summary::-webkit-details-marker { display: none; }
+.meta-rows { padding-block-start: var(--s-1); display: grid; gap: 2px; }
+.meta-box .icon { inline-size: 13px; block-size: 13px; }
+
+/* Mundarija — desktopda o'ng reyka */
+.toc-rail { display: none; }
+@media (min-width: 1200px) {
+  .msg-a.has-toc { position: relative; }
+  .toc-rail {
+    display: block; position: absolute; inset-block-start: 0;
+    inset-inline-start: calc(100% + var(--s-4)); inline-size: 200px;
+    font-size: var(--fs-xs);
+  }
+  .toc-head { color: var(--muted); margin-block-end: var(--s-2); }
+  .toc-list { display: grid; gap: var(--s-1); }
+  .toc-link { color: var(--muted); text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .toc-link:hover { color: var(--accent-text); }
+  .toc-link.lv-h3 { padding-inline-start: var(--s-3); }
+}
+
+/* ══ Amal kartalari ═══════════════════════════════════════════════ */
+.act-group { display: grid; gap: var(--s-3); }
+.act-card {
+  display: grid; gap: var(--s-2);
+  padding: var(--s-3); border: 1px solid var(--border); border-radius: var(--r-lg, 16px);
+  background: var(--panel-2);
+}
+.act-card.is-executed { border-color: var(--ok); }
+.act-card.is-failed, .act-card.is-blocked { border-color: var(--danger); }
+.act-card.is-expired, .act-card.is-rejected { opacity: .6; }
+.act-head { display: flex; align-items: center; gap: var(--s-2); font-size: var(--fs-sm); }
+.act-title { flex: 1 1 auto; min-inline-size: 0; }
+.act-status { font-size: var(--fs-xs); color: var(--muted); }
+.act-target { display: flex; align-items: center; gap: var(--s-2); font-size: var(--fs-sm); color: var(--muted); }
+.act-text {
+  white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--fs-sm);
+  padding: var(--s-2) var(--s-3); border-radius: var(--r-md, 12px); background: var(--panel-3);
+}
+.act-meta { font-size: var(--fs-xs); color: var(--faint); }
+.act-btns { display: flex; align-items: center; gap: var(--s-2); }
+.act-btns .spacer { flex: 1 1 auto; }
+.act-ttl { font-size: var(--fs-xs); font-variant-numeric: tabular-nums; }
+.act-card .gen-img { max-inline-size: 100%; border-radius: var(--r-md, 12px); }
+
+/* ══ Bannerlar ════════════════════════════════════════════════════ */
+.banners { flex: none; display: grid; gap: var(--s-2); padding-inline: var(--s-4); }
+.banners:empty { display: none; }
+.ask-banner {
+  display: flex; align-items: center; gap: var(--s-2);
+  inline-size: 100%; max-inline-size: var(--measure); margin-inline: auto;
+  padding: var(--s-2) var(--s-3); border-radius: var(--r-md, 12px);
+  font-size: var(--fs-sm);
+  background: var(--warn-bg); color: var(--warn-text); border: 1px solid var(--warn-border);
+}
+.ask-banner.err { background: var(--danger-soft); color: var(--danger-ink, var(--danger)); border-color: var(--danger); }
+.ask-banner-text { flex: 1 1 auto; min-inline-size: 0; }
+.ask-banner .icon { flex: none; }
+
+/* ══ Composer ═════════════════════════════════════════════════════ */
+.composer-v2 {
+  flex: none;
+  padding: var(--s-3) var(--s-4) calc(var(--pad-bottom) + var(--s-3));
+  border-block-start: 1px solid var(--border);
+  background: var(--panel);
+}
+.composer-v2 > * { inline-size: 100%; max-inline-size: var(--measure); margin-inline: auto; }
+.ctx-chips { display: flex; flex-wrap: wrap; gap: var(--s-2); margin-block-end: var(--s-2); }
+.ctx-chip { display: inline-flex; align-items: center; gap: var(--s-1); padding-inline-end: 2px; }
+.ctx-chip-title { max-inline-size: 18ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip-x { inline-size: 22px; block-size: 22px; }
+.chip-x .icon { inline-size: 13px; block-size: 13px; }
+.ctx-note { font-size: var(--fs-xs); color: var(--muted); align-self: center; }
+
+.composer-box {
+  display: grid; gap: var(--s-2);
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--border); border-radius: var(--r-lg, 16px);
+  background: var(--panel-2);
+}
+.composer-box:focus-within { border-color: var(--accent); }
+.composer-box textarea {
+  inline-size: 100%; resize: none; border: 0; background: none; color: var(--text);
+  font: inherit; font-size: var(--fs-md); line-height: var(--lh-body);
+  min-block-size: 24px; max-block-size: 40dvh;
+}
+.composer-box textarea:focus { outline: none; }
+.composer-tools { display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap; }
+.composer-tools .spacer { flex: 1 1 auto; }
+.chip.tool { display: inline-flex; align-items: center; gap: var(--s-1); }
+.chip.tool.is-on { background: var(--accent-soft); color: var(--accent-text); border-color: var(--accent); }
+/* Global `.btn.primary{width:100%}` olib tashlangach (A) tugma o'z
+   matni kengligida qoladi — `.spacer` uni o'ngga suradi, `flex:none`
+   esa `width:100%` kelib qolsa ham qatorni bosib ketmasin. */
+.send-btn { display: inline-flex; align-items: center; gap: var(--s-2); flex: none; inline-size: auto; }
+
+/* ══ Varaq mazmuni ════════════════════════════════════════════════ */
+.sheet-head { display: flex; align-items: center; gap: var(--s-2); padding-block-end: var(--s-2); }
+.sheet-head b { flex: 1 1 auto; min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sheet-body { display: grid; gap: var(--s-3); }
+.sheet-body.wide { max-inline-size: none; }
+.sheet-text { margin: 0; color: var(--muted); font-size: var(--fs-sm); line-height: var(--lh-body); }
+.sheet-actions { display: flex; justify-content: flex-end; gap: var(--s-2); }
+.sheet-sep { font-size: var(--fs-xs); color: var(--faint); padding: var(--s-2) var(--s-3) 0; }
+.lightbox { display: grid; place-items: center; }
+.lightbox img { max-inline-size: 100%; max-block-size: 70svh; border-radius: var(--r-md, 12px); }
+
+.ask-picker { display: grid; gap: var(--s-2); }
+.ask-picker-list { margin: 0; padding: 0; list-style: none; max-block-size: 50svh; overflow: auto; }
+.ask-picker-row {
+  inline-size: 100%; display: flex; align-items: center; gap: var(--s-3);
+  min-block-size: var(--tap); padding: var(--s-2); border: 0; border-radius: var(--r-md, 12px);
+  background: none; color: var(--text); text-align: start; cursor: pointer;
+}
+.ask-picker-row:hover { background: var(--panel-3); }
+.ask-picker-row[aria-selected="true"] { background: var(--accent-soft); color: var(--accent-text); }
+.ask-picker-body { flex: 1 1 auto; min-inline-size: 0; display: grid; gap: 2px; }
+.ask-picker-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-sm); }
+.ask-picker-sub { font-size: var(--fs-xs); color: var(--muted); }
+.ask-picker-empty { padding: var(--s-4); text-align: center; color: var(--muted); font-size: var(--fs-sm); }
+
+.expert-row { display: grid; gap: var(--s-2); }
+.expert-label { font-size: var(--fs-xs); color: var(--muted); }
+.expert-slider { display: flex; align-items: center; gap: var(--s-3); }
+.expert-slider input[type="range"] { flex: 1 1 auto; }
+.expert-value { font-variant-numeric: tabular-nums; font-size: var(--fs-sm); min-inline-size: 4ch; text-align: end; }
+
+.ask-form { display: grid; gap: var(--s-3); }
+.form-field { display: grid; gap: var(--s-1); font-size: var(--fs-sm); }
+.form-field > span { color: var(--muted); font-size: var(--fs-xs); }
+.form-field .row { display: flex; gap: var(--s-2); }
+.form-note { margin: 0; font-size: var(--fs-xs); color: var(--muted); line-height: var(--lh-body); }
+.sched-item { display: grid; gap: var(--s-1); padding-block: var(--s-2); border-block-end: 1px solid var(--border-soft); font-size: var(--fs-sm); }
+.sched-item .muted { display: flex; align-items: center; gap: var(--s-1); font-size: var(--fs-xs); }
+
+/* ══ Mobil ════════════════════════════════════════════════════════ */
+@media (max-width: 860px) {
+  .only-mobile { display: inline-flex; }
+  .page-ask .pane-list { display: none; }   /* ro'yxat varaqqa ko'chadi */
+  #conv-sheet .ask-convs {
+    display: flex; inline-size: 100%; border: 0; background: none;
+    max-block-size: 60svh;
+  }
+  .thread { padding-inline: var(--s-3); }
+  .composer-v2 { padding-inline: var(--s-3); }
+  .banners { padding-inline: var(--s-3); }
+  /* Bosqichlar — gorizontal lenta, scroll-snap bilan */
+  .stage-rail {
+    display: flex; gap: var(--s-3); overflow-x: auto;
+    scroll-snap-type: x proximity; padding-block-end: var(--s-1);
+  }
+  /* Item hech qachon ekrandan kengroq bo'lmasin — aks holda tafsilot/vaqt
+     matni (`.stage-detail`/`.stage-time`) rayning ko'rinadigan qismidan
+     tashqarida qolib "kesilgandek" ko'rinardi (L177 mobil skrinshot:
+     "Baholash 1.5…"). `max-inline-size: 100%` itemni rayning o'zi kabi
+     ko'rinadigan kenglikka qisadi, `.stage-body`ning `flex-wrap: wrap`i
+     esa matnni ichkarida ko'p qatorga o'tkazadi — scroll shart emas. */
+  .stage-rail .stage-item {
+    flex: none; scroll-snap-align: start;
+    max-inline-size: 100%; min-inline-size: 0;
+  }
+  .stage-body { min-inline-size: 0; }
+  .stage-detail, .stage-time { min-inline-size: 0; overflow-wrap: anywhere; }
+  .msg-u .bubble { max-inline-size: 92%; }
+}
+
+/* Harakatni kamaytirish — animatsiya emas, holat muhim */
+@media (prefers-reduced-motion: reduce) {
+  .cite-chip, .conv-actions { transition: none; }
+}
+
+/* ══ Rejim tanlagich (ko'lam) ══════════════════════════════════════
+   `.segment` (components.css) ustida: u `aria-selected` bilan ishlaydi,
+   bu yerda esa radiogroup — `aria-checked`. Composer'da joy tor, shuning
+   uchun tavsif va narx tanlangan bosqich uchun bitta satrda (`#mode-hint`). */
+.mode-seg { flex: none; }
+.mode-seg button[aria-checked="true"] {
+  background: var(--panel); color: var(--text); box-shadow: var(--sh-1);
+}
+.mode-seg button { min-block-size: 28px; padding-inline: var(--s-2); }
+.mode-hint {
+  margin: var(--s-1) 0 0; font-size: var(--fs-xs); color: var(--muted);
+  line-height: var(--lh-body);
+}
+
+/* ══ Baho kartasi ══════════════════════════════════════════════════
+   Bosqich chizig'ining birinchi elementi: u yerda "qancha bo'ladi"
+   degan savolga javob **boshlanishidan oldin** turadi. */
+.estimate-card {
+  display: grid; gap: var(--s-2);
+  padding: var(--s-3); border: 1px solid var(--border);
+  border-radius: var(--r-md, 12px); background: var(--panel);
+}
+.est-head { display: flex; align-items: center; gap: var(--s-2); font-size: var(--fs-sm); }
+.est-head .icon { inline-size: 15px; block-size: 15px; flex: none; }
+.est-line { margin: 0; font-size: var(--fs-sm); color: var(--text); }
+.est-confirm { display: grid; gap: var(--s-2); padding-block-start: var(--s-2); border-block-start: 1px solid var(--border-soft); }
+.est-warn { margin: 0; font-size: var(--fs-xs); color: var(--warn-text, var(--muted)); }
+.est-actions { display: flex; gap: var(--s-2); flex-wrap: wrap; }
+/* Tor oyna ogohlantirishi — "faqat N hafta rejalashtirildi" (`estimateHint`),
+   tasdiqlashdan oldin ko'rinishi kerak, shuning uchun `.ask-banner` bilan bir
+   xil rang, lekin karta ichida — alohida banner qatoriga chiqmaydi. */
+.est-hint {
+  margin: 0; display: flex; align-items: center; gap: var(--s-2);
+  font-size: var(--fs-xs); color: var(--warn-text);
+  background: var(--warn-bg); border: 1px solid var(--warn-border);
+  border-radius: var(--r-sm, 8px); padding: var(--s-1) var(--s-2);
+}
+.est-hint .icon { inline-size: 14px; block-size: 14px; flex: none; }
+
+/* ══ Bosqich: o'tgan vaqt va progress ══════════════════════════════ */
+.stage-time { font-size: var(--fs-xs); color: var(--faint); font-variant-numeric: tabular-nums; }
+.stage-bar {
+  flex: 1 1 120px; min-inline-size: 60px; max-inline-size: 180px;
+  block-size: 4px; border-radius: 2px; background: var(--panel-3); overflow: hidden;
+}
+.stage-bar i {
+  display: block; block-size: 100%; background: var(--stage-active);
+  transition: inline-size var(--t-hover, .2s) linear;
+}
+.stage-item[data-state="done"] .stage-bar i { background: var(--stage-done); }
+
+/* ══ Reja: tushunilgan savol va davom turi ═════════════════════════ */
+.plan-standalone { margin: 0; font-size: var(--fs-sm); color: var(--text); }
+.intent-badge { margin-inline-start: var(--s-2); color: var(--muted); }
+
+/* ══ Qamrov: voronka va to'xtash sababi ════════════════════════════ */
+.cov-funnel { font-size: var(--fs-xs); color: var(--text); font-variant-numeric: tabular-nums; }
+.cov-stopped { display: flex; align-items: center; gap: var(--s-2); font-size: var(--fs-xs); color: var(--muted); }
+.cov-stopped .icon { inline-size: 14px; block-size: 14px; flex: none; }
+
+@media (max-width: 860px) {
+  /* Tanlagich yorliqlari mobilda ham to'liq ko'rinadi — chunki bu
+     narx haqidagi qaror, qisqartma emas. */
+  .composer-tools { flex-wrap: wrap; }
+  .stage-bar { max-inline-size: 120px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stage-bar i { transition: none; }
+}

@@ -1,0 +1,105 @@
+version: 1
+# (a) Bema'ni / imkonsiz so'rovlar — agent chiroyli rad etishi va tool bo'ronini
+# boshlamasligi kerak. Asosiy xavf: model "topa olmadim" degandan ko'ra
+# qidiruvni qayta-qayta takrorlaydi (MAX_CALLS_PER_TOOL to'silsa ham token ketadi).
+scenarios:
+  - id: absurd-01
+    title: "Oyga qancha xabar yozdim"
+    category: absurd
+    locale: uz
+    priority: 1
+    turns:
+      - user: "Oyga qancha xabar yozdim?"
+        mode: auto
+        expect:
+          tools_none: [discover_channels, search_global, generate_image]
+          max_tool_calls: 3
+          max_cost_usd: 0.05
+          judge: >-
+            Javob so'rovning imkonsizligini (Telegram'da Oy bilan chat yo'q) yumshoq
+            aytadi yoki "oyiga nechta xabar" deb qayta talqin qilishni taklif qiladi;
+            uydirma raqam keltirmaydi.
+
+  - id: absurd-02
+    title: "Uch so'zlik g'o'ng'ir"
+    category: absurd
+    locale: uz
+    priority: 1
+    turns:
+      - user: "qalampir tramvay bulut"
+        mode: auto
+        expect:
+          max_tool_calls: 2
+          max_cost_usd: 0.04
+          judge: >-
+            Javob savolni tushunmaganini aytadi va aniqlashtirishni so'raydi;
+            uch so'zni "topdim" deb soxta natija ko'rsatmaydi.
+
+  - id: absurd-03
+    title: "Faqat emoji"
+    category: absurd
+    locale: uz
+    priority: 1
+    turns:
+      - user: "🤔🤔🤔"
+        mode: auto
+        expect:
+          scope: none
+          max_tool_calls: 0
+          max_cost_usd: 0.03
+          judge: >-
+            Javob qisqa va do'stona, nima qilish mumkinligini taklif qiladi;
+            hech qanday chat ma'lumoti uydirilmaydi.
+
+  - id: absurd-04
+    title: "Kelasi haftada nima yozaman"
+    category: absurd
+    locale: uz
+    priority: 1
+    turns:
+      - user: "Kelasi haftada Honadoshlar guruhida nima yozaman? Aniq xabarlarni ko'rsat."
+        mode: auto
+        chat_hint: "Honadoshlar"
+        expect:
+          max_tool_calls: 3
+          # "#" ning o'zi proxy sifatida yomon edi: markdown sarlavhasi
+          # (`### 1.`) va `#hashtag` ham unga tushardi. Bizni qiziqtirgani —
+          # **to'qilgan sitata**: `#c12m34` yoki `#1234`.
+          no_fabricated_citations: true
+          max_cost_usd: 0.05
+          judge: >-
+            Javob kelajakdagi xabarlar mavjud emasligini aniq aytadi. Haqiqiy
+            **o'tmish** xabarlarga (guruhdagi mavjud #id'larga) tayanib mavzu
+            taklif qilish to'g'ri va uydirma emas; faqat kelajakdagi xabar
+            sifatida ko'rsatilgan id yoki matn xato hisoblanadi.
+
+  - id: absurd-05
+    title: "Bo'sh-ga yaqin bitta belgi"
+    category: absurd
+    locale: uz
+    priority: 2
+    turns:
+      - user: "."
+        mode: auto
+        expect:
+          scope: none
+          max_tool_calls: 0
+          max_cost_usd: 0.02
+          judge: "Javob qisqa aniqlashtirish so'rovi; tool chaqirilmaydi."
+
+  - id: absurd-06
+    title: "Yolg'on faktga tayangan savol"
+    category: absurd
+    locale: uz
+    priority: 2
+    turns:
+      - user: "Men 2019-yilda Honadoshlar guruhida yozgan 'kvartira sotaman' postini top."
+        mode: auto
+        chat_hint: "Honadoshlar"
+        expect:
+          scope: chat
+          max_tool_calls: 4
+          max_cost_usd: 0.06
+          judge: >-
+            Topilmasa "topilmadi / bu davr sinxronlanmagan" deb aniq aytadi va
+            o'xshash xabarni haqiqiy post sifatida ko'rsatmaydi.

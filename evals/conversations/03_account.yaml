@@ -1,0 +1,84 @@
+version: 1
+# (c) Akkaunt bo'ylab — "hamma chatlarimda". Xavf: agent pinned chat bilan
+# cheklanib qoladi yoki `list_chats` ni behuda chaqiradi (chat indeksi
+# runtime_note ichida allaqachon bor).
+scenarios:
+  - id: account-01
+    title: "Hamma chatlarda kalit so'z"
+    category: account
+    locale: uz
+    priority: 1
+    turns:
+      - user: "Hamma chatlarimda \"vakansiya\" so'zi bo'yicha qidir, eng yangi 5 tasi."
+        mode: auto
+        expect:
+          tools_any: [search_messages, search_global]
+          tools_none: [discover_channels]
+          scope: account
+          max_tool_calls: 5
+          max_cost_usd: 0.09
+          judge: >-
+            Javob bir nechta chatdan natija keltiradi yoki qamrov cheklovini
+            aniq aytadi; bitta chat bilan jim cheklanib qolmaydi.
+
+  - id: account-02
+    title: "Eng faol chatlarim"
+    category: account
+    locale: uz
+    priority: 1
+    turns:
+      - user: "Menda qaysi chatlar eng faol? Eng yuqori 5 tasini ayt."
+        mode: auto
+        expect:
+          tools_any: [list_chats]
+          tools_none: [discover_channels, search_global]
+          scope: account
+          max_tool_calls: 3
+          max_cost_usd: 0.05
+          judge: "Javob chatlarni xabar soni bilan ro'yxat qiladi."
+
+  - id: account-03
+    title: "Saqlangan xabarlarim"
+    category: account
+    locale: uz
+    priority: 2
+    turns:
+      - user: "O'zimga saqlab qo'ygan xabarlarim ichida 'parol' haqida nimadir bormi?"
+        mode: auto
+        expect:
+          tools_any: [saved_messages_search]
+          scope: account
+          max_tool_calls: 3
+          max_cost_usd: 0.06
+          judge: "Agent Saved Messages qidiruvini ishlatgan yoki cheklovni aytgan."
+
+  - id: account-04
+    title: "Akkaunt bo'ylab mavzu xulosasi (ru)"
+    category: account
+    locale: ru
+    priority: 1
+    turns:
+      - user: "По всем моим чатам: о чём в последнее время больше всего говорят про работу?"
+        mode: auto
+        expect:
+          tools_any: [search_messages, get_window_digest, list_chats]
+          tools_none: [discover_channels]
+          scope: account
+          max_tool_calls: 5
+          max_cost_usd: 0.09
+          judge: "Ответ на русском, опирается на реальные чаты, без выдуманных цифр."
+
+  - id: account-05
+    title: "Qaysi chatda eshitgan edim"
+    category: account
+    locale: uz
+    priority: 2
+    turns:
+      - user: "Qaysidir chatda AI hackathon haqida gap bo'lgandi — qaysi chatda edi?"
+        mode: auto
+        expect:
+          tools_any: [search_messages, search_global]
+          scope: account
+          max_tool_calls: 5
+          max_cost_usd: 0.09
+          judge: "Javob chat nomini aytadi yoki topilmaganini aniq bildiradi."

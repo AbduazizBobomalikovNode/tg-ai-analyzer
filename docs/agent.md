@@ -29,7 +29,23 @@ Natija ≤9k belgi, `<untrusted_data source="tool:…">` konvertida; xato — ma
 oshsa kesiladi va modelga "javob ber"; oxirgi raundda tool berilmaydi; sikl
 tool bilan tugasa majburiy tool'siz chaqiruv. Har chaqiruv `agent_actions`
 (executed/failed). Natija: `tokens_in/out`, `iterations`, `tool_calls`,
-`action_ids` → `conversation_messages.context`.
+`calls_executed`, `stop_reason`, `action_ids` → `conversation_messages.context`.
+
+Yugurish bo'yicha ikkita qo'shimcha qopqoq (jonli o'lchovdan,
+`evals/runs/conv-20260917-144833.md`: 24 turn, $2.71, turnda 6-11 bajarilgan
+chaqiruv):
+
+* `AGENT_MAX_EXECUTED_CALLS` (6) — **bajarilgan** (to'silmagan) chaqiruvlar;
+* `AGENT_MAX_COST_USD` (0.15) — `llm/pricing.estimate_cost` bo'yicha yig'ma taxmin.
+
+Ikkalasida ham: qolgan chaqiruvlar bajarilmaydi, "bor narsa bilan javob ber"
+user turn'i qo'shiladi va keyingi LLM chaqiruvi **tool'siz** ketadi.
+`stop_reason` = `answered | call_budget | cost_budget | iterations`.
+
+Uchinchi qopqoq — takroriy qidiruv: lokal `search_messages` shu so'zlar bilan
+≥1 topilma bergan bo'lsa, aynan o'sha so'rov `search_telegram` / `search_global`
+bilan serverda **takrorlanmaydi** (lokal 0 bergan bo'lsa — ochiq, o'sha yerda
+haqiqatan yangi ma'lumot bor).
 
 ## Yozish tool'lari (`services/write_tools.py`)
 

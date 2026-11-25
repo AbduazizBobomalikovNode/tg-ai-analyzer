@@ -1,0 +1,14 @@
+/* css/pages/briefings.css — `/briefings` (M2: v2 karkasga ko'chirildi).
+ *
+ * Karkas o'zi `app.css`/`components.css` dagi umumiy sinflardan:
+ * `.pane-inner.page`, `.page-head`, `.grid2`, `.card-v2`, `.fields.two`,
+ * `.field`. Bu yerda faqat shu sahifaga xos ozgina moslama.
+ */
+
+#brief-list { max-block-size: 320px; overflow: auto; }
+#brief-list li { display: flex; align-items: baseline; gap: var(--s-2); flex-wrap: wrap; }
+#brief-list a { font-weight: 600; flex: none; }
+#brief-list .muted { min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+#brief-body { min-block-size: 3em; }
+#brief-body .empty-v2 { padding: var(--s-5) var(--s-2); }

@@ -16,7 +16,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Chat, Message, MessageMetricSnapshot
+from app.db.models import Chat, ChatType, Message, MessageMetricSnapshot
 
 
 @dataclass(slots=True)
@@ -63,6 +63,28 @@ _WD = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 
 def msg_link(chat: Chat, msg_id: int) -> str | None:
+    """Xabarning `t.me` havolasi — **yagona** manba (`chats.link_prefix`).
+
+    Ilgari faqat `@username` bor chatlar havola olardi, ya'ni yopiq guruhda
+    `None` qaytardi — model esa bo'sh joyni o'zi to'ldirib
+    `t.me/c/<title>/<id>` kabi soxta havola yasardi (jonli o'lchov,
+    `precise-01`). `link_prefix` sync vaqtida hisoblanadi:
+    `https://t.me/c/<id>/` (yopiq) yoki `https://t.me/<username>/` (ochiq).
+    Ikkalasi ham yo'q bo'lsagina `None` — o'shanda havola umuman chiqmaydi.
+
+    **Shaxsiy chat — har doim `None`**, `username` bor-yo'qligidan qat'iy
+    nazar (jonli regressiya: "Otabek Kursdosh" javobida `t.me/JOO571/<msg>`
+    chiqdi — `@username/<id>` shakli faqat ochiq kanal/supergruh postiga
+    ishlaydi, foydalanuvchining shaxsiy chatiga emas, havola ochilmaydi).
+    `ingestion.link_prefix_for` bunday chatga endi `link_prefix` yozmaydi,
+    lekin bu tekshiruv **mudofaa chizig'i**: eski/qo'lda kiritilgan qatorlar
+    ham shu yerda to'xtatiladi.
+    """
+    if chat.type == ChatType.PRIVATE:
+        return None
+    prefix = getattr(chat, "link_prefix", None)
+    if prefix:
+        return f"{prefix}{msg_id}"
     return f"https://t.me/{chat.username}/{msg_id}" if chat.username else None
 
 

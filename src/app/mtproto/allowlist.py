@@ -38,6 +38,7 @@ DENIED: frozenset[str] = frozenset(
         "channels.DeleteParticipantHistoryRequest",
         "channels.DeleteChannelRequest",
         "channels.DeleteTopicHistoryRequest",
+        "messages.DeleteTopicHistoryRequest",
         "folders.DeleteFolderRequest",
         "stories.DeleteStoriesRequest",
         "contacts.DeleteContactsRequest",
@@ -152,6 +153,40 @@ READ: frozenset[str] = frozenset(
         "stats.GetMegagroupStatsRequest",
         "stats.GetMessageStatsRequest",
         "stats.LoadAsyncGraphRequest",
+        # ── qamrov kengaytmasi (1-bosqich, arxitektura v2 §8) ────────────────
+        # Hammasi O'QISH: hech biri kontent yaratmaydi, o'chirmaydi, pul
+        # sarflamaydi. `DENIED` ga tegilmaydi — u faqat o'sadi.
+        "messages.GetSearchResultsCalendarRequest",  # qaysi kunlarda mavzu bor
+        "messages.GetSearchResultsPositionsRequest",  # natija pozitsiyalari
+        "messages.GetSavedDialogsRequest",  # Saved Messages dialoglari
+        "messages.GetSavedHistoryRequest",  # Saved Messages tarixi
+        "messages.GetUnreadMentionsRequest",  # o'qilmagan mention (O'QISH!)
+        "messages.GetUnreadReactionsRequest",  # o'qilmagan reaksiya
+        # Forum topiclari: Telethon 1.44+ da `messages.*`, eskisida `channels.*` —
+        # ikkala nom ham ro'yxatda, ikkalasi ham faqat o'qiydi.
+        "messages.GetForumTopicsRequest",
+        "messages.GetForumTopicsByIDRequest",
+        "channels.GetForumTopicsRequest",
+        "channels.GetForumTopicsByIDRequest",
+        "channels.GetChannelRecommendationsRequest",  # o'xshash kanallar
+        "channels.CheckSearchPostsFloodRequest",  # bepul kvota qolganini so'rash
+        "stats.GetMessagePublicForwardsRequest",  # post qayerga forward bo'lgan
+        # Global post qidiruvi. Tool `allow_paid_stars` ni HECH QACHON
+        # yubormaydi: Stars sarflash — moliyaviy amal, `payments.SendStarsForm`
+        # bilan bir sinf (u DENIED'da). Avval `CheckSearchPostsFlood`, faqat
+        # bepul slot bo'lsa `query=`; aks holda hashtag yoki lokal qidiruv.
+        "channels.SearchPostsRequest",
+        # ── ui/R1a: chat profil rasmi ────────────────────────────────────────
+        # `upload.GetFile` — **faqat o'qish**: bayt oqimini olib keladi, hech
+        # narsa yaratmaydi/o'chirmaydi. Telethon `download_profile_photo()`
+        # shu metodga tushadi (`InputPeerPhotoFileLocation` + chunk'lar).
+        #
+        # Bu **xabar mediasini** yuklab olishga ruxsat EMAS: "media saqlanmaydi"
+        # siyosati kuchda qoladi va kodda qo'riqlanadi — yagona chaqiruvchi
+        # `services/avatars.py` (profil rasmi, ≤512 KB), boshqa hech bir modul
+        # `download_media` / `download_file` / `GetFileRequest` ishlatmaydi
+        # (`tests/test_avatars.py::test_no_other_module_downloads_files` grep).
+        "upload.GetFileRequest",
     }
 )
 

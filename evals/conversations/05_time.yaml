@@ -1,0 +1,106 @@
+version: 1
+# (e) Vaqt bo'yicha cheklangan savollar. Kutilgan xatti-harakat (AGENT_SYSTEM_PROMPT):
+# "davr haqidagi savolda kalit so'z qidiruvi noto'g'ri asbob" → get_window_digest /
+# search_calendar / get_recent_messages. Shuningdek `days` / `since` / `until`
+# argumentlari to'g'ri to'ldirilishi kerak.
+scenarios:
+  - id: time-01
+    title: "O'tgan hafta"
+    category: time
+    locale: uz
+    priority: 1
+    chat_hint: "Honadoshlar"
+    turns:
+      - user: "Shu guruhda o'tgan hafta nima muhokama qilindi?"
+        mode: auto
+        expect:
+          tools_any: [get_window_digest, get_recent_messages, search_calendar]
+          tools_none: [discover_channels, search_global]
+          scope: chat
+          max_tool_calls: 3
+          max_cost_usd: 0.07
+          judge: "Javob o'tgan haftadagi mavzularni beradi yoki o'sha davrda faollik yo'qligini aytadi."
+
+  - id: time-02
+    title: "Aniq oy — iyul"
+    category: time
+    locale: uz
+    priority: 1
+    chat_hint: "aiogram[uz]"
+    turns:
+      - user: "Shu guruhda iyul oyida qaysi kunlarda eng ko'p yozishgan?"
+        mode: auto
+        expect:
+          tools_any: [search_calendar, get_chat_stats, get_window_digest]
+          scope: chat
+          max_tool_calls: 4
+          max_cost_usd: 0.08
+          judge: >-
+            Javob kunlar/sanalar bo'yicha taqsimot beradi; "iyul" davri
+            argumentlarda aks etgan bo'lsa yaxshi, aks holda kamida sana aniq.
+
+  - id: time-03
+    title: "Bugun"
+    category: time
+    locale: uz
+    priority: 1
+    chat_hint: "Honadoshlar"
+    turns:
+      - user: "Bugun shu chatda nima bo'ldi?"
+        mode: auto
+        expect:
+          tools_any: [get_recent_messages, get_window_digest, search_calendar]
+          scope: chat
+          max_tool_calls: 3
+          max_cost_usd: 0.06
+          judge: "Javob bugungi kunga tegishli; xabar bo'lmasa shuni aniq aytadi."
+
+  - id: time-04
+    title: "Davrlararo taqqoslash"
+    category: time
+    locale: uz
+    priority: 2
+    chat_hint: "backup Re-electronik"
+    turns:
+      - user: "Shu kanalda oxirgi 30 kun avvalgi 30 kunga nisbatan qanday o'zgardi?"
+        mode: auto
+        expect:
+          tools_any: [get_chat_stats]
+          scope: chat
+          max_tool_calls: 3
+          max_cost_usd: 0.07
+          judge: "Javob ikki davr raqamlarini yonma-yon beradi (get_chat_stats o'zi avvalgi davrni qaytaradi)."
+
+  - id: time-05
+    title: "Juda eski davr (sinxronlanmagan bo'lishi mumkin)"
+    category: time
+    locale: uz
+    priority: 2
+    chat_hint: "Honadoshlar"
+    turns:
+      - user: "2017-yilning boshida shu guruhda nima gaplashilgan?"
+        mode: auto
+        expect:
+          tools_none: [discover_channels]
+          scope: chat
+          max_tool_calls: 4
+          max_cost_usd: 0.07
+          judge: >-
+            Javob o'sha davr mavjud emasligini / sinxronlanmaganini aniq aytadi
+            va uydirma xulosa bermaydi.
+
+  - id: time-06
+    title: "Rasm/fayl bor kunlarni topish"
+    category: time
+    locale: uz
+    priority: 2
+    chat_hint: "Honadoshlar"
+    turns:
+      - user: "Shu guruhda qaysi kunlarda rasm tashlangan?"
+        mode: auto
+        expect:
+          tools_any: [search_calendar]
+          scope: chat
+          max_tool_calls: 3
+          max_cost_usd: 0.06
+          judge: "Agent kalendarni filtr bilan ishlatgan va kunlarni sanab bergan."

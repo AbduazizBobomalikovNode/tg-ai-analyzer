@@ -1,283 +1,913 @@
-/* tg-ai-analyzer web UI — vanilla, Telegram'ga yaqin ranglar, light/dark */
+/* tg-ai-analyzer web UI — vanilla CSS dizayn tizimi (light/dark).
+ *
+ * Tuzilishi: (1) tokenlar → (2) reset → (3) primitivlar (tugma, input, badge)
+ * → (4) sahifalar. Sinf nomlari JS bilan shartnoma — o'zgartirmang, faqat
+ * ko'rinishini kengaytiring (`pages/ask/*`, `dashboard.js` shu nomlarga tayanadi).
+ *
+ * Ranglar ikki qatlamda: xom palitra (`--blue-500`) → semantik token
+ * (`--accent`). Komponentlar **faqat semantik** tokenlardan foydalanadi,
+ * shuning uchun mavzu almashtirish bitta joyda bo'ladi.
+ */
+
+/* ══ 1. Tokenlar ═══════════════════════════════════════════════════════════ */
 :root {
-  --bg: #f2f4f7;
-  --panel: #ffffff;
-  --panel-2: #f7f9fb;
-  --text: #17212b;
-  --muted: #6b7a8c;
-  --border: #e3e8ee;
-  --accent: #2aabee;
-  --accent-2: #229ed9;
-  --accent-soft: #e6f4fd;
+  color-scheme: light dark;
+
+  /* xom palitra */
+  --blue-50: #eff8ff;  --blue-100: #dceffd; --blue-200: #b9dffb;
+  --blue-400: #46b1f2; --blue-500: #2aabee; --blue-600: #1c93d2; --blue-700: #1877a8;
+  --slate-50: #f7f9fb; --slate-100: #eef2f6; --slate-200: #e3e8ee; --slate-300: #cbd5e0;
+  --slate-500: #55636f; --slate-700: #33475b; --slate-900: #17212b;
+
+  /* sirtlar — pastdan yuqoriga qatlamlar */
+  --bg: #eef1f5;
+  --panel: #ffffff;          /* asosiy karta/sirt */
+  --panel-2: #f4f7fa;        /* botiq: input, kod bloki */
+  --panel-3: #e9eef4;        /* yanada botiq: hover fon */
+  --overlay: rgba(23, 33, 43, .38);
+
+  /* matn */
+  --text: var(--slate-900);
+  --muted: var(--slate-500);
+  --faint: #667689;      /* AA: oq panelda 4.65:1 */
+
+  /* chegaralar */
+  --border: var(--slate-200);
+  --border-soft: var(--slate-100);
+  --border-strong: var(--slate-300);
+
+  /* Aksent. Uch xil vazifa — uchta token, chunki kontrast talabi har xil:
+   *   --accent      to'ldirish (tugma foni, faol holat). Ustidagi
+   *                 `--accent-ink` bilan >= 4.5:1 bo'lishi shart.
+   *   --accent-2    hover (yorug'da to'qroq, qorong'uda ochroq).
+   *   --accent-text sirt ustidagi MATN (havola, faol yorliq). Telegram'ning
+   *                 ochiq ko'ki (#2aabee) oq fonda 2.4:1 — matn uchun yaramaydi.
+   */
+  --accent: #0d78b8;
+  --accent-2: #0a6497;
+  --accent-text: #0b6ea8;
+  --accent-ink: #ffffff;
+  --accent-soft: #eaf5fd;
+  --accent-soft-2: #cbe6f8;
+
+  /* semantik */
   --danger: #e5484d;
-  --warn-bg: #fff6d6;
-  --warn-text: #7a5a00;
-  --bubble-user: #dcf4ff;
+  --danger-soft: #fdecec;
+  --danger-ink: #8a1c1c;
+  --warn-bg: #fff7e0;
+  --warn-text: #78560a;
+  --warn-border: #f2dfae;
+  --ok: #0f9960;
+  --ok-soft: #e6f6ef;
+
+  /* xabar pufaklari */
+  --bubble-user: var(--blue-100);
+  --bubble-user-ink: #0d2f45;
   --bubble-ai: #ffffff;
-  --shadow: 0 6px 24px rgba(23, 33, 43, .08);
-  --radius: 14px;
-  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* dataviz — tekshirilgan palitra: 1 ko'k, 2 to'q sariq, 3 zangori */
+  --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a;
+  --good: #008300; --bad: #e34948;
+
+  /* shakl */
+  --r-xs: 6px; --r-sm: 8px; --r-md: 12px; --r-lg: 16px; --r-xl: 20px; --r-full: 999px;
+  --radius: var(--r-md);           /* eski nom — moslik uchun */
+
+  /* balandlik (elevation) */
+  --sh-1: 0 1px 2px rgba(23, 33, 43, .06), 0 1px 1px rgba(23, 33, 43, .04);
+  --sh-2: 0 2px 8px rgba(23, 33, 43, .08), 0 1px 2px rgba(23, 33, 43, .05);
+  --sh-3: 0 10px 30px rgba(23, 33, 43, .12), 0 2px 8px rgba(23, 33, 43, .06);
+  --sh-4: 0 24px 60px rgba(23, 33, 43, .20), 0 6px 18px rgba(23, 33, 43, .10);
+  --shadow: var(--sh-3);           /* eski nom */
+  --ring: 0 0 0 3px var(--accent-soft-2);
+
+  /* harakat */
+  --t-fast: 110ms; --t-base: 180ms; --t-slow: 300ms;
+  --ease: cubic-bezier(.2, .7, .3, 1);
+
+  /* tipografika */
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Inter",
+          "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
+
+  /* o'lchamlar */
+  --sidebar-w: 320px;
+  --composer-max: 40svh;   /* pages/ask/composer.js autosize() bilan bir xil bo`lsin */
 }
+
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #0e1621;
-    --panel: #17212b;
-    --panel-2: #1c2733;
-    --text: #e9eef4;
-    --muted: #8b9aab;
-    --border: #243241;
+    --bg: #0b1219;
+    --panel: #151f2a;
+    --panel-2: #1b2733;
+    --panel-3: #22303e;
+    --overlay: rgba(0, 0, 0, .55);
+
+    --text: #e8eef5;
+    --muted: #93a4b7;
+    --faint: #78899d;      /* AA: qorong.u panelda 4.65:1 */
+
+    --border: #24323f;
+    --border-soft: #1d2938;
+    --border-strong: #33455a;
+
+    /* Qorong'uda teskarisi: fon och ko'k, ustidagi siyoh to'q — 9:1 dan yuqori */
     --accent: #5eb5f7;
-    --accent-2: #3d9be0;
-    --accent-soft: #1b3347;
-    --bubble-user: #2b5278;
-    --bubble-ai: #182533;
-    --warn-bg: #3a3111;
+    --accent-2: #86c9fb;
+    --accent-text: #7cc4fa;
+    --accent-ink: #06202f;
+    --accent-soft: #16304a;
+    --accent-soft-2: #1d4162;
+
+    --danger: #ff6b6b;
+    --danger-soft: #35191b;
+    --danger-ink: #ffb3b3;
+    --warn-bg: #33290d;
     --warn-text: #ffd66b;
-    --shadow: 0 6px 24px rgba(0, 0, 0, .35);
+    --warn-border: #4d3d13;
+    --ok: #3ddc97;
+    --ok-soft: #102b22;
+
+    --bubble-user: #235272;
+    --bubble-user-ink: #eaf5ff;
+    --bubble-ai: #18242f;
+
+    --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70;
+    --good: #3aa53a; --bad: #e66767;
+
+    --sh-1: 0 1px 2px rgba(0, 0, 0, .35);
+    --sh-2: 0 2px 10px rgba(0, 0, 0, .40);
+    --sh-3: 0 12px 34px rgba(0, 0, 0, .50);
+    --sh-4: 0 26px 70px rgba(0, 0, 0, .62);
+    --ring: 0 0 0 3px var(--accent-soft-2);
   }
 }
-* { box-sizing: border-box; }
+
+/* ══ 2. Reset va asos ══════════════════════════════════════════════════════ */
+*, *::before, *::after { box-sizing: border-box; }
 html, body { height: 100%; }
+html { -webkit-text-size-adjust: 100%; }
+
 body {
-  margin: 0; font-family: var(--font); color: var(--text); background: var(--bg);
-  -webkit-font-smoothing: antialiased; line-height: 1.45;
+  margin: 0;
+  font-family: var(--font);
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
 }
-a { color: var(--accent); text-decoration: none; }
+
+a { color: var(--accent-text); text-decoration: none; }
+a:hover { color: var(--accent-2); }
 button, input, select, textarea { font: inherit; color: inherit; }
+button { -webkit-tap-highlight-color: transparent; }
 [hidden] { display: none !important; }
+::selection { background: var(--accent-soft-2); color: var(--text); }
+
 .muted { color: var(--muted); }
+.small { font-size: .78rem; }
 .hint { display: block; color: var(--muted); font-size: .85rem; margin: .35rem 0 .9rem; }
 
-/* ── umumiy tugmalar ── */
-.btn {
-  display: inline-flex; align-items: center; justify-content: center; gap: .4rem;
-  border: 1px solid var(--border); background: var(--panel-2); border-radius: 10px;
-  padding: .6rem 1rem; cursor: pointer; transition: background .15s, transform .05s;
+/* Fokus halqasi — sichqoncha bilan bosilganda ko'rinmaydi, klaviaturada ko'rinadi.
+   A11y uchun majburiy: usiz Tab bilan yurish ko'r-ko'rona bo'ladi. */
+:focus { outline: none; }
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--r-xs);
 }
-.btn:hover { background: var(--accent-soft); }
-.btn:active { transform: translateY(1px); }
-.btn:disabled { opacity: .55; cursor: progress; }
-.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; width: 100%; }
-.btn.primary:hover { background: var(--accent-2); }
-.btn.link { background: transparent; border-color: transparent; color: var(--accent); padding: .4rem .2rem; }
-.btn.ghost { background: transparent; }
-.btn.full { width: 100%; }
-.btn.small { padding: .4rem .6rem; }
-.icon-btn {
-  border: 0; background: transparent; cursor: pointer; font-size: 1.1rem; padding: .35rem .5rem;
-  border-radius: 8px; color: var(--muted);
-}
-.icon-btn:hover { background: var(--accent-soft); color: var(--text); }
-.icon-btn.danger:hover { color: var(--danger); }
-input[type=text], input[type=tel], input[type=password], input[type=search], select, textarea {
-  width: 100%; border: 1px solid var(--border); background: var(--panel-2); border-radius: 10px;
-  padding: .65rem .8rem; outline: none;
-}
-input:focus, select:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-.alert { background: #fde8e8; color: #8a1c1c; border: 1px solid #f5c2c2; padding: .6rem .8rem; border-radius: 10px; margin-bottom: 1rem; }
-@media (prefers-color-scheme: dark) { .alert { background: #3a1416; color: #ffb3b3; border-color: #5a2224; } }
-.warn { background: var(--warn-bg); color: var(--warn-text); padding: .5rem .7rem; border-radius: 8px; font-size: .85rem; margin-top: .5rem; }
-.lang-switch a { color: var(--muted); font-size: .78rem; margin-left: .5rem; padding: .15rem .35rem; border-radius: 6px; }
-.lang-switch a.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 
-/* ── login ── */
-.login-wrap { min-height: 100%; display: grid; place-items: center; padding: 1.5rem; }
-.login-card {
-  width: 100%; max-width: 440px; background: var(--panel); border-radius: 18px;
-  box-shadow: var(--shadow); padding: 1.6rem 1.6rem 1.2rem; border: 1px solid var(--border);
+/* Skroll paneli — nozik, sirt bilan uyg'un */
+* { scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong); border-radius: var(--r-full);
+  border: 3px solid transparent; background-clip: content-box;
 }
-.brand { display: flex; align-items: center; gap: .8rem; margin-bottom: 1rem; }
+::-webkit-scrollbar-thumb:hover { background: var(--muted); background-clip: content-box; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important; animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important; scroll-behavior: auto !important;
+  }
+}
+
+/* ══ 3. Primitivlar ════════════════════════════════════════════════════════ */
+
+/* ── tugmalar ── */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: .45rem;
+  border: 1px solid var(--border); background: var(--panel);
+  border-radius: var(--r-sm); padding: .58rem 1rem;
+  font-weight: 500; line-height: 1.2; cursor: pointer; white-space: nowrap;
+  box-shadow: var(--sh-1);
+  transition: background var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease),
+              box-shadow var(--t-fast) var(--ease), transform var(--t-fast) var(--ease),
+              color var(--t-fast) var(--ease);
+}
+.btn:hover { background: var(--panel-3); border-color: var(--border-strong); }
+.btn:active { transform: translateY(1px); box-shadow: none; }
+.btn:disabled { opacity: .5; cursor: not-allowed; transform: none; }
+
+.btn.primary {
+  background: var(--accent); border-color: transparent; color: var(--accent-ink);
+  font-weight: 600; box-shadow: var(--sh-2);
+}
+.btn.primary:hover { background: var(--accent-2); border-color: transparent; }
+.btn.primary:disabled { background: var(--accent); }
+
+.btn.ghost { background: transparent; border-color: transparent; box-shadow: none; color: var(--muted); }
+.btn.ghost:hover { background: var(--panel-3); color: var(--text); border-color: transparent; }
+
+.btn.link {
+  background: transparent; border-color: transparent; box-shadow: none;
+  color: var(--accent-text); padding: .4rem .3rem; font-weight: 500;
+}
+.btn.link:hover { background: transparent; color: var(--accent-2); text-decoration: underline; }
+
+.btn.full { width: 100%; }
+.btn.small { padding: .34rem .6rem; font-size: .82rem; border-radius: var(--r-xs); }
+
+.icon-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 0; background: transparent; cursor: pointer;
+  font-size: 1.05rem; line-height: 1; padding: .45rem;
+  min-width: 34px; min-height: 34px;
+  border-radius: var(--r-sm); color: var(--muted);
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+.icon-btn:hover { background: var(--panel-3); color: var(--text); }
+.icon-btn.danger:hover { background: var(--danger-soft); color: var(--danger); }
+
+/* ── forma elementlari ── */
+input[type=text], input[type=tel], input[type=password], input[type=search],
+input[type=number], input[type=time], input[type=datetime-local], select, textarea {
+  width: 100%;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  border-radius: var(--r-sm);
+  padding: .6rem .75rem;
+  outline: none;
+  transition: border-color var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease),
+              background var(--t-fast) var(--ease);
+}
+input::placeholder, textarea::placeholder { color: var(--faint); }
+input:hover, select:hover, textarea:hover { border-color: var(--border-strong); }
+input:focus, select:focus, textarea:focus {
+  border-color: var(--accent); background: var(--panel); box-shadow: var(--ring);
+}
+select {
+  appearance: none; cursor: pointer; padding-right: 1.9rem;
+  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+                    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position: right 1rem center, right .72rem center;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+input[type=checkbox] { accent-color: var(--accent); width: 16px; height: 16px; cursor: pointer; }
+input[type=range] { accent-color: var(--accent); cursor: pointer; }
+input[type=search] { -webkit-appearance: none; }
+
+/* ── bildirishnomalar ── */
+.alert {
+  background: var(--danger-soft); color: var(--danger-ink);
+  border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
+  padding: .65rem .85rem; border-radius: var(--r-sm); margin-bottom: 1rem; font-size: .9rem;
+}
+.warn {
+  background: var(--warn-bg); color: var(--warn-text); border: 1px solid var(--warn-border);
+  padding: .5rem .7rem; border-radius: var(--r-sm); font-size: .84rem; margin-top: .5rem;
+}
+
+/* ── til almashtirgich ── */
+.lang-switch { display: inline-flex; gap: .15rem; }
+.lang-switch a {
+  color: var(--muted); font-size: .74rem; font-weight: 600; letter-spacing: .03em;
+  padding: .22rem .45rem; border-radius: var(--r-xs);
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+.lang-switch a:hover { background: var(--panel-3); color: var(--text); }
+.lang-switch a.active { background: var(--accent-soft); color: var(--accent-text); }
+
+/* ── brend ── */
+.brand { display: flex; align-items: center; gap: .7rem; margin-bottom: 1rem; }
 .brand .lang-switch { margin-left: auto; }
-.brand-logo { width: 44px; height: 44px; display: grid; place-items: center; border-radius: 12px; background: var(--accent-soft); font-size: 1.4rem; }
-.brand.small .brand-logo { width: 30px; height: 30px; font-size: 1rem; border-radius: 8px; }
-.brand-name { font-weight: 700; }
+.brand-logo {
+  width: 44px; height: 44px; flex: none; display: grid; place-items: center;
+  border-radius: var(--r-md); font-size: 1.35rem;
+  background: linear-gradient(140deg, var(--accent), #7c5cff);
+  box-shadow: var(--sh-2);
+}
+.brand.small { margin-bottom: 0; gap: .55rem; }
+.brand.small .brand-logo { width: 30px; height: 30px; font-size: .95rem; border-radius: var(--r-sm); }
+.brand-name { font-weight: 700; letter-spacing: -.01em; }
+.brand.small .brand-name { font-size: .95rem; }
 .brand-sub { color: var(--muted); font-size: .85rem; }
-.step label { display: block; font-weight: 600; margin: .8rem 0 .4rem; }
-.step .btn.link { width: 100%; margin-top: .3rem; }
-.step.done { text-align: center; padding: 1.5rem 0; font-weight: 600; }
-.fineprint { margin-top: 1.2rem; border-top: 1px solid var(--border); padding-top: .8rem; color: var(--muted); font-size: .8rem; }
+
+/* ══ 4. Login ══════════════════════════════════════════════════════════════ */
+.login-wrap {
+  min-height: 100%; display: grid; place-items: center; padding: 1.5rem;
+  background:
+    radial-gradient(900px 500px at 12% -10%, var(--accent-soft) 0%, transparent 60%),
+    radial-gradient(700px 420px at 105% 105%, color-mix(in srgb, #7c5cff 16%, transparent) 0%, transparent 55%),
+    var(--bg);
+}
+.login-card {
+  width: 100%; max-width: 430px;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: var(--r-xl); box-shadow: var(--sh-4);
+  padding: 1.7rem 1.6rem 1.3rem;
+}
+.step label { display: block; font-weight: 600; margin: .9rem 0 .4rem; font-size: .9rem; }
+.step .btn.link { width: 100%; margin-top: .35rem; }
+.step.done { text-align: center; padding: 1.6rem 0; font-weight: 600; }
+/* "yoki" ajratgichi — ikki yonida chiziq */
+.or {
+  display: flex; align-items: center; gap: .75rem;
+  margin: 1rem 0 .8rem; color: var(--faint); font-size: .78rem;
+}
+.or::before, .or::after {
+  content: ""; flex: 1; height: 1px; background: var(--border);
+}
+
+/* QR har doim oq fonda — skanerlar kontrastga tayanadi, qorong'u mavzuda
+   ham teskari qilinmaydi. */
+.qr-box {
+  display: grid; place-items: center; margin: .3rem auto 1rem;
+  width: 244px; height: 244px; padding: 12px;
+  background: #fff; border: 1px solid var(--border); border-radius: var(--r-md);
+  box-shadow: var(--sh-1);
+}
+.qr-box img { width: 220px; height: 220px; display: block; }
+.qr-steps {
+  margin: 0 0 .6rem; padding-left: 1.2rem;
+  color: var(--muted); font-size: .86rem; line-height: 1.6;
+}
+.qr-steps li::marker { color: var(--accent-text); font-weight: 700; }
+
+.fineprint {
+  margin-top: 1.3rem; border-top: 1px solid var(--border-soft);
+  padding-top: .85rem; color: var(--muted); font-size: .78rem;
+}
 .fineprint p { margin: .3rem 0; }
 
-/* ── chat layout ── */
+/* ══ 5. Ilova karkasi ══════════════════════════════════════════════════════ */
 .page-chat { overflow: hidden; }
-.app { display: grid; grid-template-columns: 320px 1fr; height: 100dvh; }
-.sidebar {
-  background: var(--panel); border-right: 1px solid var(--border); display: flex; flex-direction: column;
-  min-height: 0;
-}
-.sidebar-head { display: flex; align-items: center; justify-content: space-between; padding: .8rem 1rem; border-bottom: 1px solid var(--border); }
-#btn-close-sidebar { display: none; }
-.block { padding: .8rem 1rem; border-bottom: 1px solid var(--border); min-height: 0; display: flex; flex-direction: column; gap: .5rem; }
-.block.grow { flex: 1 1 auto; }
-.block-title { font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); font-weight: 700; }
-.row { display: flex; gap: .5rem; align-items: center; }
-.row select { flex: 1; }
-.row.between { justify-content: space-between; }
-.dialog-sync { font-size: .7rem; color: var(--muted); display: inline-flex; align-items: center; gap: .3rem; }
-.dialog-sync .bar { display: inline-block; width: 42px; height: 4px; border-radius: 2px; background: var(--border); overflow: hidden; }
-.dialog-sync .bar i { display: block; height: 100%; background: var(--accent); }
-.dialog-sync .bar.running i { animation: pulse 1.2s infinite; }
-@keyframes pulse { 0%,100% { opacity: .5 } 50% { opacity: 1 } }
-.dialog-item .sync-btn { opacity: 0; border: 0; background: transparent; cursor: pointer; color: var(--muted); font-size: .9rem; padding: .1rem .3rem; }
-.dialog-item:hover .sync-btn { opacity: 1; }
-.list { list-style: none; margin: 0; padding: 0; overflow: auto; min-height: 0; }
-.dialogs { flex: 1; }
-.dialog-item, .conv-item {
-  display: flex; gap: .6rem; align-items: center; padding: .5rem .6rem; border-radius: 10px; cursor: pointer;
-}
-.dialog-item:hover, .conv-item:hover { background: var(--panel-2); }
-.dialog-item.selected, .conv-item.selected { background: var(--accent-soft); }
-.dialog-avatar {
-  width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; flex: none;
-  background: linear-gradient(135deg, var(--accent), #7c5cff); color: #fff; font-weight: 700; font-size: .85rem;
-}
-.dialog-body { min-width: 0; flex: 1; }
-.dialog-title { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; font-size: .92rem; }
-.dialog-sub { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--muted); font-size: .78rem; }
-.dialog-kind { font-size: .7rem; color: var(--muted); }
-.conv-item { justify-content: space-between; }
-.conv-item .conv-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: .9rem; }
-.convs { max-height: 26vh; }
-.sidebar-foot { display: flex; align-items: center; justify-content: space-between; padding: .6rem 1rem; }
+.app { display: grid; grid-template-columns: var(--sidebar-w) 1fr; height: 100svh; }
 
-.main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-.topbar { display: flex; align-items: center; gap: .6rem; padding: .7rem 1rem; background: var(--panel); border-bottom: 1px solid var(--border); }
+/* ── chap panel ── */
+.sidebar {
+  display: flex; flex-direction: column; min-height: 0;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  /* Past ekranda oxirgi chora: bloklar siqilib ustma-ust tushmasin */
+  overflow-y: auto;
+}
+.sidebar-head {
+  display: flex; align-items: center; justify-content: space-between; gap: .5rem;
+  padding: .85rem 1rem; border-bottom: 1px solid var(--border-soft);
+  flex: none; position: sticky; top: 0; z-index: 2; background: var(--panel);
+}
+#btn-close-sidebar { display: none; }
+
+/* `flex: none` SHART: usiz bloklar kontentidan kichik siqiladi va matn
+   keyingi blok ustiga chiqib ketadi (past oynada). Faqat `.grow` cho'ziladi. */
+.block {
+  display: flex; flex-direction: column; gap: .55rem; flex: none;
+  padding: .85rem 1rem; border-bottom: 1px solid var(--border-soft); min-height: 0;
+}
+.block.grow { flex: 1 1 auto; min-height: 9rem; }
+.block-title {
+  font-size: .68rem; text-transform: uppercase; letter-spacing: .08em;
+  color: var(--faint); font-weight: 700;
+}
+.row { display: flex; gap: .5rem; align-items: center; }
+.row select { flex: 1; min-width: 0; }
+.row.between { justify-content: space-between; }
+
+/* ── dialog / suhbat ro'yxati ── */
+.list { list-style: none; margin: 0; padding: 0; overflow: auto; min-height: 0; }
+.list::-webkit-scrollbar { width: 8px; }
+.dialogs { flex: 1; margin: 0 -.35rem; padding: 0 .35rem; }
+.convs { max-height: 26svh; margin: 0 -.35rem; padding: 0 .35rem; }
+
+.dialog-item, .conv-item {
+  display: flex; gap: .6rem; align-items: center;
+  padding: .5rem .55rem; border-radius: var(--r-sm); cursor: pointer;
+  position: relative;
+  transition: background var(--t-fast) var(--ease);
+}
+.dialog-item + .dialog-item, .conv-item + .conv-item { margin-top: 1px; }
+.dialog-item:hover, .conv-item:hover { background: var(--panel-3); }
+.dialog-item.selected, .conv-item.selected { background: var(--accent-soft); }
+/* Tanlangan elementda chap chetda ingichka aksent — ko'z darhol ilashadi */
+.dialog-item.selected::before, .conv-item.selected::before {
+  content: ""; position: absolute; left: -.35rem; top: 20%; bottom: 20%;
+  width: 3px; border-radius: var(--r-full); background: var(--accent);
+}
+.dialog-item.selected .dialog-title { color: var(--accent-text); }
+
+.dialog-avatar {
+  width: 36px; height: 36px; flex: none;
+  border-radius: var(--r-full); display: grid; place-items: center;
+  color: #fff; font-weight: 700; font-size: .82rem; letter-spacing: .02em;
+  background: linear-gradient(140deg, var(--accent), #7c5cff);
+  box-shadow: var(--sh-1);
+}
+/* Ro'yxat bir xil ko'k bo'lib ketmasin — bezak, ma'no tashimaydi */
+.dialog-item:nth-child(5n+2) .dialog-avatar { background: linear-gradient(140deg, #f0993e, #e2643c); }
+.dialog-item:nth-child(5n+3) .dialog-avatar { background: linear-gradient(140deg, #2fbf8f, #17957f); }
+.dialog-item:nth-child(5n+4) .dialog-avatar { background: linear-gradient(140deg, #a07cff, #6c4ce0); }
+.dialog-item:nth-child(5n+5) .dialog-avatar { background: linear-gradient(140deg, #ef6ea3, #c2478a); }
+
+.dialog-body { min-width: 0; flex: 1; }
+.dialog-title {
+  display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-weight: 600; font-size: .9rem; letter-spacing: -.005em;
+}
+.dialog-sub {
+  display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  color: var(--muted); font-size: .78rem; margin-top: .05rem;
+}
+.dialog-kind { font-size: .7rem; color: var(--faint); }
+
+.dialog-sync {
+  display: inline-flex; align-items: center; gap: .35rem;
+  font-size: .68rem; color: var(--faint); margin-top: .2rem;
+}
+.dialog-sync .bar {
+  display: inline-block; width: 44px; height: 3px; border-radius: var(--r-full);
+  background: var(--border); overflow: hidden;
+}
+.dialog-sync .bar i { display: block; height: 100%; background: var(--accent); border-radius: inherit; }
+.dialog-sync .bar.running i { animation: pulse 1.2s infinite; }
+@keyframes pulse { 0%, 100% { opacity: .45 } 50% { opacity: 1 } }
+
+.dialog-item .sync-btn {
+  opacity: 0; border: 0; background: transparent; cursor: pointer;
+  color: var(--muted); font-size: .9rem; padding: .2rem .3rem; border-radius: var(--r-xs);
+  transition: opacity var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
+}
+.dialog-item:hover .sync-btn, .dialog-item .sync-btn:focus-visible { opacity: 1; }
+.dialog-item .sync-btn:hover { background: var(--panel); }
+
+.conv-item { justify-content: space-between; }
+.conv-item .conv-title {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: .875rem;
+}
+
+.sidebar-foot {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: .65rem 1rem; flex: none; flex-wrap: wrap; gap: .4rem .6rem;
+  border-top: 1px solid var(--border-soft);
+}
+
+/* ══ 6. Asosiy ustun ═══════════════════════════════════════════════════════ */
+.main { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--bg); }
+
+.topbar {
+  display: flex; align-items: center; gap: .5rem;
+  padding: .65rem 1rem; min-height: 56px;
+  background: var(--panel); border-bottom: 1px solid var(--border);
+}
 #btn-open-sidebar { display: none; }
-.topbar-title { font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.topbar-ctx { margin-left: auto; font-size: .78rem; color: var(--accent); background: var(--accent-soft); padding: .2rem .55rem; border-radius: 999px; white-space: nowrap; }
-.messages { flex: 1; overflow: auto; padding: 1.2rem 1rem; display: flex; flex-direction: column; gap: .8rem; }
-.empty { margin: auto; max-width: 520px; text-align: center; color: var(--muted); }
-.msg { max-width: min(860px, 92%); padding: .7rem .95rem; border-radius: var(--radius); box-shadow: 0 1px 2px rgba(0,0,0,.05); position: relative; }
-.msg.user { align-self: flex-end; background: var(--bubble-user); border-bottom-right-radius: 4px; }
-.msg.assistant { align-self: flex-start; background: var(--bubble-ai); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
-.msg.error { align-self: center; background: #fde8e8; color: #8a1c1c; font-size: .9rem; }
-.msg .meta { display: block; margin-top: .35rem; font-size: .72rem; color: var(--muted); }
-.msg .ctx { display: block; font-size: .72rem; color: var(--accent); margin-bottom: .3rem; }
-.msg { overflow-wrap: anywhere; word-break: break-word; }
-.msg p { margin: .25rem 0; }
-.msg h3, .msg h4, .msg h5, .msg h6 { margin: .6rem 0 .25rem; line-height: 1.25; }
-.msg h3 { font-size: 1.05rem; } .msg h4 { font-size: .98rem; } .msg h5, .msg h6 { font-size: .92rem; }
-.msg blockquote { margin: .4rem 0; padding: .2rem .8rem; border-left: 3px solid var(--accent); color: var(--muted); }
-.msg hr { border: 0; border-top: 1px solid var(--border); margin: .6rem 0; }
-.msg a { text-decoration: underline; text-underline-offset: 2px; }
-.msg .table-wrap { overflow-x: auto; max-width: 100%; margin: .4rem 0; -webkit-overflow-scrolling: touch; }
-.msg table { border-collapse: collapse; font-size: .86rem; min-width: 100%; }
-.msg th, .msg td { border: 1px solid var(--border); padding: .3rem .55rem; text-align: left; vertical-align: top; }
-.msg th { background: var(--panel-2); font-weight: 600; white-space: nowrap; }
-.msg tbody tr:nth-child(even) td { background: color-mix(in srgb, var(--panel-2) 60%, transparent); }
-.msg .mermaid-wrap { margin: .5rem 0; }
-.msg .mermaid-svg { overflow-x: auto; max-width: 100%; background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: .5rem; }
+.topbar-title {
+  font-weight: 700; font-size: 1rem; letter-spacing: -.01em;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.topbar-ctx {
+  margin-left: auto; font-size: .74rem; font-weight: 600;
+  color: var(--accent-text); background: var(--accent-soft);
+  padding: .25rem .6rem; border-radius: var(--r-full); white-space: nowrap;
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+}
+a.topbar-ctx:hover { background: var(--accent-soft-2); }
+.topbar-wm { margin-left: .3rem; font-size: .8rem; }
+.topbar-wm select { width: auto; padding: .25rem 1.6rem .25rem .5rem; font-size: .78rem; }
+
+/* ── xabarlar oqimi ── */
+.messages {
+  flex: 1; overflow: auto; min-height: 0;
+  padding: 1.4rem clamp(.75rem, 4vw, 2rem) 1.2rem;
+  display: flex; flex-direction: column; gap: .7rem;
+  scroll-behavior: smooth;
+}
+.empty {
+  margin: auto; max-width: 560px; text-align: center; color: var(--muted);
+  font-size: .95rem; line-height: 1.65; padding: 1rem;
+  animation: msg-in var(--t-slow) var(--ease) both;
+}
+.empty-icon {
+  width: 56px; height: 56px; margin: 0 auto .8rem; display: grid; place-items: center;
+  font-size: 1.6rem; border-radius: var(--r-lg);
+  background: var(--accent-soft); border: 1px solid var(--accent-soft-2);
+}
+.empty-title {
+  margin: 0 0 .4rem; font-size: 1.25rem; font-weight: 700;
+  color: var(--text); letter-spacing: -.02em;
+}
+.empty-text { margin: 0 0 1.1rem; }
+
+/* Taklif chiplari — bosilganda savol kiritish maydoniga tushadi (pages/ask/composer.js) */
+.suggests { display: flex; flex-wrap: wrap; gap: .45rem; justify-content: center; }
+.suggest {
+  border: 1px solid var(--border); background: var(--panel);
+  color: var(--text); font-size: .84rem; text-align: left;
+  padding: .45rem .85rem; border-radius: var(--r-full); cursor: pointer;
+  box-shadow: var(--sh-1);
+  transition: background var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease),
+              transform var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+.suggest:hover {
+  background: var(--accent-soft); border-color: var(--accent);
+  color: var(--accent-text); transform: translateY(-1px);
+}
+.suggest:active { transform: none; }
+
+.msg {
+  max-width: min(820px, 94%);
+  padding: .75rem 1rem;
+  border-radius: var(--r-lg);
+  position: relative;
+  overflow-wrap: anywhere; word-break: break-word;
+  animation: msg-in var(--t-slow) var(--ease) both;
+}
+@keyframes msg-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+.msg.user {
+  align-self: flex-end;
+  background: var(--bubble-user); color: var(--bubble-user-ink);
+  border-bottom-right-radius: var(--r-xs);
+  box-shadow: var(--sh-1);
+}
+.msg.assistant {
+  align-self: flex-start;
+  background: var(--bubble-ai); border: 1px solid var(--border);
+  border-bottom-left-radius: var(--r-xs);
+  box-shadow: var(--sh-1);
+}
+.msg.error {
+  align-self: center; text-align: center;
+  background: var(--danger-soft); color: var(--danger-ink);
+  border: 1px solid color-mix(in srgb, var(--danger) 28%, transparent);
+  font-size: .88rem; border-radius: var(--r-md);
+}
+
+.msg .ctx {
+  display: block; font-size: .7rem; font-weight: 600; letter-spacing: .02em;
+  color: var(--accent-text); margin-bottom: .35rem; opacity: .9;
+}
+.msg .meta {
+  display: block; margin-top: .5rem; font-size: .7rem; color: var(--faint);
+}
+.msg .auto { font-size: .7rem; color: var(--faint); margin-left: .4rem; }
+
+/* Baholash tugmalari — hover'da to'liq ko'rinadi, aks holda xira */
+.msg .rate { display: inline-flex; gap: .1rem; margin-left: .4rem; vertical-align: middle; }
+.msg .rate button {
+  border: 0; background: transparent; cursor: pointer; font-size: .88rem;
+  opacity: .35; padding: .1rem .2rem; border-radius: var(--r-xs);
+  transition: opacity var(--t-fast) var(--ease), background var(--t-fast) var(--ease),
+              transform var(--t-fast) var(--ease);
+}
+.msg:hover .rate button { opacity: .6; }
+.msg .rate button:hover { opacity: 1; background: var(--panel-3); transform: scale(1.12); }
+.msg .rate button.on { opacity: 1; }
+
+/* ── xabar ichidagi markdown (md.js chiqishi) ── */
+.msg > :first-child { margin-top: 0; }
+.msg > :last-child { margin-bottom: 0; }
+.msg p { margin: .3rem 0; }
+.msg h3, .msg h4, .msg h5, .msg h6 { margin: .8rem 0 .3rem; line-height: 1.3; letter-spacing: -.01em; }
+.msg h3 { font-size: 1.02rem; } .msg h4 { font-size: .96rem; } .msg h5, .msg h6 { font-size: .9rem; }
+.msg ul, .msg ol { margin: .35rem 0 .35rem 1.15rem; padding: 0; }
+.msg li { margin: .15rem 0; }
+.msg li::marker { color: var(--faint); }
+.msg blockquote {
+  margin: .5rem 0; padding: .3rem .85rem;
+  border-left: 3px solid var(--accent-soft-2); color: var(--muted);
+}
+.msg hr { border: 0; border-top: 1px solid var(--border); margin: .8rem 0; }
+.msg a { text-decoration: underline; text-underline-offset: 2px; text-decoration-thickness: 1px; }
+.msg a:hover { text-decoration-thickness: 2px; }
+.msg strong { font-weight: 650; }
+
+.msg .table-wrap {
+  overflow-x: auto; max-width: 100%; margin: .6rem 0;
+  border: 1px solid var(--border); border-radius: var(--r-sm);
+  -webkit-overflow-scrolling: touch;
+}
+.msg table { border-collapse: collapse; font-size: .85rem; min-width: 100%; }
+.msg th, .msg td {
+  border-bottom: 1px solid var(--border-soft); padding: .4rem .65rem;
+  text-align: left; vertical-align: top;
+}
+.msg th {
+  background: var(--panel-2); font-weight: 600; white-space: nowrap;
+  font-size: .78rem; text-transform: uppercase; letter-spacing: .03em; color: var(--muted);
+}
+.msg tbody tr:last-child td { border-bottom: 0; }
+.msg tbody tr:hover td { background: color-mix(in srgb, var(--accent-soft) 40%, transparent); }
+
+.msg pre {
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--r-sm);
+  padding: .7rem .8rem; overflow: auto; font-family: var(--mono); font-size: .84rem;
+  line-height: 1.55; margin: .6rem 0;
+}
+.msg code {
+  font-family: var(--mono); font-size: .87em;
+  background: var(--panel-2); border: 1px solid var(--border-soft);
+  padding: .08rem .32rem; border-radius: var(--r-xs);
+}
+.msg pre code { background: none; border: 0; padding: 0; }
+
+.msg .mermaid-wrap { margin: .6rem 0; }
+.msg .mermaid-svg {
+  overflow-x: auto; max-width: 100%; background: var(--panel-2);
+  border: 1px solid var(--border); border-radius: var(--r-sm); padding: .7rem;
+}
 .msg .mermaid-svg svg { max-width: 100%; height: auto; }
 .msg pre.mermaid-src { border-style: dashed; }
 .msg pre.mermaid-src.mermaid-error { border-color: var(--danger); }
-.msg ul, .msg ol { margin: .3rem 0 .3rem 1.2rem; padding: 0; }
-.msg pre { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: .6rem; overflow: auto; font-family: var(--mono); font-size: .85rem; }
-.msg code { font-family: var(--mono); font-size: .88em; background: var(--panel-2); padding: .05rem .3rem; border-radius: 4px; }
-.msg pre code { background: none; padding: 0; }
-.typing { display: inline-flex; gap: 4px; align-items: center; height: 1.2em; }
-.typing i { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); animation: blink 1.2s infinite; }
-.typing i:nth-child(2) { animation-delay: .2s; } .typing i:nth-child(3) { animation-delay: .4s; }
-@keyframes blink { 0%, 80%, 100% { opacity: .25 } 40% { opacity: 1 } }
 
-.composer { border-top: 1px solid var(--border); background: var(--panel); padding: .6rem 1rem .8rem; }
-.composer-opts { display: flex; gap: 1.2rem; align-items: center; flex-wrap: wrap; font-size: .8rem; color: var(--muted); margin-bottom: .5rem; }
-.opt { display: inline-flex; align-items: center; gap: .4rem; }
-.opt input[type=range] { width: 140px; }
-.composer-row { display: flex; gap: .6rem; align-items: flex-end; }
-.composer-row textarea { resize: none; max-height: 40vh; }
-.composer-row .btn.primary { width: auto; padding: .65rem 1.1rem; }
+/* ── "yozyapti" indikatori ── */
+.typing { display: inline-flex; gap: 5px; align-items: center; height: 1.2em; }
+.typing i {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--muted);
+  animation: blink 1.3s infinite ease-in-out;
+}
+.typing i:nth-child(2) { animation-delay: .18s; }
+.typing i:nth-child(3) { animation-delay: .36s; }
+@keyframes blink { 0%, 80%, 100% { opacity: .22; transform: translateY(0) } 40% { opacity: 1; transform: translateY(-2px) } }
 
-@media (max-width: 860px) {
-  .app { grid-template-columns: 1fr; }
-  .sidebar { position: fixed; inset: 0 20% 0 0; z-index: 20; transform: translateX(-100%); transition: transform .2s; box-shadow: var(--shadow); }
-  .sidebar.open { transform: none; }
-  #btn-close-sidebar, #btn-open-sidebar { display: inline-flex; }
-  .msg { max-width: 96%; }
-  .msg table { font-size: .8rem; }
-  .convs { max-height: 22vh; }
-  .composer-opts { gap: .6rem; }
-  .dash { padding: .6rem .7rem 2rem; }
-  .tile-value { font-size: 1.3rem; }
+/* ── kiritish paneli ── */
+.composer {
+  border-top: 1px solid var(--border); background: var(--panel);
+  padding: .6rem clamp(.75rem, 4vw, 2rem) max(.8rem, var(--pad-bottom, env(safe-area-inset-bottom)));
+}
+.composer-opts {
+  display: flex; gap: .5rem; align-items: center; flex-wrap: wrap;
+  font-size: .78rem; color: var(--muted); margin-bottom: .55rem;
+}
+.opt {
+  display: inline-flex; align-items: center; gap: .4rem;
+  background: var(--panel-2); border: 1px solid var(--border-soft);
+  padding: .22rem .55rem; border-radius: var(--r-full);
+  transition: border-color var(--t-fast) var(--ease);
+}
+.opt:hover { border-color: var(--border-strong); }
+.opt:focus-within { border-color: var(--accent); }
+.opt select {
+  width: auto; padding: .1rem 1.05rem .1rem .2rem; font-size: .78rem;
+  border: 0; background-color: transparent; box-shadow: none;
+  /* Kichik select — o'q chetga yaqinroq, aks holda matnni bosadi */
+  background-position: right .5rem center, right .24rem center;
+}
+.opt select:focus { box-shadow: none; background-color: transparent; }
+.opt input[type=range] { width: 120px; }
+
+.composer-row { display: flex; gap: .55rem; align-items: flex-end; }
+.composer-row textarea {
+  resize: none; max-height: var(--composer-max); min-height: 44px;
+  padding: .68rem .85rem; border-radius: var(--r-md); line-height: 1.45;
+}
+.composer-row .btn.primary {
+  width: auto; padding: .68rem 1.25rem; border-radius: var(--r-md); min-height: 44px;
 }
 
-/* ── dashboard ── */
-:root {
-  /* dataviz reference palette (validated): series 1 blue, 2 orange, 3 aqua; status good/bad */
-  --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a;
-  --good: #008300; --bad: #e34948;
+/* ══ 7. Yozish amallari (action card) ══════════════════════════════════════ */
+/* `.action-card` ning O'ZI va holat variantlari `css/components.css` da
+ * (R2-C, yagona ta'rif) — bu yerda faqat u qamramagan yordamchilar qoldi.
+ * Ilgari ikkala fayl ham bir xil selektorlarni e'lon qilardi va farqlar
+ * (`--bad` vs `--danger`, `border-left` vs `border-inline-start`) yuklash
+ * tartibiga qarab jimgina yutib ketardi. Yangi qoidani components.css ga
+ * qo'shing, bu yerga emas. */
+.action-head { display: flex; justify-content: space-between; gap: .5rem; align-items: baseline; flex-wrap: wrap; }
+.action-head b { font-size: .84rem; }
+.action-status {
+  font-size: .7rem; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; font-weight: 600;
 }
-@media (prefers-color-scheme: dark) {
-  :root { --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --good: #3aa53a; --bad: #e66767; }
+.action-text {
+  margin: .4rem 0; white-space: pre-wrap;
+  background: var(--panel); border: 1px dashed var(--border-strong);
+  border-radius: var(--r-xs); padding: .45rem .6rem;
+  max-height: 220px; overflow: auto; font-size: .86rem;
 }
+.action-meta { font-size: .72rem; color: var(--faint); }
+.action-btns { display: flex; gap: .45rem; margin-top: .5rem; flex-wrap: wrap; }
+.action-btns .btn { padding: .32rem .7rem; font-size: .81rem; }
+.action-btns .btn.ok { background: var(--accent); border-color: transparent; color: var(--accent-ink); font-weight: 600; }
+.action-btns .btn.ok:hover { background: var(--accent-2); }
+
+.gen-img {
+  max-width: 100%; height: auto; border-radius: var(--r-sm);
+  margin: .45rem 0; display: block; border: 1px solid var(--border);
+}
+/* `.action-card .gen-img` — components.css da (yagona ta'rif). */
+
+/* ══ 8. Modal panellar ═════════════════════════════════════════════════════ */
+.panel-backdrop {
+  position: fixed; inset: 0; z-index: 40;
+  background: var(--overlay); backdrop-filter: blur(3px);
+  display: grid; place-items: center; padding: 1rem;
+  animation: fade-in var(--t-base) var(--ease) both;
+}
+@keyframes fade-in { from { opacity: 0 } to { opacity: 1 } }
+.panel {
+  width: min(680px, 100%); max-height: 88svh; overflow: auto;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: var(--r-xl); box-shadow: var(--sh-4);
+  animation: panel-in var(--t-base) var(--ease) both;
+}
+@keyframes panel-in { from { opacity: 0; transform: translateY(10px) scale(.985) } to { opacity: 1; transform: none } }
+.panel-head {
+  display: flex; justify-content: space-between; align-items: center; gap: .5rem;
+  padding: .85rem 1.1rem; border-bottom: 1px solid var(--border-soft);
+  position: sticky; top: 0; background: var(--panel); z-index: 1;
+}
+.panel-body { padding: .9rem 1.1rem 1.1rem; }
+.panel-body .action-card { margin: .5rem 0; }
+
+.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: .7rem .8rem; }
+.form-grid label { display: flex; flex-direction: column; gap: .3rem; font-size: .82rem; color: var(--muted); font-weight: 500; }
+/* `.full` — nafaqat label, balki `.form-note full` kabi div'lar ham (pages/ask/*) */
+.form-grid label.full, .form-grid .full { grid-column: 1 / -1; }
+.form-grid input[type=checkbox] { width: auto; }
+.form-grid textarea { min-height: 92px; resize: vertical; }
+.form-note { font-size: .8rem; color: var(--muted); margin: .5rem 0; }
+
+.sched-item { padding: .5rem 0; border-bottom: 1px solid var(--border-soft); font-size: .87rem; }
+.sched-item:last-child { border-bottom: 0; }
+.sched-item .muted { font-size: .76rem; }
+
+/* ══ 9. Dashboard ══════════════════════════════════════════════════════════ */
 .page-dash { overflow: auto; }
-.dash { max-width: 1180px; margin: 0 auto; padding: 1rem 1.2rem 3rem; }
-.dash-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; margin-bottom: 1rem; }
-.dash-actions { display: flex; align-items: center; gap: .8rem; }
-.dash-actions select { width: auto; padding: .35rem .5rem; }
-.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr)); gap: .8rem; margin-bottom: 1rem; }
-.tile { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: .8rem 1rem; }
-.tile-label { font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); font-weight: 700; }
-.tile-value { font-size: 1.6rem; font-weight: 700; margin-top: .2rem; font-variant-numeric: tabular-nums; }
-.tile-sub { font-size: .78rem; color: var(--muted); margin-top: .15rem; }
-.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(340px, 100%), 1fr)); gap: .8rem; margin-bottom: .8rem; }
-.card { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: .9rem 1rem; min-width: 0; }
-.card h3 { margin: 0 0 .5rem; font-size: .95rem; }
-.chart { width: 100%; }
-.chart svg text { font-family: var(--font); }
-.chart-table { margin-top: .4rem; font-size: .8rem; }
-.chart-table summary { cursor: pointer; color: var(--muted); }
-.chart-table table { margin-top: .3rem; }
-.legend { display: flex; gap: 1rem; font-size: .78rem; color: var(--muted); margin-bottom: .3rem; }
-.legend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: .35rem; vertical-align: -1px; }
-.sw.s1 { background: var(--series-1); } .sw.s2 { background: var(--series-2); } .sw.good { background: var(--good); } .sw.bad { background: var(--bad); }
+.dash { max-width: 1180px; margin: 0 auto; padding: 1.2rem 1.2rem 3rem; }
+.dash-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 1rem; flex-wrap: wrap; margin-bottom: 1.1rem;
+}
+.dash-actions { display: flex; align-items: center; gap: .7rem; flex-wrap: wrap; }
+.dash-actions select { width: auto; padding: .35rem 1.7rem .35rem .6rem; }
+
+.tiles {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(min(170px, 100%), 1fr));
+  gap: .8rem; margin-bottom: 1rem;
+}
+.tile {
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: var(--r-md); padding: .85rem 1rem; box-shadow: var(--sh-1);
+  transition: box-shadow var(--t-base) var(--ease), transform var(--t-base) var(--ease);
+}
+.tile:hover { box-shadow: var(--sh-2); transform: translateY(-1px); }
+.tile-label {
+  font-size: .68rem; text-transform: uppercase; letter-spacing: .08em;
+  color: var(--faint); font-weight: 700;
+}
+.tile-value {
+  font-size: 1.65rem; font-weight: 700; margin-top: .25rem;
+  font-variant-numeric: tabular-nums; letter-spacing: -.02em; line-height: 1.15;
+}
+.tile-sub { font-size: .76rem; color: var(--muted); margin-top: .2rem; }
+
+.grid2 {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(min(340px, 100%), 1fr));
+  gap: .8rem; margin-bottom: .8rem;
+}
+.card {
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: var(--r-md); padding: 1rem 1.1rem; min-width: 0; box-shadow: var(--sh-1);
+}
+.card h3 { margin: 0 0 .7rem; font-size: .92rem; letter-spacing: -.01em; }
+/* Eski `/dashboard` uslublari (`.chart`, `.legend`, `.sw`, `.kv`) olib
+ * tashlandi — sahifa `css/pages/dashboard.css` ga ko'chdi (ui/R4). */
+
 .table-wrap { overflow-x: auto; }
 .card table { width: 100%; border-collapse: collapse; font-size: .85rem; }
-.card th, .card td { text-align: left; padding: .35rem .5rem; border-bottom: 1px solid var(--border); white-space: nowrap; }
-.card th { color: var(--muted); font-weight: 600; font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; }
+.card th, .card td { text-align: left; padding: .42rem .5rem; border-bottom: 1px solid var(--border-soft); white-space: nowrap; }
+.card tbody tr:last-child td { border-bottom: 0; }
+.card tbody tr:hover td { background: var(--panel-2); }
+.card th { color: var(--faint); font-weight: 700; font-size: .68rem; text-transform: uppercase; letter-spacing: .06em; }
 .card td.num { text-align: right; font-variant-numeric: tabular-nums; }
-.kv .kv-row { display: flex; justify-content: space-between; padding: .35rem 0; border-bottom: 1px solid var(--border); font-size: .9rem; }
+
 .review { list-style: none; margin: 0; padding: 0; }
-.review li { padding: .5rem 0; border-bottom: 1px solid var(--border); font-size: .88rem; }
+.review li { padding: .55rem 0; border-bottom: 1px solid var(--border-soft); font-size: .87rem; }
+.review li:last-child { border-bottom: 0; }
 .review a { color: var(--text); }
-.small { font-size: .78rem; }
+.review a:hover { color: var(--accent); }
 
-/* ── chat: baholash va meta ── */
-.msg .rate { display: inline-flex; gap: .2rem; margin-left: .5rem; vertical-align: middle; }
-.msg .rate button { border: 0; background: transparent; cursor: pointer; font-size: .9rem; opacity: .45; padding: 0 .15rem; }
-.msg .rate button:hover, .msg .rate button.on { opacity: 1; }
-.msg .auto { font-size: .7rem; color: var(--muted); margin-left: .4rem; }
-.opt select { width: auto; padding: .25rem .4rem; font-size: .8rem; }
+/* ══ 10. Moslashuvchanlik ══════════════════════════════════════════════════ */
+@media (max-width: 1100px) { :root { --sidebar-w: 288px; } }
 
-/* ── yozish amallari (6-bosqich) ── */
-.topbar-wm { margin-left: .4rem; font-size: .8rem; }
-.topbar-wm select { width: auto; padding: .2rem .35rem; font-size: .78rem; }
-.action-card { margin: .5rem 0 .2rem; border: 1px solid var(--border); border-left: 4px solid var(--series-2, #eb6834); border-radius: 10px; padding: .55rem .7rem; background: var(--panel-2); font-size: .88rem; }
-.action-card.executed { border-left-color: var(--good, #008300); }
-.action-card.rejected, .action-card.failed, .action-card.blocked { border-left-color: var(--bad, #e34948); opacity: .85; }
-.action-head { display: flex; justify-content: space-between; gap: .5rem; align-items: baseline; flex-wrap: wrap; }
-.action-head b { font-size: .85rem; }
-.action-status { font-size: .74rem; color: var(--muted); }
-.action-text { margin: .35rem 0; white-space: pre-wrap; background: var(--panel); border: 1px dashed var(--border); border-radius: 8px; padding: .4rem .55rem; max-height: 220px; overflow: auto; }
-.action-meta { font-size: .74rem; color: var(--muted); }
-.action-btns { display: flex; gap: .5rem; margin-top: .4rem; flex-wrap: wrap; }
-.action-btns .btn { padding: .35rem .7rem; font-size: .82rem; }
-.action-btns .btn.ok { background: var(--accent); border-color: var(--accent); color: #fff; }
+@media (max-width: 860px) {
+  body { font-size: 15px; }
+  .app { grid-template-columns: 1fr; }
+  .sidebar {
+    position: fixed; inset: 0 auto 0 0; width: min(86vw, 340px); z-index: 45;
+    transform: translateX(-100%);
+    transition: transform var(--t-base) var(--ease);
+    box-shadow: var(--sh-4);
+    padding-bottom: var(--pad-bottom, env(safe-area-inset-bottom));
+  }
+  .sidebar.open { transform: none; }
+  #btn-close-sidebar, #btn-open-sidebar { display: inline-flex; }
 
-/* ── panellar (7-bosqich) ── */
-.panel-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.35); z-index: 40; display: grid; place-items: center; padding: 1rem; }
-.panel { width: min(680px, 100%); max-height: 90dvh; overflow: auto; background: var(--panel); border-radius: 16px; border: 1px solid var(--border); box-shadow: var(--shadow); }
-.panel-head { display: flex; justify-content: space-between; align-items: center; padding: .8rem 1rem; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--panel); }
-.panel-body { padding: .8rem 1rem 1rem; }
-.panel-body .action-card { margin: .5rem 0; }
-.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: .6rem .8rem; }
-.form-grid label { display: flex; flex-direction: column; gap: .25rem; font-size: .85rem; color: var(--muted); }
-.form-grid label.full { grid-column: 1 / -1; }
-.form-grid input[type=checkbox] { width: auto; }
-.form-grid textarea { min-height: 90px; resize: vertical; }
-.form-note { font-size: .8rem; color: var(--muted); margin: .5rem 0; }
-.gen-img { max-width: 100%; height: auto; border-radius: 10px; margin: .4rem 0; display: block; }
-.action-card .gen-img { max-height: 260px; width: auto; }
-.sched-item { padding: .45rem 0; border-bottom: 1px solid var(--border); font-size: .88rem; }
-.sched-item .muted { font-size: .76rem; }
-@media (max-width: 860px) { .form-grid { grid-template-columns: 1fr; } }
+  /* Panel ochiqda orqa fonni qoraytiramiz — fokus panelda qoladi.
+     `:has()` bilan qo'shimcha DOM va JS kerak emas. */
+  .app:has(.sidebar.open)::after {
+    content: ""; position: fixed; inset: 0; z-index: 44;
+    background: var(--overlay); animation: fade-in var(--t-base) var(--ease) both;
+  }
+
+  .msg { max-width: 96%; }
+  .msg table { font-size: .8rem; }
+  .convs { max-height: 22svh; }
+  .messages { padding: 1rem .75rem; }
+  .composer-opts { gap: .4rem; font-size: .74rem; }
+  .opt input[type=range] { width: 92px; }
+  .composer-row .btn.primary { padding: .68rem .9rem; }
+  .dash { padding: .8rem .8rem 2.5rem; }
+  .tile-value { font-size: 1.35rem; }
+  .form-grid { grid-template-columns: 1fr; }
+  .panel { border-radius: var(--r-lg); }
+}
+
+@media (max-width: 480px) {
+  .login-card { padding: 1.3rem 1.15rem 1rem; border-radius: var(--r-lg); }
+  .topbar { padding: .55rem .65rem; gap: .35rem; }
+  .topbar-title { font-size: .94rem; }
+}
+
+/* ── deep search (SSE): holat chizig'i, klaster chiplari, qamrov paneli ───── */
+.msg.deep .deep-status {
+  display: flex; align-items: center; gap: .45rem;
+  font-size: .74rem; color: var(--faint); margin-bottom: .45rem;
+}
+.msg.deep .deep-chips {
+  display: flex; flex-wrap: wrap; gap: .3rem; margin-bottom: .55rem;
+}
+.msg.deep .chip {
+  font-size: .72rem; line-height: 1.5; padding: .12rem .5rem;
+  border: 1px solid var(--border); border-radius: 999px;
+  background: var(--panel-2); color: var(--text); max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.msg.deep .chip b { color: var(--accent-text); font-weight: 600; }
+.msg.deep .deep-coverage {
+  margin-top: .7rem; padding: .5rem .6rem; font-size: .72rem;
+  border: 1px solid var(--border-soft); border-radius: var(--r-md, 8px);
+  background: var(--panel-2); color: var(--muted);
+}
+.msg.deep .cov-head {
+  font-weight: 600; color: var(--text); margin-bottom: .2rem;
+  text-transform: uppercase; letter-spacing: .04em; font-size: .66rem;
+}
+.msg.deep .cov-gaps { margin-top: .3rem; color: var(--faint); }
+.msg a.cite {
+  font-variant-numeric: tabular-nums; text-decoration: none;
+  color: var(--accent-text); border-bottom: 1px dotted currentColor;
+}
+
+/* ══ 11. Redizayn v2 — moslashuvchanlik va xavfsiz zona tuzatishlari ═══════
+ *
+ * Token'lar va yangi komponentlar `static/css/*.css` da (tokens → base →
+ * app → shell → components). Bu blok **eski** sahifa uslublarini yangi
+ * karkasga moslaydi, mavjud sinf nomlarini o'zgartirmasdan (JS shartnoma).
+ */
+
+/* Top bar va panel boshi — notch ostida qolmasin */
+.topbar { padding-block-start: calc(.65rem + var(--sa-top, 0px)); }
+.sidebar-head { padding-block-start: calc(.85rem + var(--sa-top, 0px)); }
+
+/* Teginish nishoni: loyiha minimumi 44px (tadqiqot § 3) */
+.icon-btn { min-width: 44px; min-height: 44px; }
+@media (pointer: coarse) {
+  .btn, .suggest, .dialog-item, .conv-item, .lang-switch a { min-height: 44px; }
+}
+
+/* Ikonka sprite tugma ichida — matn rangini oladi, o'lchami barqaror */
+.btn .icon, .icon-btn .icon, .brand-logo .icon, .empty-icon .icon,
+.dialog-avatar .icon, .fineprint .icon, .sidebar-foot .icon { inline-size: 1.05em; block-size: 1.05em; }
+.empty-icon .icon { inline-size: 32px; block-size: 32px; }
+.brand-logo .icon { inline-size: 1.3em; block-size: 1.3em; }
+
+/* Jadval/diagramma — gorizontal skroll konteynerda, sahifa siljimasin */
+.table-wrap { overscroll-behavior-x: contain; -webkit-overflow-scrolling: touch; }
+
+/* Uzun dialog ro'yxati — ko'rinmagan qatorlar chizilmaydi */
+.dialogs .dialog-item { content-visibility: auto; contain-intrinsic-size: 0 52px; }
+
+@media (max-width: 480px) {
+  .tiles { grid-template-columns: 1fr; }
+  .grid2 { grid-template-columns: 1fr; }
+  .dash { padding: .7rem .7rem 2rem; }
+  .dash-head { align-items: flex-start; }
+  .dash-actions { inline-size: 100%; justify-content: space-between; }
+  .composer-row .btn.primary { padding-inline: .8rem; }
+  .composer-opts { row-gap: .35rem; }
+}

@@ -1,24 +1,40 @@
-# bog'liqliklar
-node_modules/
-
 # sirlar — hech qachon commit qilinmasin
 .env
 .env.*
 !.env.example
+*.session
+*.session-journal
+sessions/
 
-# loglar va vaqtinchalik fayllar
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+dist/
+build/
+
+# bog'liqliklar
+node_modules/
+
+# loglar, ma'lumotlar va vaqtinchalik fayllar
 *.log
 logs/
+data/
 npm-debug.log*
+docker-compose.override.yml
 
 # muharrir va OS
 .DS_Store
 .vscode/
 .idea/
 
-# python
-__pycache__/
-*.pyc
-.venv/
-venv/
-*.egg-info/
+# evals — real chat kontenti bilan quriladi, repoga tushmasligi shart
+# (docs/architecture-v2.md, 10-bo'lim; evals/hard.jsonl bundan mustasno —
+# u qo'lda yozilgan, sun'iy misollar bilan git'da saqlanadi)
+evals/golden.jsonl
+evals/runs/

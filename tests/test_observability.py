@@ -56,6 +56,13 @@ def test_metrics_payload_has_our_metrics() -> None:
     assert "text/plain" in ctype
 
 
+def test_agent_fallback_counter_exists() -> None:
+    """Agent → direct degradatsiyasi ko'rinadigan bo'lishi kerak (2026-09-17)."""
+    O.AGENT_FALLBACKS.labels("LLMError").inc()
+    assert _metric_value("tgai_agent_fallbacks_total", reason="LLMError") >= 1
+    assert b"tgai_agent_fallbacks_total" in O.metrics_payload()[0]
+
+
 def test_scrub_masks_secrets() -> None:
     event = {
         "extra": {"session_string": "abc", "nested": [{"password": "x", "ok": 1}]},
@@ -63,7 +70,9 @@ def test_scrub_masks_secrets() -> None:
     }
     out = O._scrub(event, None)
     assert out is not None
-    masked = "***"
+    # Sentry va structlog bitta implementatsiyani bo'lishadi (`app.logging.scrub`)
+    from app.logging import MASK as masked
+
     assert out["extra"]["session_string"] == masked
     assert out["extra"]["nested"][0]["password"] == masked
     assert out["extra"]["nested"][0]["ok"] == 1
@@ -96,6 +105,94 @@ async def test_assert_within_budget(monkeypatch: pytest.MonkeyPatch) -> None:
         await L.assert_within_budget(object(), 1)  # type: ignore[arg-type]
 
 
+# ─── M3: fon ishlari uchun byudjet qopqog'i ──────────────────────────────────
+
+
+class _BudgetSession:
+    """Ikki `execute`: (1) egalar bo'yicha jamlama, (2) akkaunt id'lari."""
+
+    def __init__(self, totals: list[Any], accounts: list[Any]) -> None:
+        self.totals, self.accounts = totals, accounts
+        self.n = 0
+
+    async def execute(self, stmt: Any) -> Any:
+        self.n += 1
+        rows = self.totals if self.n == 1 else self.accounts
+        return SimpleNamespace(all=lambda: rows, scalars=lambda: rows)
+
+
+async def test_blocked_user_ids_groups_by_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    s = get_settings()
+    monkeypatch.setattr(s, "llm_daily_token_budget", 100)
+    monkeypatch.setattr(s, "llm_daily_cost_budget_usd", 0.0)
+    session = _BudgetSession([(1, 150, 0.0), (2, 10, 0.0), (3, 100, 0.0)], [])
+    assert await L.blocked_user_ids(session) == {1, 3}  # type: ignore[arg-type]
+
+
+async def test_blocked_user_ids_is_empty_without_a_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    s = get_settings()
+    monkeypatch.setattr(s, "llm_daily_token_budget", 0)
+    monkeypatch.setattr(s, "llm_daily_cost_budget_usd", 0.0)
+    session = _BudgetSession([(1, 10**9, 10**9)], [])
+    assert await L.blocked_user_ids(session) == set()  # type: ignore[arg-type]
+
+
+async def test_blocked_account_ids_maps_owners_to_accounts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    s = get_settings()
+    monkeypatch.setattr(s, "llm_daily_token_budget", 100)
+    monkeypatch.setattr(s, "llm_daily_cost_budget_usd", 0.0)
+    session = _BudgetSession([(1, 150, 0.0)], [11, 12])
+    assert await L.blocked_account_ids(session) == {11, 12}  # type: ignore[arg-type]
+
+
+async def test_worker_embed_skips_blocked_accounts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """M3: `embed_messages` byudjeti tugagan egalarning chatlarini chetlab o'tadi."""
+    from app.worker import tasks as W
+
+    async def blocked() -> set[int]:
+        return {42}
+
+    captured: list[str] = []
+
+    class _Sess:
+        async def execute(self, stmt: Any) -> Any:
+            captured.append(str(stmt))
+            return SimpleNamespace(all=lambda: [])
+
+    class _Scope:
+        async def __aenter__(self) -> Any:
+            return _Sess()
+
+        async def __aexit__(self, *a: Any) -> None: ...
+
+    monkeypatch.setattr(W, "_budget_blocked_accounts", blocked)
+    monkeypatch.setattr("app.db.base.session_scope", lambda: _Scope())
+    s = get_settings()
+    monkeypatch.setattr(s, "embed_enabled", True)
+    monkeypatch.setattr(s, "embed_mode", "sync")
+
+    out = await W.embed_messages({})
+
+    assert out == {"embedded": 0}
+    sql = captured[0]
+    assert "chats.account_id NOT IN" in sql
+    # phase4: embedding **joriy model** bo'yicha yetishmayotganini qidiradi
+    assert "message_embeddings.model" in sql
+
+
+async def test_worker_reembed_skips_a_blocked_account(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.worker import tasks as W
+
+    async def blocked() -> set[int]:
+        return {42}
+
+    monkeypatch.setattr(W, "_budget_blocked_accounts", blocked)
+    monkeypatch.setattr(get_settings(), "embed_enabled", True)
+    assert await W.reembed_all({}, 42) == {"skipped": "budget", "account_id": 42}
+
+
 def test_chat_rate_limiter() -> None:
     rl = sec.RateLimiter(2, 60)
     assert rl.check("u1") and rl.check("u1") and not rl.check("u1")
@@ -115,11 +212,15 @@ def client(monkeypatch: pytest.MonkeyPatch) -> Any:
 def test_metrics_endpoint_and_token(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     r = client.get("/metrics")
     assert r.status_code == 200 and "tgai_http_requests_total" in r.text
-    monkeypatch.setattr(get_settings(), "metrics_token", "sekret")
+    # Endpoint modul-global `web_main.s` ni o'qiydi; `get_settings()` keshi
+    # boshqa testda tozalangan bo'lsa u boshqa obyektga aylanadi.
+    from app.web import main as web_main
+
+    monkeypatch.setattr(web_main.s, "metrics_token", "sekret")
     assert client.get("/metrics").status_code == 401
     assert client.get("/metrics?token=sekret").status_code == 200
     assert client.get("/metrics", headers={"Authorization": "Bearer sekret"}).status_code == 200
-    monkeypatch.setattr(get_settings(), "metrics_token", "")
+    monkeypatch.setattr(web_main.s, "metrics_token", "")
 
 
 def test_http_middleware_counts_requests(client: TestClient) -> None:
@@ -167,3 +268,37 @@ def test_settings_defaults() -> None:
     s = get_settings()
     assert s.llm_daily_token_budget > 0 and s.chat_rate_per_minute >= 1
     assert isinstance(SimpleNamespace(v=s.app_version).v, str)
+
+
+# ─── phase4/B: alert va briefing metrikalari ─────────────────────────────────
+
+
+def test_alert_and_briefing_metrics_exist() -> None:
+    """Nomlar barqaror — dashboard/alert qoidalari shularga tayanadi."""
+    O.ALERT_SCANS.inc()
+    O.ALERT_EVENTS.labels("keyword").inc()
+    O.ALERT_PUSHES.labels("ok").inc()
+    O.BRIEFING_BUILDS.labels("ok").inc()
+    O.BRIEFING_PUSHES.labels("sent").inc()
+    body, _ = O.metrics_payload()
+    for name in (
+        b"tgai_alert_scans_total",
+        b"tgai_alert_events_total",
+        b"tgai_alert_pushes_total",
+        b"tgai_briefing_builds_total",
+        b"tgai_briefing_pushes_total",
+    ):
+        assert name in body
+    assert _metric_value("tgai_alert_events_total", kind="keyword") >= 1
+    assert _metric_value("tgai_briefing_pushes_total", status="sent") >= 1
+
+
+def test_briefing_delivery_result_is_counted() -> None:
+    from datetime import date
+
+    from app.services.briefing import DeliveryResult, _counted
+
+    before = _metric_value("tgai_briefing_pushes_total", status="skipped")
+    res = _counted(DeliveryResult(1, date(2026, 9, 15), "skipped", "quiet"))
+    assert res.status == "skipped"
+    assert _metric_value("tgai_briefing_pushes_total", status="skipped") - before == 1

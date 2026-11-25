@@ -7,6 +7,7 @@ Gemini / DeepSeek + Postgres/pgvector + ARQ worker.
 | Hujjat | Nima haqida |
 |---|---|
 | [architecture.md](architecture.md) | Komponentlar, ma'lumot oqimi, servislar xaritasi |
+| [architecture-v2.md](architecture-v2.md) | **Dizayn**: "burchakdan burchakka" qidiruv agenti — ierarxik indeks, deep search, digest v2, roadmap |
 | [security.md](security.md) | Buzib bo'lmaydigan invariantlar, himoya qatlamlari, sirlar |
 | [data-model.md](data-model.md) | Jadvallar, migratsiyalar, nozik nuqtalar |
 | [api.md](api.md) | HTTP API (auth, chat, telegram, actions, stats) |

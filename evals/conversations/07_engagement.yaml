@@ -1,0 +1,107 @@
+version: 1
+# (g) Reaksiya / izoh / ko'rish / statistika. CLAUDE.md: kanalda
+# GetMessageReactionsList → BroadcastForbiddenError, bog'langan guruhsiz kanalda
+# GetReplies → MsgIdInvalidError. Bular XATO EMAS, holat — model ularni matn
+# sifatida yetkazishi va qayta-qayta urinmasligi kerak.
+scenarios:
+  - id: engage-01
+    title: "Kim reaksiya bosgan (guruh)"
+    category: engagement
+    locale: uz
+    priority: 1
+    chat_hint: "Honadoshlar"
+    turns:
+      - user: "Shu guruhda #1784 xabarga kim reaksiya qo'ygan?"
+        mode: auto
+        expect:
+          tools_any: [get_reactions]
+          scope: chat
+          max_tool_calls: 3
+          max_cost_usd: 0.06
+          judge: "Javob reaksiya qo'yganlarni sanaydi yoki Telegram cheklovini tushunarli aytadi."
+
+  - id: engage-02
+    title: "Kanalda reaksiya (kutilgan cheklov)"
+    category: engagement
+    locale: uz
+    priority: 1
+    chat_hint: "backup Re-electronik"
+    turns:
+      - user: "Shu kanaldagi eng oxirgi postga kim reaksiya bosgan?"
+        mode: auto
+        expect:
+          scope: chat
+          max_tool_calls: 4
+          max_cost_usd: 0.07
+          judge: >-
+            Javob kanalda kim bosgani oshkor qilinmasligini tushuntiradi (faqat
+            umumiy son) va tool'ni qayta-qayta urinmaydi.
+
+  - id: engage-03
+    title: "Post ostidagi izohlar"
+    category: engagement
+    locale: uz
+    priority: 1
+    chat_hint: "Bobomalikov Abduaziz's blog"
+    turns:
+      - user: "Shu kanaldagi #5 post ostida qanday izohlar bor?"
+        mode: auto
+        expect:
+          tools_any: [get_post_comments]
+          scope: chat
+          max_tool_calls: 3
+          max_cost_usd: 0.06
+          judge: >-
+            Javob izohlarni keltiradi yoki bog'langan muhokama guruhi yo'qligini
+            aniq aytadi.
+
+  - id: engage-04
+    title: "Eng ko'p ko'rilgan postlar"
+    category: engagement
+    locale: uz
+    priority: 1
+    chat_hint: "backup Re-electronik"
+    turns:
+      - user: "Shu kanalda eng ko'p ko'rilgan 3 ta post qaysi?"
+        mode: auto
+        expect:
+          tools_any: [get_chat_stats]
+          tools_none: [discover_channels]
+          scope: chat
+          max_tool_calls: 3
+          max_cost_usd: 0.06
+          judge: "Javob top postlarni ko'rish soni bilan beradi."
+
+  - id: engage-05
+    title: "Ko'rishlar o'sishi (snapshot qatori)"
+    category: engagement
+    locale: uz
+    priority: 2
+    chat_hint: "backup Re-electronik"
+    turns:
+      - user: "Bu hafta shu kanalga qancha ko'rish qo'shildi?"
+        mode: auto
+        expect:
+          tools_any: [get_chat_stats]
+          scope: chat
+          max_tool_calls: 3
+          max_cost_usd: 0.06
+          judge: >-
+            Javob o'sish raqamini snapshotlardan beradi yoki snapshot ma'lumoti
+            yetarli emasligini aytadi; oxirgi qiymatni o'sish deb ko'rsatmaydi.
+
+  - id: engage-06
+    title: "Eng yaxshi post vaqti"
+    category: engagement
+    locale: uz
+    priority: 2
+    chat_hint: "backup Re-electronik"
+    turns:
+      - user: "Post qo'yish uchun eng yaxshi soat qaysi?"
+        mode: auto
+        expect:
+          tools_any: [get_chat_stats]
+          scope: chat
+          max_tool_calls: 3
+          max_cost_usd: 0.06
+          judge: "Javob soatlar taqsimotiga tayanadi va taxmin ekanini belgilaydi."

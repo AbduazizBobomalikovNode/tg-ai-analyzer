@@ -32,8 +32,12 @@ services:
 
   migrate:
     build: .
+    # Izolyatsiya haqida: `docker-compose.yml` faylga nisbatan yechiladi — `-p`/
+    # `--env-file` bilan izolyatsiya qilinmaydi, docs/deployment.md#compose-izolyatsiyasi.
     env_file: .env
     command: alembic upgrade head
+    healthcheck:
+      disable: true   # Dockerfile'dagi HEALTHCHECK faqat `api` uchun
     depends_on:
       postgres:
         condition: service_healthy
@@ -42,6 +46,8 @@ services:
     build: .
     env_file: .env
     command: python -m app.main bot
+    healthcheck:
+      disable: true   # Dockerfile'dagi HEALTHCHECK faqat `api` uchun
     restart: unless-stopped
     volumes:
       - ./data:/app/data
@@ -71,6 +77,8 @@ services:
     build: .
     env_file: .env
     command: arq app.worker.settings.WorkerSettings
+    healthcheck:
+      disable: true   # Dockerfile'dagi HEALTHCHECK faqat `api` uchun
     restart: unless-stopped
     volumes:
       - ./data:/app/data

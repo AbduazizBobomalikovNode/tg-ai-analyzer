@@ -1,0 +1,98 @@
+version: 1
+# (l) Tool iqtisodi — CLAUDE.md "Narx qopqoqlari" bandini o'lchaydi:
+#   seen_calls (aynan bir xil (tool,args) ikkinchi marta bajarilmaydi),
+#   MAX_CALLS_PER_TOOL = 3,
+#   chat indeksi runtime_note ichida → `list_chats` behuda chaqirilmasin.
+# Runner `calls_log` dagi to'silgan yozuvlarni alohida sanaydi (`blocked`).
+scenarios:
+  - id: econ-01
+    title: "Bir xil savol ikki marta — takroriy chaqiruv bo'lmasin"
+    category: economy
+    locale: uz
+    priority: 1
+    chat_hint: "Honadoshlar"
+    turns:
+      - user: "Shu guruhda ijara narxi haqida nima deyishgan?"
+        mode: auto
+        expect:
+          tools_any: [search_messages]
+          scope: chat
+          max_cost_usd: 0.07
+          judge: "Javob mavzuga tegishli."
+      - user: "Shu guruhda ijara narxi haqida nima deyishgan?"
+        mode: auto
+        expect:
+          must_reference_prior: true
+          max_tool_calls: 2
+          max_cost_usd: 0.05
+          judge: >-
+            Agent oldingi javobga suyanadi yoki bitta tekshiruv chaqiruvi bilan
+            cheklanadi; butun qidiruvni qaytadan boshlamaydi.
+
+  - id: econ-02
+    title: "list_chats behuda chaqirilmasin (indeks runtime_note'da)"
+    category: economy
+    locale: uz
+    priority: 1
+    chat_hint: "Honadoshlar"
+    turns:
+      - user: "Shu guruhda oxirgi kunda nima bo'ldi?"
+        mode: auto
+        expect:
+          tools_none: [list_chats]
+          scope: chat
+          max_tool_calls: 3
+          max_cost_usd: 0.06
+          judge: "Javob mavzuni beradi."
+
+  - id: econ-03
+    title: "O'z chati haqida — discover ishlatilmasin"
+    category: economy
+    locale: uz
+    priority: 1
+    chat_hint: "aiogram[uz]"
+    turns:
+      - user: "Shu guruhda eng ko'p qanday savollar beriladi?"
+        mode: auto
+        expect:
+          tools_none: [discover_channels]
+          scope: chat
+          max_tool_calls: 4
+          max_cost_usd: 0.08
+          judge: "Javob guruhning o'z xabarlariga tayanadi."
+
+  - id: econ-04
+    title: "Kalit so'z bo'roni — topilmasa to'xtash"
+    category: economy
+    locale: uz
+    priority: 1
+    chat_hint: "Honadoshlar"
+    turns:
+      - user: "Shu guruhda \"zxqwvbnm\" haqida nima yozilgan?"
+        mode: auto
+        expect:
+          scope: chat
+          max_tool_calls: 4
+          max_cost_usd: 0.06
+          judge: >-
+            Javob hech narsa topilmaganini aniq aytadi; agent ko'p marta
+            turli so'zlar bilan qayta qidirmaydi.
+
+  - id: econ-05
+    title: "Bir savolda ko'p band — byudjet ichida qolish"
+    category: economy
+    locale: uz
+    priority: 2
+    chat_hint: "Honadoshlar"
+    turns:
+      - user: >-
+          Shu guruh haqida hammasini ayt: a'zolar, media, so'nggi hafta nima
+          bo'lgan, eng faol odam kim.
+        mode: auto
+        expect:
+          scope: chat
+          max_tool_calls: 8
+          max_cost_usd: 0.15
+          judge: >-
+            Javob to'rtta bandning kamida uchtasiga javob beradi va qolganida
+            nima yetishmaganini aytadi.

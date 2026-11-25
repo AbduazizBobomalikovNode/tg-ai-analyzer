@@ -1,86 +1,115 @@
-{% extends "base.html" %}
+{% extends "_shell.html" %}
+{% import "_macros.html" as m %}
+{% set nav_current = "dashboard" %}
 {% block title %}{{ t('web.dash.title') }} · {{ t('web.title') }}{% endblock %}
 {% block body_class %}page-dash{% endblock %}
-{% block content %}
-<div class="dash">
-  <header class="dash-head">
-    <div class="brand small">
-      <span class="brand-logo" aria-hidden="true">✈️</span>
-      <span class="brand-name">{{ t('web.title') }}</span>
-      <span class="muted">· {{ t('web.dash.title') }}</span>
-    </div>
-    <div class="dash-actions">
-      <label class="opt">{{ t('web.dash.period') }}
-        <select id="days">
-          <option value="7">7</option>
-          <option value="30" selected>30</option>
-          <option value="90">90</option>
-        </select>
-      </label>
-      <a class="btn ghost small" href="/chat">← {{ t('web.chat.title') }}</a>
-      <nav class="lang-switch">
-        {% for l in langs %}<a href="?lang={{ l }}" class="{% if l == lang %}active{% endif %}">{{ l|upper }}</a>{% endfor %}
-      </nav>
-    </div>
-  </header>
 
-  <!-- KPI plitalar -->
-  <section class="tiles" id="tiles" aria-live="polite">
-    <div class="tile"><div class="tile-label">{{ t('web.dash.requests') }}</div><div class="tile-value" data-k="requests">—</div></div>
-    <div class="tile"><div class="tile-label">{{ t('web.dash.tokens') }}</div><div class="tile-value" data-k="tokens">—</div><div class="tile-sub" data-k="tokens_split"></div></div>
-    <div class="tile"><div class="tile-label">{{ t('web.dash.cost') }}</div><div class="tile-value" data-k="cost">—</div><div class="tile-sub">{{ t('web.dash.cost_note') }}</div></div>
-    <div class="tile"><div class="tile-label">{{ t('web.dash.latency') }}</div><div class="tile-value" data-k="latency">—</div><div class="tile-sub" data-k="latency_sub"></div></div>
-    <div class="tile"><div class="tile-label">{{ t('web.dash.satisfaction') }}</div><div class="tile-value" data-k="satisfaction">—</div><div class="tile-sub" data-k="satisfaction_sub"></div></div>
-    <div class="tile"><div class="tile-label">{{ t('web.dash.auto_quality') }}</div><div class="tile-value" data-k="auto">—</div><div class="tile-sub" data-k="auto_sub"></div></div>
+{% block head %}{{ super() }}
+  <link rel="stylesheet" href="{{ asset('css/pages/dashboard.css') }}">
+{% endblock %}
+
+{% block topbar %}
+<header class="topbar-v2">
+  <span class="topbar-h1">{{ t('web.dash.title') }}</span>
+  <span class="spacer"></span>
+  <button type="button" class="icon-btn-v2" data-theme-toggle aria-label="{{ t('web.theme.title') }}">{{ m.icon("monitor") }}</button>
+</header>
+{% endblock %}
+
+{% block pane_content %}
+<div class="pane-content scrolls">
+<div class="pane-inner page">
+
+  <div class="page-head">
+    <div>
+      <h1 class="page-title">{{ t('web.dash.title') }}</h1>
+      <p class="page-sub">{{ t('web.dash.subtitle') }}</p>
+    </div>
+    <span class="spacer"></span>
+    {# Davr almashtirgichi — URL holati (`?days=`), brauzer orqaga tugmasi ishlaydi. #}
+    <div class="segment dash-period" id="dash-period" role="tablist" aria-label="{{ t('web.dash.period') }}">
+      <button type="button" role="tab" data-days="1" aria-selected="false">{{ t('web.dash.period_1') }}</button>
+      <button type="button" role="tab" data-days="7" aria-selected="false">{{ t('web.dash.period_7') }}</button>
+      <button type="button" role="tab" data-days="30" aria-selected="true">{{ t('web.dash.period_30') }}</button>
+    </div>
+  </div>
+
+  {# (b) To'rtta bosh ko'rsatkich — har birida yorliq, birlik va kontekst qatori. #}
+  <section class="dash-kpis" id="dash-kpis" aria-label="{{ t('web.dash.kpi_section') }}" aria-live="polite"></section>
+
+  {# (c) Sync salomatligi — `lib/sync-center.js::mountStrip` (yagona manba). #}
+  <section class="card-v2" id="dash-sync-card" hidden>
+    <div class="card-head">
+      {{ m.icon("refresh-cw") }}
+      <h2>{{ t('web.dash.sync_title') }}</h2>
+    </div>
+    <div id="dash-sync"></div>
   </section>
 
-  <section class="grid2">
-    <div class="card">
-      <h3>{{ t('web.dash.chart_requests') }}</h3>
-      <div class="chart" id="chart-requests"></div>
+  {# (d) Ikkita grafik — desktopda yonma-yon, mobilda ustma-ust. #}
+  <section class="dash-charts">
+    <div class="card-v2">
+      <div class="card-head">
+        <h2>{{ t('web.dash.chart_volume') }}</h2>
+        <span class="spacer"></span>
+        <span class="hint-slot" data-hint="web.dash.chart_volume_hint"></span>
+      </div>
+      <div class="chart-box" id="chart-volume"></div>
     </div>
-    <div class="card">
-      <h3>{{ t('web.dash.chart_tokens') }}</h3>
-      <div class="legend"><span><i class="sw s1"></i>{{ t('web.dash.tokens_in') }}</span><span><i class="sw s2"></i>{{ t('web.dash.tokens_out') }}</span></div>
-      <div class="chart" id="chart-tokens"></div>
-    </div>
-    <div class="card">
-      <h3>{{ t('web.dash.chart_ratings') }}</h3>
-      <div class="legend"><span><i class="sw good"></i>👍</span><span><i class="sw bad"></i>👎</span></div>
-      <div class="chart" id="chart-ratings"></div>
-    </div>
-    <div class="card">
-      <h3>{{ t('web.dash.ingestion') }}</h3>
-      <div class="kv" id="ingestion"></div>
-    </div>
-    <div class="card">
-      <h3>{{ t('web.dash.system') }}</h3>
-      <div class="kv" id="system"></div>
-    </div>
-  </section>
-
-  <section class="grid2">
-    <div class="card">
-      <h3>{{ t('web.dash.by_model') }}</h3>
-      <div class="table-wrap"><table id="tbl-models"></table></div>
-    </div>
-    <div class="card">
-      <h3>{{ t('web.dash.by_strategy') }}</h3>
-      <div class="table-wrap"><table id="tbl-strategies"></table></div>
-      <p class="muted small" id="strategy-note"></p>
+    <div class="card-v2">
+      <div class="card-head">
+        <h2>{{ t('web.dash.chart_latency') }}</h2>
+        <span class="spacer"></span>
+        <span class="hint-slot" data-hint="web.dash.chart_latency_hint"></span>
+      </div>
+      <div class="chart-box" id="chart-latency"></div>
     </div>
   </section>
 
-  <section class="grid2">
-    <div class="card">
-      <h3>{{ t('web.dash.top_chats') }}</h3>
-      <div class="table-wrap"><table id="tbl-chats"></table></div>
+  {# (e) Modellar · (f) eng faol chatlar — desktopda yonma-yon. #}
+  <section class="dash-cols">
+    <div class="card-v2">
+      <div class="card-head">
+        <h2>{{ t('web.dash.models_title') }}</h2>
+        <span class="spacer"></span>
+        <span class="hint-slot" data-hint="web.dash.models_hint"></span>
+      </div>
+      <div id="dash-models"></div>
     </div>
-    <div class="card">
-      <h3>{{ t('web.dash.review') }}</h3>
-      <ul class="review" id="review"></ul>
+    <div class="card-v2">
+      <div class="card-head">
+        <h2>{{ t('web.dash.chats_title') }}</h2>
+        <span class="spacer"></span>
+        <span class="hint-slot" data-hint="web.dash.chats_hint"></span>
+      </div>
+      <div id="dash-chats"></div>
     </div>
   </section>
+
+  {# (g) Ko'rib chiqish kerak — past baholangan javoblar. #}
+  <section class="card-v2">
+    <div class="card-head">
+      <h2>{{ t('web.dash.review_title') }}</h2>
+      <span class="spacer"></span>
+      <span class="hint-slot" data-hint="web.dash.review_hint"></span>
+    </div>
+    <div id="dash-review"></div>
+  </section>
+
+  {# (h) Tizim — yig'ilgan holda, yo'ldan chetda. #}
+  <details class="card-v2 dash-system" id="dash-system-box">
+    <summary>
+      {{ m.icon("database") }}
+      <span>{{ t('web.dash.system') }}</span>
+      <span class="spacer"></span>
+      <span class="muted small">{{ t('web.dash.system_hint') }}</span>
+      {{ m.icon("chevron-down", cls="chev") }}
+    </summary>
+    <div id="dash-system"></div>
+  </details>
+
+</div>
 </div>
 {% endblock %}
-{% block scripts %}<script src="/static/dashboard.js"></script>{% endblock %}
+
+{% block scripts %}{{ super() }}<script type="module" src="{{ asset('pages/dashboard.js') }}"></script>{% endblock %}

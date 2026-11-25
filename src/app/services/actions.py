@@ -20,7 +20,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from telethon import errors as tg_errors
 
@@ -63,8 +63,31 @@ class ActionView:
         }
 
 
+#: Avtomatlashtirish takliflari (`write_tools.AUTOMATION_TOOL_NAMES`) — MTProto yo'q.
+AUTOMATION_TOOLS = frozenset({"create_alert", "set_briefing", "remind", "cancel_reminder"})
+#: Karta chiziladigan (tasdiq so'raydigan) amallar.
+CARD_TOOLS = frozenset(
+    {"send_message", "edit_message", "forward_message", "pin_message"} | AUTOMATION_TOOLS
+)
+
+
 def _preview(a: AgentAction) -> dict[str, Any]:
     args = a.args or {}
+    if a.tool in AUTOMATION_TOOLS:
+        # Nima yaratilishi/o'zgarishi — taklif paytida muzlatilgan matn (faqat o'qish).
+        return {
+            "chat": args.get("chat_title"),
+            "chat_id": args.get("chat_id"),
+            "text": args.get("summary"),
+            "automation": a.tool,
+            "kind": args.get("kind"),
+            "pattern": args.get("pattern"),
+            "due_local": args.get("due_local"),
+            "tz": args.get("tz"),
+            "enabled": args.get("enabled"),
+            "hour": args.get("hour"),
+            "job_ids": args.get("job_ids"),
+        }
     return {
         "chat": args.get("chat_title"),
         "chat_id": args.get("chat_id"),
@@ -146,7 +169,7 @@ async def actions_for_runs(
     )
     out: dict[int, list[dict[str, Any]]] = {}
     for a in rows.scalars().all():
-        if a.tool in ("send_message", "edit_message", "forward_message", "pin_message"):
+        if a.tool in CARD_TOOLS:
             out.setdefault(a.run_id, []).append(_view(a).to_dict())
     return out
 
@@ -163,6 +186,27 @@ async def reject_action(session: AsyncSession, user_id: int, action_id: int) -> 
     return _view(a)
 
 
+async def _claim_proposed(session: AsyncSession, a: AgentAction) -> bool:
+    """`proposed → confirmed` **atomik**: shartli UPDATE, rowcount bilan.
+
+    Ikkita parallel tasdiq (ikki tab, ikki so'rov) bir amalni ikki marta
+    yubormasligi uchun holat o'tishi bitta statement ichida bo'ladi. Faqat
+    `status`/`confirmed_at` o'zgaradi — append-only trigger ruxsat beradi.
+    """
+    now = datetime.now(UTC)
+    res = await session.execute(
+        update(AgentAction)
+        .where(AgentAction.id == a.id, AgentAction.status == ActionStatus.PROPOSED)
+        .values(status=ActionStatus.CONFIRMED, confirmed_at=now)
+        .execution_options(synchronize_session=False)
+    )
+    if int(getattr(res, "rowcount", 0) or 0) != 1:
+        return False
+    a.status = ActionStatus.CONFIRMED  # ORM holati DB bilan mos bo'lsin
+    a.confirmed_at = now
+    return True
+
+
 async def confirm_action(session: AsyncSession, user_id: int, action_id: int) -> ActionView:
     a = await _owned(session, user_id, action_id)
     if a.status != ActionStatus.PROPOSED:
@@ -173,7 +217,10 @@ async def confirm_action(session: AsyncSession, user_id: int, action_id: int) ->
         a.error = "expired"
         await session.flush()
         raise ActionError("expired")
-    await execute_action(session, a, actor=f"user:{user_id}")
+    if not await _claim_proposed(session, a):
+        # boshqa so'rov ulgurdi — ikkinchi yuborish bo'lmaydi
+        raise ActionError("wrong_status", "already_confirmed")
+    await execute_action(session, a, actor=f"user:{user_id}", confirmed=True)
     return _view(a)
 
 
@@ -194,17 +241,26 @@ async def _rate_ok(session: AsyncSession, account_id: int) -> bool:
     return int(n or 0) < limit
 
 
-async def execute_action(session: AsyncSession, a: AgentAction, *, actor: str) -> int | None:
-    """Tasdiqlangan amalni MTProto orqali bajaradi. Qaytaradi: natija xabar id."""
+async def execute_action(
+    session: AsyncSession, a: AgentAction, *, actor: str, confirmed: bool = False
+) -> int | None:
+    """Tasdiqlangan amalni MTProto orqali bajaradi. Qaytaradi: natija xabar id.
+
+    `confirmed=True` — chaqiruvchi holatni allaqachon atomik `proposed →
+    confirmed` qilib olgan (`confirm_action`); bu yerda qayta yozilmaydi.
+    """
     run = await session.get(AgentRun, a.run_id)
     if run is None or run.account_id is None:
         raise ActionError("not_found")
+    if a.tool in AUTOMATION_TOOLS:
+        return await _execute_automation(session, a, run, actor=actor, confirmed=confirmed)
     account_id = run.account_id
     args = a.args or {}
     peer_id = int(args.get("peer_id") or a.target_peer_id or 0)
 
-    a.status = ActionStatus.CONFIRMED
-    a.confirmed_at = datetime.now(UTC)
+    if not confirmed:  # autonomous yo'l: amal shu tranzaksiyada yaratilgan
+        a.status = ActionStatus.CONFIRMED
+        a.confirmed_at = datetime.now(UTC)
     await session.flush()
 
     try:
@@ -239,6 +295,38 @@ async def execute_action(session: AsyncSession, a: AgentAction, *, actor: str) -
     log.info(
         "write.executed", action_id=a.id, tool=a.tool, peer=peer_id, result=result_id, actor=actor
     )
+    return result_id
+
+
+async def _execute_automation(
+    session: AsyncSession, a: AgentAction, run: AgentRun, *, actor: str, confirmed: bool
+) -> int | None:
+    """Alert / briefing / eslatma — **faqat** foydalanuvchi tasdig'idan keyin.
+
+    `autonomous` yo'li (`confirmed=False`) bu amallarga ruxsat bermaydi:
+    `write_tools.propose_automation` ularni hech qachon bajarmaydi, bu yerda
+    esa ikkinchi qatlam. MTProto, peer guard va yozish rate limit'i yo'q —
+    Telegram'ga hech narsa yozilmaydi; egalik `automation.execute` da.
+    """
+    from app.services import automation as AU
+
+    if not confirmed:
+        a.status = ActionStatus.FAILED
+        a.error = "needs_confirm"
+        await session.flush()
+        raise ActionError("needs_confirm")
+    try:
+        result_id = await AU.execute(session, a, run)
+    except AU.AutomationError as exc:
+        a.status = ActionStatus.FAILED
+        a.error = exc.code[:500]
+        await session.flush()
+        raise ActionError(exc.code, exc.detail) from exc
+    a.status = ActionStatus.EXECUTED
+    a.result_msg_id = result_id
+    await session.flush()
+    WRITE_ACTIONS.labels(a.tool, "executed").inc()
+    log.info("automation.executed", action_id=a.id, tool=a.tool, result=result_id, actor=actor)
     return result_id
 
 

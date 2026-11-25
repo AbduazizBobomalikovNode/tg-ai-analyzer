@@ -1,0 +1,165 @@
+/* shell.css — navigatsiya karkasi: rail (desktop), tab bar (mobil),
+ * top bar, 2/3-panel tartibi.
+ *
+ * Tartib **fixed** emas, oddiy flex: pastki tab bar oqim ichida qoladi,
+ * shuning uchun hech qayerda "kontent ostida qolmasin" deb `padding-bottom`
+ * hisoblash kerak emas va klaviatura ochilganda ham sakramaydi.
+ *
+ *   .shell (column, 100svh)
+ *     .shell-row (flex:1)
+ *       .rail        — >=860px
+ *       .shell-main  (column)
+ *         .topbar-v2 — ixtiyoriy
+ *         .shell-body (flex)
+ *           .pane-list     — 2/3-panel ro'yxati
+ *           .pane-content
+ *     .tabbar — <860px
+ *
+ * Breakpoint **bitta manba**: `--bp-mobile: 860px` (tokens.css). CSS'da
+ * media query'ga qiymat o'zgaruvchi bo'lib tusholmaydi, shuning uchun bu
+ * yerda 860px yozilgan; JS uni `lib/store.js::mobileQuery()` orqali
+ * `--bp-mobile` dan **o'qib** `matchMedia` quradi — ya'ni ikkalasi bir
+ * qiymatdan chiqadi.
+ */
+
+.shell-row { display: flex; flex: 1 1 auto; min-block-size: 0; }
+.shell-main { display: flex; flex-direction: column; flex: 1 1 auto; min-inline-size: 0; min-block-size: 0; }
+.shell-body { display: flex; flex: 1 1 auto; min-block-size: 0; min-inline-size: 0; }
+
+/* Eski sahifa karkasi (`.app`) shell ichida to'liq balandlikni oladi */
+.shell .app { block-size: 100%; min-block-size: 0; }
+.pane-content { display: flex; flex-direction: column; flex: 1 1 auto; min-inline-size: 0; min-block-size: 0; }
+.pane-content.scrolls { overflow: auto; }
+
+.pane-list {
+  flex: none;
+  inline-size: var(--list-w);
+  min-block-size: 0;
+  display: flex; flex-direction: column;
+  background: var(--panel);
+  border-inline-end: 1px solid var(--border);
+  overflow: auto;
+}
+
+/* ══ Desktop rail ═════════════════════════════════════════════════════ */
+.rail {
+  flex: none;
+  inline-size: var(--rail-w);
+  display: flex; flex-direction: column; align-items: center;
+  gap: var(--s-1);
+  padding-block: calc(var(--sa-top) + var(--s-2)) var(--s-2);
+  background: var(--panel);
+  border-inline-end: 1px solid var(--border);
+  z-index: var(--z-rail);
+}
+.rail-brand {
+  display: grid; place-items: center;
+  inline-size: 40px; block-size: 40px; margin-block-end: var(--s-2);
+  border-radius: var(--r-md, 12px);
+  background: var(--accent); color: var(--accent-ink);
+}
+.rail-brand .icon { inline-size: 22px; block-size: 22px; }
+.rail-spacer { flex: 1 1 auto; }
+
+.rail-item {
+  position: relative;
+  display: grid; place-items: center;
+  inline-size: 48px; block-size: 48px;
+  border-radius: var(--r-md, 12px);
+  color: var(--muted); background: none; border: 0; cursor: pointer;
+  transition: background var(--t-hover) var(--ease), color var(--t-hover) var(--ease);
+}
+.rail-item:hover { background: var(--panel-3); color: var(--text); }
+.rail-item[aria-current="page"] { color: var(--accent-text); background: var(--accent-soft); }
+.rail-item[aria-current="page"]::before {
+  content: ""; position: absolute; inset-inline-start: -8px;
+  inline-size: 3px; block-size: 22px; border-radius: 0 3px 3px 0;
+  background: var(--accent);
+}
+.rail-item.is-disabled { opacity: .45; pointer-events: none; }
+.rail-item .icon { inline-size: 21px; block-size: 21px; }
+
+/* Rail ipucu (tooltip) — hover/fokusda, faqat ko'rsatkichli qurilmada */
+.rail-item .rail-tip {
+  position: absolute; inset-inline-start: calc(100% + 6px);
+  padding: var(--s-1) var(--s-2);
+  background: var(--text); color: var(--panel);
+  font-size: var(--fs-xs); border-radius: var(--r-xs, 6px);
+  white-space: nowrap; opacity: 0; pointer-events: none;
+  transform: translateX(-4px);
+  transition: opacity var(--t-hover) var(--ease), transform var(--t-hover) var(--ease);
+  z-index: 1;
+}
+@media (hover: hover) {
+  .rail-item:hover .rail-tip, .rail-item:focus-visible .rail-tip { opacity: 1; transform: none; }
+}
+
+/* Badge (tasdiq kutayotgan amallar soni) */
+.nav-badge {
+  position: absolute; inset-block-start: 4px; inset-inline-end: 4px;
+  min-inline-size: 17px; block-size: 17px; padding-inline: 4px;
+  display: grid; place-items: center;
+  font-size: 10px; font-weight: 700; line-height: 1;
+  border-radius: var(--r-full, 999px);
+  background: var(--danger); color: #fff;
+}
+
+/* ══ Mobil tab bar ════════════════════════════════════════════════════ */
+.tabbar {
+  flex: none;
+  display: none;
+  align-items: stretch;
+  background: var(--panel);
+  border-block-start: 1px solid var(--border);
+  padding-block-end: var(--pad-bottom);
+  z-index: var(--z-tabbar);
+}
+.tabbar-item {
+  position: relative;
+  flex: 1 1 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 2px;
+  min-block-size: var(--tabbar-h);
+  padding-block: var(--s-1);
+  color: var(--muted); background: none; border: 0; cursor: pointer;
+  font-size: 10.5px; font-weight: 600;
+  text-decoration: none;
+}
+.tabbar-item .icon { inline-size: 22px; block-size: 22px; }
+.tabbar-item[aria-current="page"] { color: var(--accent-text); }
+.tabbar-item.is-disabled { opacity: .45; pointer-events: none; }
+
+/* ══ Top bar ══════════════════════════════════════════════════════════ */
+.topbar-v2 {
+  flex: none;
+  display: flex; align-items: center; gap: var(--s-2);
+  min-block-size: var(--topbar-h);
+  padding-block: var(--s-2);
+  padding-block-start: calc(var(--s-2) + var(--sa-top));
+  padding-inline: var(--s-3);
+  background: var(--panel);
+  border-block-end: 1px solid var(--border);
+}
+.topbar-v2 .topbar-h1 {
+  font-size: var(--fs-lg); font-weight: 700; letter-spacing: -.01em;
+  min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.topbar-v2 .spacer { flex: 1 1 auto; }
+
+/* ══ Moslashuvchanlik ═════════════════════════════════════════════════ */
+@media (max-width: 860px) {
+  .rail { display: none; }
+  .tabbar { display: flex; }
+  .pane-list { inline-size: 100%; border-inline-end: 0; }
+  /* Mobilda bir vaqtda bitta panel: sahifa `data-pane` bilan tanlaydi */
+  .shell-body[data-pane="content"] > .pane-list { display: none; }
+  .shell-body[data-pane="list"] > .pane-content { display: none; }
+}
+
+@media (min-width: 861px) and (max-width: 1199px) {
+  :root { --list-w: 300px; }
+}
+
+@media (min-width: 1200px) {
+  .pane-content > .pane-inner { max-inline-size: var(--content-max); margin-inline: auto; inline-size: 100%; }
+}

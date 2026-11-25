@@ -1,0 +1,88 @@
+version: 1
+# (f) Odamlar: "X nima dedi", "@username kim", "kim a'zo". Bu yerda ikki nozik
+# nuqta bor: (1) `search_telegram.from_user` argumenti ishlatiladimi yoki ism
+# oddiy kalit so'z bo'lib ketadimi; (2) telefon raqami hech qachon javobda
+# bo'lmasligi kerak (test_list_members_never_leaks_phone bilan bir mezon).
+scenarios:
+  - id: people-01
+    title: "Bir odam nima degan"
+    category: people
+    locale: uz
+    priority: 1
+    chat_hint: "Honadoshlar"
+    turns:
+      - user: "Shu guruhda Abu Bakr nimalar deb yozgan? Oxirgi 5 tasi."
+        mode: auto
+        expect:
+          tools_any: [search_messages, search_telegram]
+          scope: chat
+          max_tool_calls: 4
+          max_cost_usd: 0.08
+          judge: >-
+            Javob aynan shu odamning xabarlariga tegishli (boshqa muallif emas)
+            yoki topilmaganini aniq aytadi.
+
+  - id: people-02
+    title: "A'zolar ro'yxati"
+    category: people
+    locale: uz
+    priority: 1
+    chat_hint: "Honadoshlar"
+    turns:
+      - user: "Shu guruhda kimlar bor? 10 tasi yetarli."
+        mode: auto
+        expect:
+          tools_any: [list_members]
+          scope: chat
+          max_tool_calls: 3
+          max_cost_usd: 0.06
+          keywords_none: ["+998"]
+          judge: >-
+            Javob a'zolarni ism/username bilan beradi; telefon raqami YO'Q;
+            huquq yetmasa sababni aytadi.
+
+  - id: people-03
+    title: "Foydalanuvchi profili"
+    category: people
+    locale: uz
+    priority: 1
+    turns:
+      - user: "\"Abu Bakr\" haqida nima bilasan? Bio va umumiy chatlarimiz."
+        mode: auto
+        expect:
+          tools_any: [get_user_info]
+          max_tool_calls: 3
+          max_cost_usd: 0.06
+          keywords_none: ["+998"]
+          judge: "Javob profil ma'lumotini beradi; telefon raqami yo'q."
+
+  - id: people-04
+    title: "Eng faol yozuvchi"
+    category: people
+    locale: uz
+    priority: 1
+    chat_hint: "Honadoshlar"
+    turns:
+      - user: "Shu guruhda kim eng ko'p yozadi?"
+        mode: auto
+        expect:
+          tools_any: [get_chat_stats, list_members, get_recent_messages]
+          scope: chat
+          max_tool_calls: 4
+          max_cost_usd: 0.07
+          judge: "Javob aniq ismni raqam bilan beradi yoki ma'lumot yetmasligini aytadi."
+
+  - id: people-05
+    title: "@username bo'yicha"
+    category: people
+    locale: uz
+    priority: 2
+    turns:
+      - user: "@durov kim va men bilan umumiy chatlarimiz bormi?"
+        mode: auto
+        expect:
+          tools_any: [get_user_info]
+          max_tool_calls: 3
+          max_cost_usd: 0.06
+          keywords_none: ["+998"]
+          judge: "Agent username'ni to'g'ri hal qilgan yoki topilmaganini aytgan; raqam yo'q."

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -22,21 +23,57 @@ from app.config import get_settings
 from app.db.base import session_scope
 from app.db.models import ConversationMessage
 from app.llm import LLM, LLMError, Msg, Task
+from app.llm.router import background_tier
 from app.logging import get_logger
 
 log = get_logger(__name__)
 
 from app.services.prompts import JUDGE_PROMPT  # noqa: E402
 
+# Judge xarajati shu nomli (yashirin) suhbatga yoziladi — briefing bilan bir xil
+# uslub, `limits.daily_usage` faqat `conversation_messages` ni ko'radi.
+JUDGE_CONVERSATION = "Judge"
+
+
+#: `grounded` shundan past bo'lsa — javob "asossiz" deb yoziladi (`auto_grounded`).
+GROUNDED_OK = 3
+#: Degradatsiyalangan yugurishda `grounded` shu qiymatdan oshmaydi.
+DEGRADED_GROUNDED_CAP = 2
+DEGRADED_NOTE = "agent degraded"
+
+#: "Qidiruv yiqildi, o'zingiz qiling" javobining belgilari — uch tilda.
+_HOMEWORK_RE = re.compile(
+    r"sinxron|sync\b|qayta\s+urin|qayta\s+so'?ra|takrorlab\s+so'?ra|"
+    r"синхрониз|повтор(?:ите|и)\s+запрос|переформулир|"
+    r"re-?run|re-?sync|rephrase|restate|try\s+again",
+    re.I,
+)
+
+
+def looks_like_homework(answer: str) -> bool:
+    """Javob savolga emas, foydalanuvchining **ishiga** aylantirilganmi.
+
+    Faqat degradatsiya belgisi bilan birga ma'noga ega: sog'lom yugurishda
+    "sinxronlang" — halol maslahat, degradatsiyada esa agentning o'z
+    nosozligini foydalanuvchiga yuklash.
+    """
+    return bool(_HOMEWORK_RE.search(answer or ""))
+
 
 @dataclass(slots=True)
 class Judgement:
     relevance: int
     usefulness: int
-    grounded: bool
+    grounded: int
     note: str
     tokens_in: int = 0
     tokens_out: int = 0
+    model: str = ""
+    provider: str = ""
+    tokens_thinking: int = 0
+    tokens_cached: int = 0
+    #: Qaysi tier'da bajarildi (`standard`/`flex`) — narx shunga qarab.
+    tier: str = ""
 
 
 def _clamp(v: Any, lo: int = 1, hi: int = 5) -> int:
@@ -63,43 +100,170 @@ def parse_judgement(text: str) -> Judgement | None:
             return None
     if not isinstance(data, dict):
         return None
+    raw = data.get("grounded", 5)
+    # Eski (bool) shakl ham qabul qilinadi: `true` → 5, `false` → 1.
+    grounded = _clamp(5 if raw else 1) if isinstance(raw, bool) else _clamp(raw)
     return Judgement(
         relevance=_clamp(data.get("relevance")),
         usefulness=_clamp(data.get("usefulness")),
-        grounded=bool(data.get("grounded", True)),
+        grounded=grounded,
         note=str(data.get("note") or "")[:256],
     )
 
 
+def cap_for_degraded(j: Judgement, *, degraded: bool, answer: str) -> Judgement:
+    """Degradatsiyalangan yugurishda "sinxronlang" javobi yuqori baho olmaydi.
+
+    Nega kodda, promptda emas: judge arzon model (`Task.ROUTE`) va u javobning
+    **qanday yugurish**dan chiqqanini ko'rmaydi — degradatsiya belgisi bizda.
+    Prompt ham shu qoidani aytadi, lekin oxirgi so'z kodniki.
+    """
+    if not degraded or not looks_like_homework(answer):
+        return j
+    j.grounded = min(j.grounded, DEGRADED_GROUNDED_CAP)
+    if DEGRADED_NOTE not in j.note.lower():
+        j.note = f"{DEGRADED_NOTE}; {j.note}"[:256]
+    return j
+
+
 async def judge(
-    question: str, answer: str, *, had_context: bool, llm: LLM | None = None
+    question: str,
+    answer: str,
+    *,
+    had_context: bool,
+    had_tools: bool = True,
+    degraded: bool = False,
+    llm: LLM | None = None,
 ) -> Judgement | None:
     user = (
-        f"Context provided: {'yes' if had_context else 'no'}\n\n"
+        f"Context provided: {'yes' if had_context else 'no'}\n"
+        f"Tools available: {'yes' if had_tools else 'no'}\n"
+        f"Run degraded: {'yes' if degraded else 'no'}\n\n"
         f"<question>\n{question[:2000]}\n</question>\n\n"
         f"<answer>\n{answer[:4000]}\n</answer>"
     )
     try:
         res = await (llm or LLM()).chat(
-            Task.ROUTE, [Msg.system(JUDGE_PROMPT), Msg.user(user)], json_mode=True, max_tokens=200
+            Task.ROUTE,
+            [Msg.system(JUDGE_PROMPT), Msg.user(user)],
+            json_mode=True,
+            max_tokens=200,
+            # Javobdan keyin, fonda — foydalanuvchi kutmaydi: Flex (yarim narx).
+            tier=background_tier(),
         )
     except LLMError as exc:
         log.warning("eval.judge_failed", error=str(exc)[:200])
         return None
     j = parse_judgement(res.text)
     if j is not None:
+        j = cap_for_degraded(j, degraded=degraded, answer=answer)
         j.tokens_in, j.tokens_out = res.usage.tokens_in, res.usage.tokens_out
+        j.model, j.provider = res.model, res.provider
+        j.tokens_thinking = int(getattr(res.usage, "thinking_tokens", 0) or 0)
+        j.tokens_cached = int(getattr(res.usage, "cached_tokens", 0) or 0)
+        j.tier = str(getattr(res, "service_tier", "") or "")
     return j
 
 
-async def auto_evaluate(message_id: int, question: str, answer: str, *, had_context: bool) -> None:
+async def _record_judge_usage(db: AsyncSession, row: ConversationMessage, j: Judgement) -> None:
+    """Judge tokenlarini kunlik byudjet yo'liga qo'shadi (briefing bilan bir uslub).
+
+    Judge har javobdan keyin yugurardi, lekin tokeni hech qayerda saqlanmasdi —
+    ya'ni `limits.daily_usage` uni ko'rmasdi va real xarajat limitdan
+    yashiringan edi. Endi u **o'sha suhbatga** alohida `assistant` qatori
+    bo'lib tushadi (`task="judge"`), demak `daily_usage` uni sanaydi.
+    Kontent yozilmaydi: faqat qisqa izoh — chat kontenti takrorlanmaydi.
+    Qator **baholanayotgan suhbatga emas**, egasining "Judge" suhbatiga
+    tushadi: aks holda u chat transkriptida ko'rinib qolardi.
+    """
+    if not (j.tokens_in or j.tokens_out):
+        return
+    from sqlalchemy import select
+
+    from app.db.models import Conversation
+    from app.llm.pricing import estimate_cost
+
+    src = await db.get(Conversation, row.conversation_id)
+    if src is None:
+        return
+    conv = (
+        await db.execute(
+            select(Conversation)
+            .where(
+                Conversation.user_id == src.user_id,
+                Conversation.title == JUDGE_CONVERSATION,
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if conv is None:
+        conv = Conversation(
+            user_id=src.user_id, account_id=src.account_id, title=JUDGE_CONVERSATION
+        )
+        db.add(conv)
+        await db.flush()
+    cost = (
+        estimate_cost(
+            j.provider,
+            j.model,
+            j.tokens_in,
+            j.tokens_out,
+            tokens_thinking=j.tokens_thinking,
+            tokens_cached=j.tokens_cached,
+            tier=j.tier or "standard",
+        )
+        or 0.0
+    )
+    db.add(
+        ConversationMessage(
+            conversation_id=conv.id,
+            role="assistant",
+            content=f"[judge] {j.note[:200]}",
+            model=j.model,
+            provider=j.provider,
+            tokens_in=j.tokens_in,
+            tokens_out=j.tokens_out,
+            tokens_thinking=j.tokens_thinking,
+            tokens_cached=j.tokens_cached,
+            task="judge",
+            cost_usd=round(cost, 6) or None,
+        )
+    )
+    await db.flush()
+
+
+def run_flags(context: Any) -> dict[str, bool]:
+    """Assistant xabarining `context` metama'lumotidan judge bayroqlari.
+
+    `context` — `chat_service` yozgan `context_used` lug'ati (yoki `None`).
+    Ikkala kalit ham **ixtiyoriy**: eski qatorlarda ular yo'q, shuning uchun
+    `.get` bilan o'qiladi va yo'qligi "degradatsiya yo'q" deb o'qiladi.
+    Chaqiruv joyida `**run_flags(...)` bo'lib tarqatiladi.
+    """
+    if not isinstance(context, dict):
+        return {"had_tools": False, "degraded": False}
+    had_tools = bool(context.get("tool_calls")) or bool(context.get("tools_available"))
+    return {"had_tools": had_tools, "degraded": bool(context.get("degraded"))}
+
+
+async def auto_evaluate(
+    message_id: int,
+    question: str,
+    answer: str,
+    *,
+    had_context: bool,
+    had_tools: bool = True,
+    degraded: bool = False,
+) -> None:
     """Fon vazifasi: baholab `conversation_messages.auto_*` ga yozadi. Xato — jim log."""
     s = get_settings()
     if not s.web_auto_eval:
         return
     if s.web_auto_eval_sample < 1.0 and random.random() > s.web_auto_eval_sample:  # noqa: S311
         return
-    j = await judge(question, answer, had_context=had_context)
+    j = await judge(
+        question, answer, had_context=had_context, had_tools=had_tools, degraded=degraded
+    )
     if j is None:
         return
     async with session_scope() as db:
@@ -108,15 +272,16 @@ async def auto_evaluate(message_id: int, question: str, answer: str, *, had_cont
             return
         row.auto_relevance = j.relevance
         row.auto_usefulness = j.usefulness
-        row.auto_grounded = j.grounded
+        row.auto_grounded = j.grounded >= GROUNDED_OK
         row.auto_note = j.note
+        await _record_judge_usage(db, row, j)
     log.info(
         "eval.auto",
         message_id=message_id,
         relevance=j.relevance,
         usefulness=j.usefulness,
         grounded=j.grounded,
-        tokens=j.tokens_in + j.tokens_out,
+        tokens=j.tokens_in + j.tokens_out + j.tokens_thinking,
     )
 
 

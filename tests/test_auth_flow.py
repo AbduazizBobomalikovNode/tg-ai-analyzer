@@ -32,10 +32,28 @@ class SentCodeTypeApp:  # Telethon'dagi nom bilan bir xil — code_type shundan 
     length = 5
 
 
+class CodeTypeSms:  # `auth.CodeTypeSms` — resend qanday kelishini bildiradi
+    pass
+
+
+class SentCodeTypeSms:
+    length = 5
+
+
 class _Sent:
     phone_code_hash = "pch"
     timeout = 60
     type = SentCodeTypeApp()
+    next_type = CodeTypeSms()  # "qayta yuborilsa SMS bo'ladi"
+
+
+class _Resent:
+    """`auth.ResendCode` javobi: yangi hash, endi SMS, boshqa resend yo'q."""
+
+    phone_code_hash = "pch2"
+    timeout = 120
+    type = SentCodeTypeSms()
+    next_type = None
 
 
 class FakeClient:
@@ -57,6 +75,14 @@ class FakeClient:
         self.disconnected = False
         self.calls: list[tuple[str, bool]] = []  # (metod, auth_window ochiqmi)
         self.session = _Session()
+        self.resend_error: Exception | None = None
+
+    async def __call__(self, request: Any) -> Any:
+        """Xom TL so'rovlar (`auth.ResendCodeRequest`) shu yerdan o'tadi."""
+        self.calls.append((type(request).__name__, _auth_open.get()))
+        if self.resend_error:
+            raise self.resend_error
+        return _Resent()
 
     async def connect(self) -> None:
         self.connected = True
@@ -231,4 +257,186 @@ async def test_cancel_disconnects() -> None:
     store = _store(client)
     flow = await store.start("+998901234567")
     await store.cancel(flow.id)
+    assert client.disconnected and store.active_count == 0
+
+
+# ─── kodni qayta yuborish ────────────────────────────────────────────────────
+
+
+async def test_resend_switches_to_sms_and_updates_hash() -> None:
+    """Telegram kodni ilovaga tashlagan bo'lsa, resend SMS'ga o'tkazadi."""
+    client = FakeClient()
+    store = _store(client)
+    flow = await store.start("+998901234567")
+    assert flow.code_type == "app" and flow.next_type == "sms"
+
+    flow = await store.resend(flow.id)
+
+    assert flow.code_type == "sms"
+    assert flow.phone_code_hash == "pch2"  # yangi hash — eski kod bekor
+    assert flow.timeout == 120
+    assert flow.next_type == ""  # boshqa resend yo'q → UI tugmani yashiradi
+    # auth TL metodi auth_window() ichida chaqirilgan (allowlist talabi)
+    assert ("ResendCodeRequest", True) in client.calls
+
+
+async def test_resend_keeps_attempt_counter() -> None:
+    """Resend urinishlar hisobini nolga tushirmaydi — brute-force yo'li ochilmasin."""
+    client = FakeClient(sign_in_errors=[tg_errors.PhoneCodeInvalidError(request=None)] * 2)
+    store = _store(client)
+    flow = await store.start("+998901234567")
+    for _ in range(2):
+        with pytest.raises(AF.AuthError):
+            await store.submit_code(flow.id, "11111")
+    assert store.get(flow.id).attempts == 2
+
+    await store.resend(flow.id)
+
+    assert store.get(flow.id).attempts == 2
+
+
+async def test_resend_unavailable_when_telegram_says_no() -> None:
+    client = FakeClient()
+    store = _store(client)
+    flow = await store.start("+998901234567")
+    store.get(flow.id).next_type = ""  # Telegram next_type bermadi
+
+    with pytest.raises(AF.AuthError, match="resend_unavailable"):
+        await store.resend(flow.id)
+    assert not any(c[0] == "ResendCodeRequest" for c in client.calls)
+
+
+async def test_resend_maps_flood_error() -> None:
+    client = FakeClient()
+    store = _store(client)
+    flow = await store.start("+998901234567")
+    err = tg_errors.FloodWaitError(request=None)
+    err.seconds = 77
+    client.resend_error = err
+
+    with pytest.raises(AF.AuthError) as exc:
+        await store.resend(flow.id)
+    assert exc.value.code == "flood" and exc.value.retry_after == 77
+
+
+async def test_resend_rejected_on_wrong_step() -> None:
+    """2FA bosqichida kod qayta yuborilmaydi."""
+    client = FakeClient(needs_2fa=True)
+    store = _store(client)
+    flow = await store.start("+998901234567")
+    flow = await store.submit_code(flow.id, "12345")
+    assert flow.status is AF.FlowStatus.NEEDS_2FA
+
+    with pytest.raises(AF.AuthError, match="wrong_step"):
+        await store.resend(flow.id)
+
+
+# ─── QR login ────────────────────────────────────────────────────────────────
+
+
+class FakeQR:
+    """Telethon `QRLogin` o'rniga: `wait()` ssenariy bo'yicha javob beradi."""
+
+    def __init__(self, results: list[Any]) -> None:
+        self.url = "tg://login?token=AAAA"
+        self.expires = None  # `_qr_seconds_left` default'ga tushadi
+        self.results = list(results)
+        self.recreated = 0
+        self.waits: list[bool] = []  # har wait'da auth_window ochiqmi
+
+    # Imzo Telethon `QRLogin.wait(timeout=…)` bilan bir xil bo'lishi shart
+    async def wait(self, timeout: float | None = None) -> Any:  # noqa: ASYNC109
+        self.waits.append(_auth_open.get())
+        r = self.results.pop(0) if self.results else TimeoutError()
+        if isinstance(r, BaseException):
+            raise r
+        return r
+
+    async def recreate(self) -> None:
+        self.recreated += 1
+        self.url = f"tg://login?token=NEW{self.recreated}"
+
+
+def _qr_store(client: FakeClient, qr: FakeQR) -> AF.AuthFlowStore:
+    async def qr_login(*a: Any, **kw: Any) -> FakeQR:
+        client.calls.append(("qr_login", _auth_open.get()))
+        return qr
+
+    client.qr_login = qr_login  # type: ignore[attr-defined]
+    return _store(client)
+
+
+async def test_qr_login_success() -> None:
+    client = FakeClient()
+    qr = FakeQR([_Me()])
+    store = _qr_store(client, qr)
+
+    flow = await store.start_qr()
+    assert flow.status is AF.FlowStatus.QR_PENDING
+    assert flow.qr_url.startswith("tg://login?token=")
+    assert ("qr_login", True) in client.calls  # auth_window ichida
+
+    await flow.watcher  # fon vazifasi tugashini kutamiz
+    assert store.get(flow.id).status is AF.FlowStatus.DONE
+    result = store.take_result(flow.id)
+    assert result.tg_user_id == 777
+    assert qr.waits == [True]  # wait ham auth_window ichida
+
+
+async def test_qr_recreates_expired_token() -> None:
+    """Token eskirsa — yangi QR, oqim uzilmaydi."""
+    client = FakeClient()
+    qr = FakeQR([TimeoutError(), TimeoutError(), _Me()])
+    store = _qr_store(client, qr)
+
+    flow = await store.start_qr()
+    await flow.watcher
+
+    assert qr.recreated == 2
+    assert flow.qr_url == "tg://login?token=NEW2"  # UI yangi QR oladi
+    assert store.get(flow.id).status is AF.FlowStatus.DONE
+
+
+async def test_qr_then_2fa() -> None:
+    client = FakeClient()
+    qr = FakeQR([tg_errors.SessionPasswordNeededError(request=None)])
+    store = _qr_store(client, qr)
+
+    flow = await store.start_qr()
+    await flow.watcher
+    assert flow.status is AF.FlowStatus.NEEDS_2FA
+
+    flow = await store.submit_password(flow.id, "hunter2")
+    assert flow.status is AF.FlowStatus.DONE
+    assert ("check_password", True) in client.calls
+
+
+async def test_qr_watcher_survives_unexpected_error() -> None:
+    """Fon vazifasi jim o'lmaydi — xato oqimda ko'rinadi."""
+    client = FakeClient()
+    qr = FakeQR([RuntimeError("boom")])
+    store = _qr_store(client, qr)
+
+    flow = await store.start_qr()
+    await flow.watcher
+    assert flow.error == "RuntimeError"
+    assert flow.status is AF.FlowStatus.QR_PENDING  # holat o'zgarmadi
+
+
+async def test_qr_cancel_stops_watcher() -> None:
+    client = FakeClient()
+    qr = FakeQR([])  # doim TimeoutError → cheksiz aylanadi
+    store = _qr_store(client, qr)
+
+    flow = await store.start_qr()
+    watcher = flow.watcher
+    await store.cancel(flow.id)
+
+    # `cancel()` faqat so'rov yuboradi — task keyingi await'da uziladi
+    import asyncio
+    import contextlib
+
+    with contextlib.suppress(asyncio.CancelledError):
+        await watcher
+    assert watcher.cancelled()
     assert client.disconnected and store.active_count == 0

@@ -1,0 +1,66 @@
+version: 1
+# (h) Xulosa / digest. Kutilgan: raw xabar o'qish emas, `get_window_digest`
+# (kesh, arzon). "Bugun nima bo'ldi" — digest yoki recent.
+scenarios:
+  - id: digest-01
+    title: "Bu chatda bugun nima bo'ldi"
+    category: digest
+    locale: uz
+    priority: 1
+    chat_hint: "aiogram[uz]"
+    turns:
+      - user: "Bu chatda bugun nima bo'ldi?"
+        mode: auto
+        expect:
+          tools_any: [get_window_digest, get_recent_messages]
+          tools_none: [discover_channels, search_global]
+          scope: chat
+          max_tool_calls: 3
+          max_cost_usd: 0.07
+          judge: "Javob bugungi asosiy mavzularni ixcham beradi."
+
+  - id: digest-02
+    title: "Haftalik xulosa — bandlar bilan"
+    category: digest
+    locale: uz
+    priority: 1
+    chat_hint: "Node.js Uzbekistan"
+    turns:
+      - user: "Shu guruhning oxirgi 7 kunlik xulosasini bandlar bilan ber."
+        mode: auto
+        expect:
+          tools_any: [get_window_digest]
+          scope: chat
+          max_tool_calls: 3
+          max_cost_usd: 0.08
+          judge: "Javob bandlar (bullet) shaklida va mavzularga bo'lingan."
+
+  - id: digest-03
+    title: "Deep xulosa — bir oy"
+    category: digest
+    locale: uz
+    priority: 1
+    turns:
+      - user: "Oxirgi bir oyda mening chatlarimda eng muhim nima bo'ldi?"
+        mode: deep
+        expect:
+          max_cost_usd: 0.3
+          judge: >-
+            Javob mavzular bo'yicha tuzilgan, har da'voda sitata (#c..m..) bor
+            va "hamma xabarni ko'rdim" degan da'vo yo'q.
+
+  - id: digest-04
+    title: "Xulosani jadval qil (ru)"
+    category: digest
+    locale: ru
+    priority: 2
+    chat_hint: "aiogram[uz]"
+    turns:
+      - user: "Сделай сводку этого чата за неделю в виде таблицы: тема | сколько сообщений."
+        mode: auto
+        expect:
+          tools_any: [get_window_digest, get_chat_stats]
+          scope: chat
+          max_tool_calls: 3
+          max_cost_usd: 0.08
+          judge: "Ответ на русском и содержит таблицу в формате Markdown."

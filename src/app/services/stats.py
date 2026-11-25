@@ -10,8 +10,9 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import Integer, case, cast, func, select
+from sqlalchemy import BigInteger, Integer, case, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.db.models import (
     Account,
@@ -24,12 +25,34 @@ from app.db.models import (
     MessageEmbedding,
     MessageMetricSnapshot,
 )
+from app.services import avatars as AV
 
 CM = ConversationMessage
+
+#: `review` kartasidagi savol parchasi — karta ikki qatordan oshmasin.
+REVIEW_QUESTION_CHARS = 120
 
 
 def _since(days: int) -> datetime:
     return datetime.now(UTC) - timedelta(days=days)
+
+
+def _avatar_url(chat: Chat) -> str | None:
+    """Chat avatari — **faqat fayl mavjud bo'lsa** (aks holda UI inisiallarni chizadi).
+
+    `routers/chatdata.avatar_url` bilan bir xil mantiq; bu yerda takrorlanadi,
+    chunki servis qatlami web router'idan import qilmaydi (aylanma bog'liqlik).
+    """
+    if not chat.avatar_photo_id or not chat.avatar_mime:
+        return None
+    if not AV.path_for(chat.id, chat.avatar_mime).exists():
+        return None
+    return f"/api/accounts/{chat.account_id}/chats/{chat.id}/avatar?v={chat.avatar_photo_id}"
+
+
+def _mean(*values: float | int | None) -> float | None:
+    present = [float(v) for v in values if v is not None]
+    return round(sum(present) / len(present), 2) if present else None
 
 
 async def overview(session: AsyncSession, user_id: int, *, days: int = 30) -> dict[str, Any]:
@@ -45,6 +68,7 @@ async def overview(session: AsyncSession, user_id: int, *, days: int = 30) -> di
                 func.coalesce(func.sum(CM.cost_usd), 0.0),
                 func.avg(CM.latency_ms),
                 func.percentile_cont(0.5).within_group(CM.latency_ms),
+                func.percentile_cont(0.95).within_group(CM.latency_ms),
                 func.count(CM.rating),
                 func.sum(case((CM.rating == 1, 1), else_=0)),
                 func.sum(case((CM.rating == -1, 1), else_=0)),
@@ -65,6 +89,7 @@ async def overview(session: AsyncSession, user_id: int, *, days: int = 30) -> di
         cost,
         lat_avg,
         lat_p50,
+        lat_p95,
         n_rated,
         n_up,
         n_down,
@@ -86,6 +111,8 @@ async def overview(session: AsyncSession, user_id: int, *, days: int = 30) -> di
                 func.coalesce(func.sum(CM.cost_usd), 0.0),
                 func.sum(case((CM.rating == 1, 1), else_=0)),
                 func.sum(case((CM.rating == -1, 1), else_=0)),
+                func.percentile_cont(0.5).within_group(CM.latency_ms),
+                func.percentile_cont(0.95).within_group(CM.latency_ms),
             )
             .select_from(CM)
             .join(Conversation, Conversation.id == CM.conversation_id)
@@ -104,13 +131,53 @@ async def overview(session: AsyncSession, user_id: int, *, days: int = 30) -> di
             {
                 "day": d,
                 "requests": int(r[1]) if r else 0,
+                # ui/R4: sahifa "savol" deb yozadi — bir xil son, tushunarli nom.
+                "questions": int(r[1]) if r else 0,
                 "tokens_in": int(r[2]) if r else 0,
                 "tokens_out": int(r[3]) if r else 0,
                 "cost_usd": round(float(r[4]), 4) if r else 0.0,
                 "up": int(r[5] or 0) if r else 0,
                 "down": int(r[6] or 0) if r else 0,
+                "p50_ms": int(r[7]) if r and r[7] is not None else None,
+                "p95_ms": int(r[8]) if r and r[8] is not None else None,
             }
         )
+
+    # oldingi **teng uzunlikdagi** davr — KPI kartalaridagi delta uchun.
+    prev_since = _since(days * 2)
+    prev_row = (
+        await session.execute(
+            select(
+                func.count(CM.id),
+                func.coalesce(func.sum(CM.cost_usd), 0.0),
+                func.percentile_cont(0.5).within_group(CM.latency_ms),
+                func.percentile_cont(0.95).within_group(CM.latency_ms),
+                func.count(CM.rating),
+                func.sum(case((CM.rating == 1, 1), else_=0)),
+                func.sum(case((CM.rating == -1, 1), else_=0)),
+            )
+            .select_from(CM)
+            .join(Conversation, Conversation.id == CM.conversation_id)
+            .where(
+                Conversation.user_id == user_id,
+                CM.role == "assistant",
+                CM.created_at >= prev_since,
+                CM.created_at < since,
+            )
+        )
+    ).one()
+    prev_rated = int(prev_row[4] or 0)
+    prev_up = int(prev_row[5] or 0)
+    prev: dict[str, Any] = {
+        "questions": int(prev_row[0] or 0),
+        "cost_usd": round(float(prev_row[1] or 0), 4),
+        "p50_ms": int(prev_row[2]) if prev_row[2] is not None else None,
+        "p95_ms": int(prev_row[3]) if prev_row[3] is not None else None,
+        "rated": prev_rated,
+        "up": prev_up,
+        "down": int(prev_row[6] or 0),
+        "satisfaction": round(100 * prev_up / prev_rated, 1) if prev_rated else None,
+    }
 
     # model / provider bo'yicha
     model_rows = (
@@ -153,21 +220,62 @@ async def overview(session: AsyncSession, user_id: int, *, days: int = 30) -> di
         )
     ).all()
 
-    # top chatlar (kontekst sifatida)
+    # top chatlar (kontekst sifatida). `account_id`/`peer_id` ham olinadi —
+    # ular bo'lsa qator `/chats/{id}` ga havola bo'ladi va avatar ko'rinadi
+    # (agent rejimida kontekstda faqat sarlavha bor → havolasiz qator).
     chat_title = CM.context["title"].astext.label("chat_title")
+    ctx_account = cast(CM.context["account_id"].astext, BigInteger).label("ctx_account")
+    ctx_peer = cast(CM.context["peer_id"].astext, BigInteger).label("ctx_peer")
     top_chats = (
         await session.execute(
-            select(chat_title, func.count(CM.id), func.avg(CM.auto_usefulness))
+            select(
+                chat_title,
+                func.count(CM.id),
+                func.avg(CM.auto_usefulness),
+                ctx_account,
+                ctx_peer,
+            )
             .select_from(CM)
             .join(Conversation, Conversation.id == CM.conversation_id)
             .where(*base_where, chat_title.isnot(None))
-            .group_by(chat_title)
+            .group_by(chat_title, ctx_account, ctx_peer)
             .order_by(func.count(CM.id).desc())
             .limit(8)
         )
     ).all()
+    # (account_id, tg_peer_id) → Chat — bitta chegaralangan so'rovda.
+    pairs = {(int(r[3]), int(r[4])) for r in top_chats if r[3] is not None and r[4] is not None}
+    chat_by_pair: dict[tuple[int, int], Chat] = {}
+    if pairs:
+        rows = (
+            await session.execute(
+                select(Chat).where(
+                    Chat.account_id.in_({a for a, _ in pairs}),
+                    Chat.tg_peer_id.in_({p for _, p in pairs}),
+                )
+            )
+        ).scalars()
+        for c in rows:
+            if (c.account_id, c.tg_peer_id) in pairs:
+                chat_by_pair[(c.account_id, c.tg_peer_id)] = c
 
-    # ko'rib chiqish uchun: past baholangan javoblar
+    # ko'rib chiqish uchun: past baholangan javoblar.
+    # Kartada **savol** ko'rsatiladi (javob parchasi emas): foydalanuvchi
+    # "nima so'ragan edim" deb eslay olsin. Savol — shu suhbatdagi eng oxirgi
+    # `user` qatori (korrelyatsiyalangan subquery, limit 10 qator ustidan).
+    CMQ = aliased(ConversationMessage)
+    question_sub = (
+        select(CMQ.content)
+        .where(
+            CMQ.conversation_id == CM.conversation_id,
+            CMQ.role == "user",
+            CMQ.id < CM.id,
+        )
+        .order_by(CMQ.id.desc())
+        .limit(1)
+        .correlate(CM)
+        .scalar_subquery()
+    )
     low_rows = (
         await session.execute(
             select(
@@ -180,6 +288,8 @@ async def overview(session: AsyncSession, user_id: int, *, days: int = 30) -> di
                 CM.auto_note,
                 CM.created_at,
                 CM.model,
+                question_sub,
+                CM.auto_usefulness,
             )
             .select_from(CM)
             .join(Conversation, Conversation.id == CM.conversation_id)
@@ -207,9 +317,32 @@ async def overview(session: AsyncSession, user_id: int, *, days: int = 30) -> di
     ).all()
     actions = {str(r[0]): int(r[1]) for r in act_rows}
 
+    # Kunlik byudjet (`services/limits.py`) — KPI kartasidagi "X / Y" chizig'i.
+    from app.services import limits  # kech import: limits → web.security → aylanma
+
+    usage = await limits.daily_usage(session, user_id)
+
+    auto_avg = _mean(rel_avg, use_avg)
+
     return {
         "days": days,
         "actions": actions,
+        "prev": prev,
+        "latency": {
+            "p50_ms": int(lat_p50) if lat_p50 is not None else None,
+            "p95_ms": int(lat_p95) if lat_p95 is not None else None,
+        },
+        "quality": {
+            "up": int(n_up or 0),
+            "down": int(n_down or 0),
+            "rated": int(n_rated or 0),
+            "auto_avg": auto_avg,
+            "auto_n": int(n_auto or 0),
+        },
+        "budget": {
+            "daily_usd": round(float(usage.cost_limit), 4) if usage.cost_limit else None,
+            "used_usd": round(float(usage.cost_usd), 4),
+        },
         "totals": {
             "requests": int(n or 0),
             "tokens_in": int(tin or 0),
@@ -217,6 +350,8 @@ async def overview(session: AsyncSession, user_id: int, *, days: int = 30) -> di
             "cost_usd": round(float(cost or 0), 4),
             "latency_avg_ms": int(lat_avg or 0),
             "latency_p50_ms": int(lat_p50 or 0),
+            "latency_p95_ms": int(lat_p95 or 0),
+            "questions": int(n or 0),
             "rated": int(n_rated or 0),
             "up": int(n_up or 0),
             "down": int(n_down or 0),
@@ -227,15 +362,20 @@ async def overview(session: AsyncSession, user_id: int, *, days: int = 30) -> di
             "ungrounded": int(n_ungrounded or 0),
         },
         "daily": days_series,
+        # `series` — `daily` bilan bir xil qatorlar, sahifa shu nomni o'qiydi
+        # (eski kalitlar ham qoladi: tashqi iste'molchi buzilmasin).
+        "series": days_series,
         "models": [
             {
                 "provider": r[0],
                 "model": r[1],
                 "requests": int(r[2]),
+                "questions": int(r[2]),
                 "tokens_in": int(r[3]),
                 "tokens_out": int(r[4]),
                 "cost_usd": round(float(r[5] or 0), 4),
                 "latency_avg_ms": int(r[6] or 0),
+                "avg_ms": int(r[6] or 0),
                 "auto_relevance": round(float(r[7]), 2) if r[7] is not None else None,
             }
             for r in model_rows
@@ -250,28 +390,41 @@ async def overview(session: AsyncSession, user_id: int, *, days: int = 30) -> di
             }
             for r in strat_rows
         ],
-        "top_chats": [
-            {
-                "title": r[0],
-                "requests": int(r[1]),
-                "auto_usefulness": round(float(r[2]), 2) if r[2] is not None else None,
-            }
-            for r in top_chats
-        ],
+        "top_chats": [_top_chat_out(r, chat_by_pair) for r in top_chats],
         "review": [
             {
                 "id": int(r[0]),
+                "message_id": int(r[0]),
                 "conversation_id": int(r[1]),
                 "excerpt": (r[2] or "")[:200],
+                "question": (r[9] or "").strip()[:REVIEW_QUESTION_CHARS],
                 "rating": r[3],
                 "comment": r[4],
                 "auto_relevance": r[5],
+                "auto_score": _mean(r[5], r[10]),
                 "auto_note": r[6],
                 "created_at": r[7].isoformat() if r[7] else None,
                 "model": r[8],
             }
             for r in low_rows
         ],
+    }
+
+
+def _top_chat_out(row: Any, chat_by_pair: dict[tuple[int, int], Chat]) -> dict[str, Any]:
+    chat = (
+        chat_by_pair.get((int(row[3]), int(row[4])))
+        if row[3] is not None and row[4] is not None
+        else None
+    )
+    return {
+        "title": row[0],
+        "requests": int(row[1]),
+        "questions": int(row[1]),
+        "auto_usefulness": round(float(row[2]), 2) if row[2] is not None else None,
+        "chat_id": chat.id if chat else None,
+        "peer_id": int(row[4]) if row[4] is not None else None,
+        "avatar_url": _avatar_url(chat) if chat else None,
     }
 
 

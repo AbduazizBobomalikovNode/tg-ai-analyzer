@@ -1,0 +1,102 @@
+/* base.css — karkas darajasidagi asos va utilitalar (tokens.css dan keyin).
+ *
+ * Bu **reset emas** — reset `app.css` da qoladi. Bu yerda faqat: yangi
+ * karkas uchun kerak bo'lgan asos, a11y utilitalari va mantiqiy
+ * (logical) xossalarga tayangan kichik yordamchilar. Sinf tanlagichlar
+ * element tanlagichlardan kuchli, shuning uchun yuklash tartibi
+ * (base → app) bularni bosmaydi.
+ */
+
+/* ── Karkas: 100svh, xavfsiz zona, mantiqiy xossalar ─────────────────── */
+html.shell-root,
+html.shell-root body {
+  block-size: 100%;
+  overscroll-behavior-y: none;
+}
+
+.shell {
+  display: flex;
+  flex-direction: column;       /* ustun: [rail|kontent] qatori + pastki tab bar */
+  block-size: 100svh;           /* `svh` — mobil brauzer paneli ochilganda sakramaydi */
+  inline-size: 100%;
+  background: var(--bg);
+  color: var(--text);
+  padding-inline-start: var(--sa-left);
+  padding-inline-end: var(--sa-right);
+}
+
+/* ── Fokus halqasi — faqat klaviatura ────────────────────────────────── */
+:where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--r-xs, 6px);
+}
+:where(a, button, [tabindex]):focus:not(:focus-visible) { outline: none; }
+
+/* ── Teginish nishoni: 44px loyiha minimumi ──────────────────────────── */
+.tap,
+.icon-btn,
+.tabbar-item,
+.rail-item {
+  min-inline-size: var(--tap);
+  min-block-size: var(--tap);
+}
+
+/* ── Ekran o'quvchisi uchun ─────────────────────────────────────────── */
+.sr-only {
+  position: absolute;
+  inline-size: 1px; block-size: 1px;
+  margin: -1px; padding: 0; border: 0;
+  clip-path: inset(50%);
+  overflow: hidden;
+  white-space: nowrap;
+}
+.skip-link {
+  position: absolute;
+  inset-block-start: calc(var(--sa-top) + var(--s-2));
+  inset-inline-start: var(--s-2);
+  z-index: var(--z-toast);
+  padding: var(--s-2) var(--s-4);
+  background: var(--panel);
+  color: var(--accent-text);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm, 8px);
+  transform: translateY(-200%);
+}
+.skip-link:focus-visible { transform: none; }
+
+/* ── Uzun ro'yxatlar uchun: chizishni kechiktirish ───────────────────── */
+/* `contain-intrinsic-size` — o'rnini bosuvchi balandlik, aks holda skroll
+ * paneli sakraydi. 64px = ChatRow balandligi. */
+.cv-auto {
+  content-visibility: auto;
+  contain-intrinsic-size: 0 64px;
+}
+.cv-auto-lg { content-visibility: auto; contain-intrinsic-size: 0 220px; }
+
+/* ── Skroll konteynerlari (jadval, diagramma, kod) ───────────────────── */
+.scroll-x {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
+}
+
+/* ── O'lchov (AI javobi) ─────────────────────────────────────────────── */
+.measure { max-inline-size: var(--measure); margin-inline: auto; }
+.measure-narrow { max-inline-size: var(--measure-narrow); }
+
+/* ── Matn kesish ────────────────────────────────────────────────────── */
+.truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-inline-size: 0; }
+.clamp-2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.clamp-3 { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+
+/* ── Harakat: hamma animatsiya `prefers-reduced-motion` ostida ───────── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+    scroll-behavior: auto !important;
+  }
+  .skeleton::after { display: none; }
+}
